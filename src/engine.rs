@@ -60,6 +60,10 @@ impl Engine {
     ///
     /// The ID map uses a randomly seeded hash, so crafted order IDs cannot
     /// force collisions; matching results never depend on the seed.
+    ///
+    /// # Panics
+    /// Panics if `order_capacity` is zero or does not fit in a `u32` arena
+    /// index (`order_capacity >= u32::MAX`).
     pub fn new(order_capacity: usize) -> Self {
         Self {
             pool: OrderPool::new(order_capacity),
@@ -93,13 +97,14 @@ impl Engine {
     /// Returns the total resting quantity at `tick` on the requested `side`.
     ///
     /// This is an aggregate across every order queued at that price. An empty
-    /// price level returns zero. `tick` must be less than [`MAX_TICKS`].
+    /// price level, or a `tick` at or above [`MAX_TICKS`], returns zero.
     #[inline]
     pub fn depth_at(&self, side: Side, tick: u32) -> u64 {
-        match side {
-            Side::Buy => self.bid_levels[tick as usize].total_qty,
-            Side::Sell => self.ask_levels[tick as usize].total_qty,
-        }
+        let levels = match side {
+            Side::Buy => &self.bid_levels,
+            Side::Sell => &self.ask_levels,
+        };
+        levels.get(tick as usize).map_or(0, |level| level.total_qty)
     }
 
     /// Returns up to `levels` non-empty price ticks on `side`, best first.
@@ -111,9 +116,10 @@ impl Engine {
     /// order-processing path. Finding each level after the best one searches
     /// the intervening ticks; unlike [`best_bid`](Self::best_bid) and
     /// [`best_ask`](Self::best_ask), the work is not strictly proportional
-    /// only to the number of returned levels.
+    /// only to the number of returned levels. At most [`MAX_TICKS`] levels
+    /// exist, so a larger `levels` (e.g. `usize::MAX`) returns every level.
     pub fn depth_snapshot(&self, side: Side, levels: usize) -> Vec<(u32, u64)> {
-        let mut out = Vec::with_capacity(levels);
+        let mut out = Vec::with_capacity(levels.min(MAX_TICKS));
         match side {
             Side::Buy => {
                 let mut tick = self.bid_bitset.highest();
@@ -759,5 +765,20 @@ mod tests {
         assert_eq!(batch.len() + batch.dropped(), 82);
         assert_eq!(batch.len(), MAX_EVENTS_PER_CALL);
         assert!(batch.is_truncated());
+    }
+
+    #[test]
+    fn depth_queries_accept_any_input_without_panicking() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 5);
+        place(&mut engine, 2, Side::Sell, 200, 7);
+
+        assert_eq!(engine.depth_at(Side::Buy, MAX_TICKS as u32), 0);
+        assert_eq!(engine.depth_at(Side::Sell, u32::MAX), 0);
+        assert_eq!(engine.depth_snapshot(Side::Buy, usize::MAX), vec![(100, 5)]);
+        assert_eq!(
+            engine.depth_snapshot(Side::Sell, usize::MAX),
+            vec![(200, 7)]
+        );
     }
 }
