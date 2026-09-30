@@ -17,9 +17,9 @@ matching engine written in Rust.
   lookup for cancellation, fixed capacity, no allocation after construction.
 - **Matching engine core** (`src/engine.rs`) — price-time priority limit order
   book supporting full/partial fills, resting remainders, and multi-level
-  spread crossing; emits `OrderAccepted`, `Trade`, `OrderPartiallyFilled`,
-  `OrderFilled`, `OrderCancelled`, and `OrderRejected` events via an
-  allocation-free `EventBatch`.
+  spread crossing; streams `OrderAccepted`, `Trade`, `OrderPartiallyFilled`,
+  `OrderFilled`, `OrderCancelled`, and `OrderRejected` events to a
+  caller-supplied `EventSink`, so no execution report is ever dropped.
 - **Lock-free SPSC ring buffer** (`src/ringbuffer.rs`) — Disruptor-style input
   queue for feeding the engine from a producer thread.
 - **Memory-mapped binary WAL** (`src/wal.rs`) — fixed-width append-only log for
@@ -28,11 +28,16 @@ matching engine written in Rust.
 ## Usage
 
 ```rust
-use matching_engine::{Engine, Side};
+use matching_engine::{Engine, Event, Side};
 
 let mut engine = Engine::new(10_000); // pre-allocates all storage up front
-engine.process_order(1, Side::Sell, 100, 10); // resting ask
-let events = engine.process_order(2, Side::Buy, 100, 10); // crosses and fills
+// Any `EventSink` works: a `Vec<Event>`, a reusable `EventBatch`, or a closure.
+// Reusing a sink with enough capacity keeps every call allocation-free.
+let mut events: Vec<Event> = Vec::with_capacity(64);
+
+engine.process_order(1, Side::Sell, 100, 10, &mut events); // resting ask
+events.clear();
+engine.process_order(2, Side::Buy, 100, 10, &mut events); // crosses and fills
 for event in &events {
     println!("{event:?}");
 }

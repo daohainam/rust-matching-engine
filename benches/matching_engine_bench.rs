@@ -5,19 +5,23 @@
 //! `tests/zero_alloc.rs` test (which uses a counting global allocator) via
 //! `cargo test --test zero_alloc`.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use matching_engine::{Engine, Side};
+use criterion::{criterion_group, criterion_main, Criterion};
+use matching_engine::{Engine, EventBatch, Side};
+use std::hint::black_box;
 
 fn bench_resting_orders(c: &mut Criterion) {
     c.bench_function("place_10k_resting_orders", |b| {
         // `iter_batched` creates a fresh engine for each sample so the timed
         // closure measures order placement rather than engine initialization.
+        // The event batch is reused across calls, as a production caller would.
         b.iter_batched(
-            || Engine::new(20_000),
-            |mut engine| {
+            || (Engine::new(20_000), EventBatch::new()),
+            |(mut engine, mut events)| {
                 for i in 0..10_000u64 {
                     let tick = (i % 4000) as u32;
-                    black_box(engine.process_order(i, Side::Buy, tick, 10));
+                    events.clear();
+                    engine.process_order(i, Side::Buy, tick, 10, &mut events);
+                    black_box(&events);
                 }
                 engine
             },
@@ -33,14 +37,18 @@ fn bench_matching_throughput(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut engine = Engine::new(20_000);
+                let mut events = EventBatch::new();
                 for i in 0..5_000u64 {
-                    engine.process_order(i, Side::Sell, 100, 1);
+                    events.clear();
+                    engine.process_order(i, Side::Sell, 100, 1, &mut events);
                 }
-                engine
+                (engine, events)
             },
-            |mut engine| {
+            |(mut engine, mut events)| {
                 for i in 5_000..10_000u64 {
-                    black_box(engine.process_order(i, Side::Buy, 100, 1));
+                    events.clear();
+                    engine.process_order(i, Side::Buy, 100, 1, &mut events);
+                    black_box(&events);
                 }
                 engine
             },
@@ -56,15 +64,18 @@ fn bench_cancel(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut engine = Engine::new(20_000);
+                let mut events = EventBatch::new();
                 for i in 0..10_000u64 {
                     let tick = (i % 4000) as u32;
-                    engine.process_order(i, Side::Buy, tick, 10);
+                    events.clear();
+                    engine.process_order(i, Side::Buy, tick, 10, &mut events);
                 }
-                engine
+                (engine, events)
             },
-            |mut engine| {
+            |(mut engine, mut events)| {
                 for i in 0..10_000u64 {
-                    black_box(engine.cancel_order(i));
+                    events.clear();
+                    black_box(engine.cancel_order(i, &mut events));
                 }
                 engine
             },

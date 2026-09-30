@@ -10,16 +10,20 @@
 //!   `OrderId -> OrderIndex` lookups (cancellation).
 //! - [`engine`]: the single-threaded matching core tying the above
 //!   together (`process_order`, `cancel_order`).
-//! - [`events`]: allocation-free event batch describing what happened
-//!   during a single engine call.
+//! - [`events`]: execution report events, the [`EventSink`] trait the
+//!   engine streams them through, and a bounded allocation-free
+//!   [`EventBatch`] sink.
 //! - [`ringbuffer`]: lock-free SPSC ring buffer (Disruptor-style) input
 //!   queue for feeding the engine from a producer thread.
 //! - [`wal`]: memory-mapped binary write-ahead log for deterministic
 //!   replay.
 //!
 //! All data structures used on the hot path (`Engine::process_order`,
-//! `Engine::cancel_order`) are pre-allocated up front; no heap allocation,
-//! `malloc`, or `Box::new` occurs while processing an order.
+//! `Engine::cancel_order`) are pre-allocated up front; the engine performs
+//! no heap allocation, `malloc`, or `Box::new` while processing an order.
+//! Events are streamed to a caller-supplied [`EventSink`], so a call stays
+//! allocation-free as long as the sink does (for example a reused
+//! [`EventBatch`] or a `Vec<Event>` with reserved capacity).
 
 pub mod bitset;
 pub mod engine;
@@ -30,5 +34,5 @@ pub mod ringbuffer;
 pub mod wal;
 
 pub use engine::Engine;
-pub use events::{Event, EventBatch};
+pub use events::{Event, EventBatch, EventSink};
 pub use pool::Side;
