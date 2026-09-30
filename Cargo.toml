@@ -1,0 +1,30 @@
+[package]
+name = "matching_engine"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-low-latency, zero-allocation Central Limit Order Book (CLOB) matching engine"
+license = "MIT"
+
+[lib]
+name = "matching_engine"
+path = "src/lib.rs"
+
+[dependencies]
+memmap2 = "0.9"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "matching_engine_bench"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = true
