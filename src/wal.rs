@@ -112,8 +112,14 @@ impl WalRecord {
 /// remapped) only when that space is exhausted. Appending within the mapped
 /// capacity writes directly to the mapping; call [`flush`](Self::flush) or
 /// [`finalize`](Self::finalize) when the caller needs to request persistence.
+///
+/// [`finalize`](Self::finalize) unmaps the file before truncating it (Windows
+/// refuses to shrink a file with a mapped view open) and ends the writer's
+/// life: afterwards [`append`](Self::append) and [`flush`](Self::flush) return
+/// an error instead of re-mapping the file.
 pub struct WalWriter {
-    mmap: MmapMut,
+    /// `None` once the writer has been finalized.
+    mmap: Option<MmapMut>,
     file: std::fs::File,
     next_offset: usize,
     capacity_bytes: usize,
@@ -132,7 +138,7 @@ impl WalWriter {
         file.set_len(capacity_bytes as u64)?;
         let mmap = unsafe { MmapOptions::new().len(capacity_bytes).map_mut(&file)? };
         Ok(Self {
-            mmap,
+            mmap: Some(mmap),
             file,
             next_offset: 0,
             capacity_bytes,
@@ -143,12 +149,19 @@ impl WalWriter {
     ///
     /// Usually this copies into already-mapped memory. If the record would
     /// exceed the current mapping, the file is grown and remapped first.
+    ///
+    /// Returns an error if the writer has already been
+    /// [`finalize`](Self::finalize)d; the file is never re-mapped.
     pub fn append(&mut self, record: WalRecord) -> io::Result<()> {
+        if self.mmap.is_none() {
+            return Err(finalized_error());
+        }
         if self.next_offset + WAL_RECORD_SIZE > self.capacity_bytes {
             self.grow()?;
         }
         let bytes = record.to_bytes();
-        self.mmap[self.next_offset..self.next_offset + WAL_RECORD_SIZE].copy_from_slice(&bytes);
+        let mmap = self.mmap.as_mut().ok_or_else(finalized_error)?;
+        mmap[self.next_offset..self.next_offset + WAL_RECORD_SIZE].copy_from_slice(&bytes);
         self.next_offset += WAL_RECORD_SIZE;
         Ok(())
     }
@@ -157,22 +170,37 @@ impl WalWriter {
         // Doubling amortizes remapping: many appends can follow each growth.
         let new_capacity = (self.capacity_bytes * 2).max(WAL_RECORD_SIZE);
         self.file.set_len(new_capacity as u64)?;
-        self.mmap = unsafe { MmapOptions::new().len(new_capacity).map_mut(&self.file)? };
+        let mmap = unsafe { MmapOptions::new().len(new_capacity).map_mut(&self.file)? };
+        self.mmap = Some(mmap);
         self.capacity_bytes = new_capacity;
         Ok(())
     }
 
     /// Requests that dirty mapped pages be flushed to the backing file.
+    ///
+    /// Returns an error if the writer has already been
+    /// [`finalize`](Self::finalize)d.
     pub fn flush(&self) -> io::Result<()> {
-        self.mmap.flush()
+        self.mmap.as_ref().ok_or_else(finalized_error)?.flush()
     }
 
-    /// Flushes the mapping and truncates the file to the bytes actually written.
+    /// Flushes the mapping, unmaps it, and truncates the file to the bytes
+    /// actually written.
     ///
     /// This removes unused preallocated tail space, leaving only complete
-    /// appended records. Safe to call multiple times.
+    /// appended records. The mapping is dropped *before* the file is
+    /// truncated because Windows refuses to shrink a file that still has a
+    /// mapped view open. Safe to call multiple times: later calls only
+    /// re-apply the truncation. If the flush fails the writer stays usable
+    /// and `finalize` can be retried.
+    ///
+    /// After `finalize` the writer is closed: [`append`](Self::append) and
+    /// [`flush`](Self::flush) return an error.
     pub fn finalize(&mut self) -> io::Result<()> {
-        self.flush()?;
+        if let Some(mmap) = &self.mmap {
+            mmap.flush()?;
+        }
+        self.mmap = None;
         self.file.set_len(self.next_offset as u64)
     }
 
@@ -193,6 +221,10 @@ impl Drop for WalWriter {
         // when they need to observe and handle any I/O error.
         let _ = self.finalize();
     }
+}
+
+fn finalized_error() -> io::Error {
+    io::Error::other("WAL writer is already finalized")
 }
 
 /// Reads every complete record from a WAL file for replay.
@@ -251,6 +283,52 @@ mod tests {
         assert_eq!(records[2].order_id, 1);
         assert_eq!(records[9].order_id, 9);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn finalize_truncates_file_and_closes_writer() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("wal_finalize_test_{}.bin", std::process::id()));
+
+        let mut writer = WalWriter::create(&path, 16).unwrap();
+        for i in 0..3u64 {
+            writer
+                .append(WalRecord::new_order(i, Side::Buy, 100, 1, i))
+                .unwrap();
+        }
+
+        writer.finalize().unwrap();
+        let expected = (writer.len() * WAL_RECORD_SIZE) as u64;
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
+
+        // Idempotent, and the writer is closed afterwards.
+        writer.finalize().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
+        assert!(writer.flush().is_err());
+        assert!(writer.append(WalRecord::cancel(1, 3)).is_err());
+        assert_eq!(writer.len(), 3);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
+
+        drop(writer);
+        let records = read_all(&path).unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|r| r.kind == WalRecordKind::NewOrder as u8));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn finalize_on_empty_writer_leaves_empty_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("wal_empty_test_{}.bin", std::process::id()));
+
+        let mut writer = WalWriter::create(&path, 4).unwrap();
+        writer.finalize().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(read_all(&path).unwrap().is_empty());
+
+        drop(writer);
         let _ = std::fs::remove_file(&path);
     }
 }
