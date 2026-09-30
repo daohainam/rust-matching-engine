@@ -50,7 +50,8 @@ for event in &events {
 ## Testing & benchmarking
 
 ```sh
-cargo test                    # unit + integration tests
-cargo test --test zero_alloc  # verifies zero heap allocations on the hot path
-cargo bench                   # criterion micro-benchmarks
+cargo test                     # unit, integration, and doc tests
+cargo test --test zero_alloc   # verifies zero heap allocations on the hot path
+cargo test --test model_check  # differential test against a reference order book
+cargo bench                    # criterion micro-benchmarks
 ```
