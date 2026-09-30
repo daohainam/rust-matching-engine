@@ -123,7 +123,11 @@ impl Engine {
         qty: u64,
     ) -> EventBatch {
         let mut events = EventBatch::new();
-        if qty == 0 || (price_tick as usize) >= MAX_TICKS || self.id_map.get(order_id).is_some() {
+        if qty == 0
+            || order_id == crate::hashmap::RESERVED_KEY
+            || (price_tick as usize) >= MAX_TICKS
+            || self.id_map.get(order_id).is_some()
+        {
             events.push(Event::OrderRejected { order_id });
             return events;
         }
@@ -160,7 +164,7 @@ impl Engine {
         let filled = qty - remaining;
         if remaining == 0 {
             events.push(Event::OrderFilled { order_id });
-            self.sequence += 1;
+            self.sequence = self.sequence.wrapping_add(1);
             return events;
         }
 
@@ -178,22 +182,39 @@ impl Engine {
         {
             Some(idx) => {
                 self.id_map.insert(order_id, idx);
-                match side {
+                let rested = match side {
                     Side::Buy => {
-                        self.bid_levels[price_tick as usize].push_back(&mut self.pool, idx);
-                        self.bid_bitset.set(price_tick as usize);
+                        let ok =
+                            self.bid_levels[price_tick as usize].push_back(&mut self.pool, idx);
+                        if ok {
+                            self.bid_bitset.set(price_tick as usize);
+                        }
+                        ok
                     }
                     Side::Sell => {
-                        self.ask_levels[price_tick as usize].push_back(&mut self.pool, idx);
-                        self.ask_bitset.set(price_tick as usize);
+                        let ok =
+                            self.ask_levels[price_tick as usize].push_back(&mut self.pool, idx);
+                        if ok {
+                            self.ask_bitset.set(price_tick as usize);
+                        }
+                        ok
                     }
+                };
+                if !rested {
+                    // Adversarially large quantity would have overflowed
+                    // this level's `total_qty` accounting; back out the
+                    // allocation entirely rather than resting a corrupt
+                    // level.
+                    self.id_map.remove(order_id);
+                    self.pool.free(idx);
+                    events.push(Event::OrderRejected { order_id });
                 }
             }
             None => {
                 events.push(Event::OrderRejected { order_id });
             }
         }
-        self.sequence += 1;
+        self.sequence = self.sequence.wrapping_add(1);
         events
     }
 
@@ -553,5 +574,56 @@ mod tests {
             ]
         );
         assert_eq!(engine.live_order_count(), 2);
+    }
+
+    #[test]
+    fn rejects_reserved_order_id_sentinel() {
+        // u64::MAX is reserved internally as the flat hash map's "empty
+        // slot" sentinel; accepting it as a real order id would make the
+        // order permanently unreachable via cancel/duplicate-detection
+        // while still consuming a pool slot forever (a resource-exhaustion
+        // vector for an attacker who just picks order_id = u64::MAX).
+        let mut engine = Engine::new(16);
+        let events = engine.process_order(u64::MAX, Side::Buy, 100, 10);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderRejected { order_id: u64::MAX }]
+        );
+        assert_eq!(engine.live_order_count(), 0);
+        assert_eq!(engine.best_bid(), None);
+
+        // Cancelling the reserved id must also fail cleanly, never panic.
+        let (ok, events) = engine.cancel_order(u64::MAX);
+        assert!(!ok);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn rejects_resting_order_that_would_overflow_level_total_qty() {
+        // An adversarially large quantity must not silently wrap
+        // `PriceLevel::total_qty` around u64::MAX; the second order should
+        // be rejected and its pool slot released rather than corrupting the
+        // level's bookkeeping.
+        let mut engine = Engine::new(16);
+        let events = engine.process_order(1, Side::Buy, 100, u64::MAX);
+        assert_eq!(events.as_slice(), &[Event::OrderAccepted { order_id: 1 }]);
+        assert_eq!(engine.depth_at(Side::Buy, 100), u64::MAX);
+        assert_eq!(engine.live_order_count(), 1);
+
+        let events = engine.process_order(2, Side::Buy, 100, 1);
+        assert_eq!(
+            events.as_slice(),
+            &[
+                Event::OrderAccepted { order_id: 2 },
+                Event::OrderRejected { order_id: 2 }
+            ]
+        );
+        // The rejected order must not have left a dangling pool slot or
+        // corrupted the resting level's depth.
+        assert_eq!(engine.live_order_count(), 1);
+        assert_eq!(engine.depth_at(Side::Buy, 100), u64::MAX);
+
+        let (ok, _) = engine.cancel_order(2);
+        assert!(!ok, "rejected order must not have been inserted");
     }
 }

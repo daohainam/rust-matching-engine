@@ -7,7 +7,12 @@
 //! deletion so that lookups never need tombstones (which would otherwise
 //! degrade worst-case probe length over time).
 
-const EMPTY: u64 = u64::MAX;
+/// Sentinel key value reserved to mean "unoccupied slot". Callers must
+/// never insert a real key equal to this value; [`FlatHashMap::insert`]
+/// enforces this with a hard runtime assertion (not just in debug builds),
+/// since silently accepting it would corrupt lookups instead of panicking.
+pub const RESERVED_KEY: u64 = u64::MAX;
+const EMPTY: u64 = RESERVED_KEY;
 
 /// A single slot in the table. `key == EMPTY` means the slot is unoccupied.
 #[derive(Clone, Copy)]
@@ -77,7 +82,14 @@ impl FlatHashMap {
     /// Panics if the table is full (callers should size the table to the
     /// maximum number of concurrently-live orders up front).
     pub fn insert(&mut self, key: u64, value: u32) -> Option<u32> {
-        debug_assert!(key != EMPTY, "u64::MAX is reserved as the empty sentinel");
+        // This is a real (non-debug-only) check rather than `debug_assert!`:
+        // in release builds, a caller-supplied `key == EMPTY` would be
+        // silently indistinguishable from an unoccupied slot, making the
+        // inserted entry permanently unreachable via `get`/`remove` while
+        // still consuming a pool slot and inflating `len` without bound on
+        // repeated calls. Callers (e.g. `Engine`) must reject this reserved
+        // value before it ever reaches the map.
+        assert!(key != EMPTY, "u64::MAX is reserved as the empty sentinel");
         let mut idx = Self::hash(key) & self.mask;
         loop {
             let slot = &mut self.slots[idx];
@@ -208,5 +220,23 @@ mod tests {
                 assert_eq!(map.get(i), Some(i as u32 * 10));
             }
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "reserved as the empty sentinel")]
+    fn insert_rejects_reserved_sentinel_key_in_all_build_profiles() {
+        // This uses `assert!` (not `debug_assert!`) specifically so that
+        // this invariant holds in release builds too; silently accepting
+        // `RESERVED_KEY` would make the entry unreachable via `get` while
+        // still incrementing `len`, corrupting the map's bookkeeping.
+        let mut map = FlatHashMap::with_capacity(16);
+        map.insert(RESERVED_KEY, 0);
+    }
+
+    #[test]
+    fn get_and_remove_are_safe_for_reserved_sentinel_key() {
+        let mut map = FlatHashMap::with_capacity(16);
+        assert_eq!(map.get(RESERVED_KEY), None);
+        assert_eq!(map.remove(RESERVED_KEY), None);
     }
 }

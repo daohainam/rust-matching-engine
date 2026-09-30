@@ -166,9 +166,19 @@ impl PriceLevel {
 
 impl PriceLevel {
     /// Appends `idx` to the tail of this level's FIFO queue. O(1).
+    ///
+    /// Returns `false` (without modifying the queue or `pool`) if adding
+    /// this order's quantity would overflow `total_qty`. This guards
+    /// against adversarially large `qty` values accumulating past
+    /// `u64::MAX`; callers must free `idx` back to the pool instead of
+    /// resting it when this returns `false`.
     #[inline]
-    pub fn push_back(&mut self, pool: &mut OrderPool, idx: u32) {
+    #[must_use = "must reject/free the order if this returns false"]
+    pub fn push_back(&mut self, pool: &mut OrderPool, idx: u32) -> bool {
         let qty = pool.get(idx).remaining_qty;
+        let Some(new_total) = self.total_qty.checked_add(qty) else {
+            return false;
+        };
         if self.tail == NIL {
             self.head = idx;
             self.tail = idx;
@@ -182,7 +192,8 @@ impl PriceLevel {
             self.tail = idx;
         }
         self.count += 1;
-        self.total_qty += qty;
+        self.total_qty = new_total;
+        true
     }
 
     /// Removes `idx` from anywhere in this level's FIFO queue (head, middle,
@@ -207,7 +218,14 @@ impl PriceLevel {
         pool.get_mut(idx).prev_idx = NIL;
         pool.get_mut(idx).next_idx = NIL;
         self.count -= 1;
-        self.total_qty -= qty;
+        // Using `checked_sub().expect(..)` rather than a bare `-=` turns a
+        // broken bookkeeping invariant into a loud, deterministic panic in
+        // every build profile instead of a silently wrapped (and much
+        // larger) `total_qty` in release builds.
+        self.total_qty = self
+            .total_qty
+            .checked_sub(qty)
+            .expect("PriceLevel::total_qty underflow: bookkeeping invariant violated");
     }
 
     /// Reduces the resting quantity of the (head) order that was partially
@@ -215,8 +233,15 @@ impl PriceLevel {
     /// to this level.
     #[inline(always)]
     pub fn reduce_qty(&mut self, pool: &mut OrderPool, idx: u32, delta: u64) {
-        pool.get_mut(idx).remaining_qty -= delta;
-        self.total_qty -= delta;
+        let order = pool.get_mut(idx);
+        order.remaining_qty = order
+            .remaining_qty
+            .checked_sub(delta)
+            .expect("Order::remaining_qty underflow: fill exceeded resting quantity");
+        self.total_qty = self
+            .total_qty
+            .checked_sub(delta)
+            .expect("PriceLevel::total_qty underflow: bookkeeping invariant violated");
     }
 }
 
@@ -252,9 +277,9 @@ mod tests {
         let a = pool.allocate(1, Side::Buy, 0, 10, 0).unwrap();
         let b = pool.allocate(2, Side::Buy, 0, 10, 1).unwrap();
         let c = pool.allocate(3, Side::Buy, 0, 10, 2).unwrap();
-        level.push_back(&mut pool, a);
-        level.push_back(&mut pool, b);
-        level.push_back(&mut pool, c);
+        assert!(level.push_back(&mut pool, a));
+        assert!(level.push_back(&mut pool, b));
+        assert!(level.push_back(&mut pool, c));
         assert_eq!(level.count, 3);
         assert_eq!(level.total_qty, 30);
 
