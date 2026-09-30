@@ -15,8 +15,8 @@
 //!   [`EventBatch`] sink.
 //! - [`ringbuffer`]: lock-free SPSC ring buffer (Disruptor-style) input
 //!   queue with separate producer and consumer handles.
-//! - [`wal`]: memory-mapped binary write-ahead log for deterministic
-//!   replay.
+//! - [`wal`]: memory-mapped, checksummed binary write-ahead log for
+//!   deterministic replay.
 //!
 //! All data structures used on the hot path (`Engine::process_order`,
 //! `Engine::cancel_order`) are pre-allocated up front; the engine performs

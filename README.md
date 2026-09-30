@@ -23,8 +23,9 @@ matching engine written in Rust.
 - **Lock-free SPSC ring buffer** (`src/ringbuffer.rs`) — Disruptor-style input
   queue with separate, non-cloneable `Producer` / `Consumer` handles, so the
   single-producer/single-consumer contract is enforced by the type system.
-- **Memory-mapped binary WAL** (`src/wal.rs`) — fixed-width append-only log for
-  deterministic state replay.
+- **Memory-mapped binary WAL** (`src/wal.rs`) — versioned, little-endian,
+  checksummed fixed-width records; readers stop at the first torn or
+  unwritten record, and `WalWriter::open_append` resumes a log after a crash.
 
 ## Usage
 
