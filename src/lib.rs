@@ -14,7 +14,7 @@
 //!   engine streams them through, and a bounded allocation-free
 //!   [`EventBatch`] sink.
 //! - [`ringbuffer`]: lock-free SPSC ring buffer (Disruptor-style) input
-//!   queue for feeding the engine from a producer thread.
+//!   queue with separate producer and consumer handles.
 //! - [`wal`]: memory-mapped binary write-ahead log for deterministic
 //!   replay.
 //!

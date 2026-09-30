@@ -21,7 +21,8 @@ matching engine written in Rust.
   `OrderFilled`, `OrderCancelled`, and `OrderRejected` events to a
   caller-supplied `EventSink`, so no execution report is ever dropped.
 - **Lock-free SPSC ring buffer** (`src/ringbuffer.rs`) — Disruptor-style input
-  queue for feeding the engine from a producer thread.
+  queue with separate, non-cloneable `Producer` / `Consumer` handles, so the
+  single-producer/single-consumer contract is enforced by the type system.
 - **Memory-mapped binary WAL** (`src/wal.rs`) — fixed-width append-only log for
   deterministic state replay.
 
