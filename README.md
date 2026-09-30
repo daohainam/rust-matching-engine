@@ -14,7 +14,9 @@ matching engine written in Rust.
   bid / best ask resolution via hardware bit-scan (`tzcnt` / `lzcnt`) over a
   dense 4096-tick space.
 - **Flat open-addressing hash map** (`src/hashmap.rs`) — O(1) `OrderId -> OrderIndex`
-  lookup for cancellation, fixed capacity, no allocation after construction.
+  lookup for cancellation, fixed capacity, no allocation after construction,
+  and a random per-instance hash seed so crafted order IDs cannot force
+  collisions.
 - **Matching engine core** (`src/engine.rs`) — price-time priority limit order
   book supporting full/partial fills, resting remainders, and multi-level
   spread crossing; streams `OrderAccepted`, `Trade`, `OrderPartiallyFilled`,

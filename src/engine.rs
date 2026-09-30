@@ -57,6 +57,9 @@ impl Engine {
     /// here. This moves their allocation cost to setup instead of order
     /// processing. A resting order consumes one arena slot regardless of its
     /// quantity; fully matched incoming orders do not need a slot.
+    ///
+    /// The ID map uses a randomly seeded hash, so crafted order IDs cannot
+    /// force collisions; matching results never depend on the seed.
     pub fn new(order_capacity: usize) -> Self {
         Self {
             pool: OrderPool::new(order_capacity),
