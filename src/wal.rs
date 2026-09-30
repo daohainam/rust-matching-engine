@@ -6,6 +6,11 @@
 //! Because the record layout is fixed-width, no serialization allocation is
 //! required and replay can seek by simple arithmetic (`offset = index *
 //! size_of::<WalRecord>()`).
+//!
+//! This is a compact, implementation-specific log format: raw record bytes
+//! use the target's `repr(C)` layout and native integer byte order. Replaying
+//! on a different architecture or with a changed record definition requires
+//! an explicit format migration or field-by-field encoding.
 
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::OpenOptions;
@@ -18,27 +23,41 @@ use crate::pool::Side;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WalRecordKind {
+    /// A request to submit a new limit order.
     NewOrder = 1,
+    /// A request to cancel an existing order.
     Cancel = 2,
 }
 
-/// Fixed-width binary WAL record. `repr(C)` keeps the layout stable across
-/// compilations so that log files can be replayed deterministically.
+/// Fixed-layout record stored in the WAL.
+///
+/// `repr(C)` fixes field ordering and alignment according to the target's C
+/// ABI. The record is written as raw bytes, so this layout is not by itself a
+/// portable, versioned on-disk schema.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct WalRecord {
+    /// Numeric discriminant corresponding to [`WalRecordKind`].
     pub kind: u8,
+    /// Side encoding for a new order: `0` for buy, `1` for sell.
     pub side: u8,
+    /// Reserved bytes that keep the leading fields aligned.
     pub _padding: [u8; 6],
+    /// Identifier supplied by the caller.
     pub order_id: u64,
+    /// Dense integer price tick; unused by cancellation records.
     pub price_tick: u32,
+    /// Requested order quantity; unused by cancellation records.
     pub qty: u64,
+    /// Caller-provided sequence number for deterministic request ordering.
     pub sequence: u64,
 }
 
+/// Size in bytes of one record on the current compilation target.
 pub const WAL_RECORD_SIZE: usize = size_of::<WalRecord>();
 
 impl WalRecord {
+    /// Encodes the fields of a new-order request into one record.
     pub fn new_order(order_id: u64, side: Side, price_tick: u32, qty: u64, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::NewOrder as u8,
@@ -54,6 +73,7 @@ impl WalRecord {
         }
     }
 
+    /// Encodes a cancellation request; fields not used by cancellation are zeroed.
     pub fn cancel(order_id: u64, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::Cancel as u8,
@@ -68,6 +88,8 @@ impl WalRecord {
 
     #[inline]
     fn to_bytes(self) -> [u8; WAL_RECORD_SIZE] {
+        // The WAL stores the record's in-memory representation directly; it
+        // does not perform per-field endian conversion or schema versioning.
         // SAFETY: WalRecord is `repr(C)`, `Copy`, and contains only plain
         // integer fields, so reinterpreting it as bytes is sound.
         unsafe { std::mem::transmute_copy(&self) }
@@ -84,9 +106,12 @@ impl WalRecord {
     }
 }
 
-/// Append-only memory-mapped WAL writer. The backing file is pre-sized to
-/// `capacity_records` and grown (remapped) only if that capacity is
-/// exceeded, keeping the steady-state append path allocation-free.
+/// Append-only memory-mapped WAL writer.
+///
+/// The backing file is pre-sized to `capacity_records` and grown (then
+/// remapped) only when that space is exhausted. Appending within the mapped
+/// capacity writes directly to the mapping; call [`flush`](Self::flush) or
+/// [`finalize`](Self::finalize) when the caller needs to request persistence.
 pub struct WalWriter {
     mmap: MmapMut,
     file: std::fs::File,
@@ -95,6 +120,7 @@ pub struct WalWriter {
 }
 
 impl WalWriter {
+    /// Creates or truncates a WAL file and reserves room for at least one record.
     pub fn create<P: AsRef<Path>>(path: P, capacity_records: usize) -> io::Result<Self> {
         let capacity_bytes = capacity_records.max(1) * WAL_RECORD_SIZE;
         let file = OpenOptions::new()
@@ -113,9 +139,10 @@ impl WalWriter {
         })
     }
 
-    /// Appends `record` to the log. O(1); only touches already-mapped
-    /// memory unless the pre-sized capacity has been exhausted, in which
-    /// case the backing file is grown and remapped.
+    /// Appends `record` at the next byte offset in the log.
+    ///
+    /// Usually this copies into already-mapped memory. If the record would
+    /// exceed the current mapping, the file is grown and remapped first.
     pub fn append(&mut self, record: WalRecord) -> io::Result<()> {
         if self.next_offset + WAL_RECORD_SIZE > self.capacity_bytes {
             self.grow()?;
@@ -127,6 +154,7 @@ impl WalWriter {
     }
 
     fn grow(&mut self) -> io::Result<()> {
+        // Doubling amortizes remapping: many appends can follow each growth.
         let new_capacity = (self.capacity_bytes * 2).max(WAL_RECORD_SIZE);
         self.file.set_len(new_capacity as u64)?;
         self.mmap = unsafe { MmapOptions::new().len(new_capacity).map_mut(&self.file)? };
@@ -134,14 +162,15 @@ impl WalWriter {
         Ok(())
     }
 
-    /// Flushes pending writes to disk.
+    /// Requests that dirty mapped pages be flushed to the backing file.
     pub fn flush(&self) -> io::Result<()> {
         self.mmap.flush()
     }
 
-    /// Flushes and truncates the backing file down to the number of bytes
-    /// actually written, discarding any pre-allocated-but-unused tail
-    /// capacity. Safe to call multiple times.
+    /// Flushes the mapping and truncates the file to the bytes actually written.
+    ///
+    /// This removes unused preallocated tail space, leaving only complete
+    /// appended records. Safe to call multiple times.
     pub fn finalize(&mut self) -> io::Result<()> {
         self.flush()?;
         self.file.set_len(self.next_offset as u64)
@@ -160,13 +189,17 @@ impl WalWriter {
 
 impl Drop for WalWriter {
     fn drop(&mut self) {
-        // Best-effort: reclaim any pre-allocated-but-unwritten tail so that
-        // `read_all` sees exactly the records that were appended.
+        // Best-effort finalization: callers can call `finalize` themselves
+        // when they need to observe and handle any I/O error.
         let _ = self.finalize();
     }
 }
 
-/// Reads back all records from a WAL file for deterministic replay.
+/// Reads every complete record from a WAL file for replay.
+///
+/// Any trailing bytes that do not make up a full record are ignored. This
+/// function decodes the target-specific raw layout; it does not validate the
+/// record kind or translate between format versions.
 pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
     let file = OpenOptions::new().read(true).open(path)?;
     let len = file.metadata()?.len() as usize;

@@ -21,9 +21,10 @@ struct Slot {
     value: u32,
 }
 
-/// Fixed-capacity open-addressing hash map from `u64` order id to `u32`
-/// order index. All storage is pre-allocated in `new()`; no further
-/// allocations occur.
+/// Fixed-capacity open-addressing hash map from `u64` order ID to `u32`
+/// order index. All storage is pre-allocated in `new()`; the table never
+/// resizes, so callers must choose a hint large enough for the maximum live
+/// entry count and keep at least one slot empty for probe termination.
 pub struct FlatHashMap {
     slots: Box<[Slot]>,
     mask: usize,
@@ -31,9 +32,12 @@ pub struct FlatHashMap {
 }
 
 impl FlatHashMap {
-    /// Creates a table capable of holding at least `capacity_hint` entries.
-    /// The allocation happens once, up-front; `insert`/`remove`/`get` never
-    /// allocate afterwards.
+    /// Creates a table with room for at least `capacity_hint` entries.
+    ///
+    /// The physical slot count is the next power of two at or above twice
+    /// `max(capacity_hint, 16)`. Keeping the expected load at or below one
+    /// half leaves empty slots that stop unsuccessful linear probes. The
+    /// allocation happens once; map operations never resize or allocate.
     pub fn with_capacity(capacity_hint: usize) -> Self {
         let capacity = (capacity_hint.max(16) * 2).next_power_of_two();
         let slots = vec![
@@ -53,7 +57,8 @@ impl FlatHashMap {
 
     #[inline(always)]
     fn hash(key: u64) -> usize {
-        // splitmix64 finalizer: cheap, well-distributed avalanche.
+        // SplitMix64's finalizer avalanches nearby IDs across the machine
+        // word; the caller then masks the low bits to select a table slot.
         let mut z = key.wrapping_add(0x9E3779B97F4A7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
@@ -75,12 +80,17 @@ impl FlatHashMap {
         self.mask + 1
     }
 
-    /// Inserts `key -> value`. Returns the previous value if `key` was
-    /// already present. O(1) amortized.
+    /// Inserts `key -> value`, returning the replaced value if `key` exists.
+    ///
+    /// Collisions are resolved by checking consecutive slots until an empty
+    /// slot or matching key is found. This is expected O(1) with a suitable
+    /// load factor, but can take O(capacity) in the worst case. The table does
+    /// not grow, and callers must leave at least one slot empty so a missing
+    /// key has a stopping point.
     ///
     /// # Panics
-    /// Panics if the table is full (callers should size the table to the
-    /// maximum number of concurrently-live orders up front).
+    /// Panics if `key` is [`RESERVED_KEY`], because that value marks empty
+    /// slots and cannot also represent a stored key.
     pub fn insert(&mut self, key: u64, value: u32) -> Option<u32> {
         // This is a real (non-debug-only) check rather than `debug_assert!`:
         // in release builds, a caller-supplied `key == EMPTY` would be
@@ -108,7 +118,11 @@ impl FlatHashMap {
         }
     }
 
-    /// Looks up `key`. O(1) worst-case (amortized over well-distributed keys).
+    /// Looks up `key` using linear probing.
+    ///
+    /// Expected O(1) for a suitably sized table; worst-case O(capacity) when
+    /// many slots must be examined. As with insertion, the table must retain
+    /// an empty slot so a missing key's probe can terminate.
     #[inline]
     pub fn get(&self, key: u64) -> Option<u32> {
         let mut idx = Self::hash(key) & self.mask;
@@ -125,7 +139,8 @@ impl FlatHashMap {
     }
 
     /// Removes `key`, returning its value if present. Uses backward-shift
-    /// deletion to keep probe chains short without tombstones.
+    /// deletion to keep probe chains short without tombstones. The scan and
+    /// any shifts take O(capacity) in the worst case.
     pub fn remove(&mut self, key: u64) -> Option<u32> {
         let mut idx = Self::hash(key) & self.mask;
         loop {
@@ -152,6 +167,9 @@ impl FlatHashMap {
                 return;
             }
             let ideal = Self::hash(slot.key) & self.mask;
+            // A key displaced from its ideal slot must remain reachable from
+            // that slot. Move it into the hole only when its probe path crosses
+            // the hole; otherwise leave the gap for a later search to stop at.
             // If the slot's ideal position is not strictly between `hole`
             // (exclusive) and `probe` (inclusive) in probe order, it can be
             // moved back into the hole.

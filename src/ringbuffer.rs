@@ -5,16 +5,25 @@
 //! Capacity is fixed at construction (power of two) and the backing storage
 //! is allocated once up front; `push`/`pop` never allocate. Producer and
 //! consumer cursors are cache-line padded to avoid false sharing.
+//!
+//! The API is safe to use concurrently only with exactly one producer calling
+//! `push` and one consumer calling `pop`. Rust's type system does not assign
+//! those roles, so callers must not clone/share the buffer among multiple
+//! producers or multiple consumers.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[repr(align(64))]
+/// Adds padding so frequently written cursors are less likely to share a
+/// cache line and invalidate each other's cache entries.
 struct CachePadded<T>(T);
 
 /// A fixed-capacity SPSC ring buffer. `T` must be `Copy` so that slots can
 /// be overwritten without running destructors on the hot path.
 pub struct SpscRingBuffer<T: Copy> {
+    /// `UnsafeCell` allows the producer and consumer to mutate distinct slots
+    /// through shared references; cursor atomics coordinate slot ownership.
     buffer: Box<[UnsafeCell<Option<T>>]>,
     mask: usize,
     head: CachePadded<AtomicUsize>, // consumer cursor
@@ -25,6 +34,10 @@ unsafe impl<T: Copy + Send> Sync for SpscRingBuffer<T> {}
 unsafe impl<T: Copy + Send> Send for SpscRingBuffer<T> {}
 
 impl<T: Copy> SpscRingBuffer<T> {
+    /// Creates a ring buffer with capacity rounded up to the next power of two.
+    ///
+    /// `capacity` must be greater than zero. A power-of-two size lets each
+    /// monotonically increasing cursor wrap to a physical slot with a bitmask.
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.next_power_of_two();
         let mut buffer = Vec::with_capacity(capacity);
@@ -44,17 +57,24 @@ impl<T: Copy> SpscRingBuffer<T> {
         self.mask + 1
     }
 
-    /// Producer-only. Attempts to push `value`; returns `Err(value)` if the
-    /// buffer is full. O(1), lock-free, allocation-free.
+    /// Producer-only. Attempts to append `value`; returns `Err(value)` if full.
+    ///
+    /// The producer compares its tail cursor with the consumer's head cursor
+    /// to detect a full ring. The low bits of the tail choose a slot; after
+    /// writing it, a `Release` store publishes the new tail to the consumer.
+    /// O(1), lock-free, and allocation-free.
     pub fn push(&self, value: T) -> Result<(), T> {
         let tail = self.tail.0.load(Ordering::Relaxed);
+        // Acquire pairs with the consumer's Release store to head, so a slot
+        // is not reused until the consumer has finished taking its value.
         let head = self.head.0.load(Ordering::Acquire);
         if tail.wrapping_sub(head) >= self.capacity() {
             return Err(value);
         }
         let idx = tail & self.mask;
-        // SAFETY: single producer, and this slot has already been consumed
-        // (or never used) because tail - head < capacity.
+        // SAFETY: under the single-producer/single-consumer contract, this
+        // slot has been consumed (or never used) because tail - head is below
+        // capacity. The subsequent Release store publishes the completed write.
         unsafe {
             *self.buffer[idx].get() = Some(value);
         }
@@ -62,27 +82,41 @@ impl<T: Copy> SpscRingBuffer<T> {
         Ok(())
     }
 
-    /// Consumer-only. Attempts to pop the oldest value; returns `None` if
-    /// the buffer is empty. O(1), lock-free, allocation-free.
+    /// Consumer-only. Removes the oldest value, or returns `None` if empty.
+    ///
+    /// The consumer's `Acquire` load of the tail observes the producer's
+    /// published slot contents. After taking the value, a `Release` store to
+    /// the head lets the producer safely reuse that slot. O(1), lock-free,
+    /// and allocation-free.
     pub fn pop(&self) -> Option<T> {
         let head = self.head.0.load(Ordering::Relaxed);
+        // Acquire pairs with push's Release store, making the slot write
+        // visible before the consumer reads it.
         let tail = self.tail.0.load(Ordering::Acquire);
         if head == tail {
             return None;
         }
         let idx = head & self.mask;
-        // SAFETY: single consumer, and this slot was published by the
-        // producer because head != tail.
+        // SAFETY: the single consumer owns this slot because head != tail and
+        // the Acquire load observed the producer's published tail.
         let value = unsafe { (*self.buffer[idx].get()).take() };
+        // Release the slot only after removing its value, so the producer's
+        // Acquire load of head cannot authorize an early overwrite.
         self.head.0.store(head.wrapping_add(1), Ordering::Release);
         value
     }
 
+    /// Returns whether a cursor snapshot currently reports no queued values.
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.head.0.load(Ordering::Acquire) == self.tail.0.load(Ordering::Acquire)
     }
 
+    /// Returns the queued-value count from an atomic cursor snapshot.
+    ///
+    /// While producer and consumer are active, the result can become stale
+    /// immediately; use it for observation, not as a reservation or a signal
+    /// that the next `push`/`pop` must succeed.
     #[inline(always)]
     pub fn len(&self) -> usize {
         let tail = self.tail.0.load(Ordering::Acquire);

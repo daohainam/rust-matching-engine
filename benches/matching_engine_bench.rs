@@ -10,6 +10,8 @@ use matching_engine::{Engine, Side};
 
 fn bench_resting_orders(c: &mut Criterion) {
     c.bench_function("place_10k_resting_orders", |b| {
+        // `iter_batched` creates a fresh engine for each sample so the timed
+        // closure measures order placement rather than engine initialization.
         b.iter_batched(
             || Engine::new(20_000),
             |mut engine| {
@@ -26,6 +28,8 @@ fn bench_resting_orders(c: &mut Criterion) {
 
 fn bench_matching_throughput(c: &mut Criterion) {
     c.bench_function("cross_spread_matching", |b| {
+        // Seed the ask queue before each sample; the timed closure consumes
+        // those makers with one-unit takers at the same price.
         b.iter_batched(
             || {
                 let mut engine = Engine::new(20_000);
@@ -47,6 +51,8 @@ fn bench_matching_throughput(c: &mut Criterion) {
 
 fn bench_cancel(c: &mut Criterion) {
     c.bench_function("cancel_orders", |b| {
+        // Build the resting book outside the timed closure, then measure the
+        // cost of looking up and unlinking every order by ID.
         b.iter_batched(
             || {
                 let mut engine = Engine::new(20_000);

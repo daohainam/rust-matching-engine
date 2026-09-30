@@ -12,9 +12,12 @@
 /// keeps the code branch-free and cache-friendly.
 pub const NIL: u32 = u32::MAX;
 
+/// The side of the book on which an order rests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
+    /// A bid: willing to buy at this tick or a lower price.
     Buy,
+    /// An ask: willing to sell at this tick or a higher price.
     Sell,
 }
 
@@ -24,13 +27,21 @@ pub enum Side {
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Order {
+    /// User-provided identifier, unique among live orders.
     pub order_id: u64,
+    /// Quantity not yet executed.
     pub remaining_qty: u64,
+    /// Engine-assigned arrival sequence retained as order metadata.
     pub sequence: u64,
+    /// Dense integer price level used to index the book's arrays.
     pub price_tick: u32,
+    /// Whether this order belongs to the bid or ask side.
     pub side: Side,
+    /// Arena index of the next order in this price level's FIFO queue.
     pub next_idx: u32,
+    /// Arena index of the previous order in this price level's FIFO queue.
     pub prev_idx: u32,
+    /// Whether this arena slot currently contains a live order.
     pub in_use: bool,
 }
 
@@ -61,6 +72,10 @@ pub struct OrderPool {
 }
 
 impl OrderPool {
+    /// Allocates the arena and initializes every slot as free.
+    ///
+    /// `capacity` must be positive and fit in a `u32` index (excluding
+    /// [`NIL`], which is reserved to mean "no linked order").
     pub fn new(capacity: usize) -> Self {
         assert!(capacity > 0 && capacity < NIL as usize, "invalid capacity");
         let orders = vec![Order::empty(); capacity].into_boxed_slice();
@@ -101,6 +116,8 @@ impl OrderPool {
         if self.free_top == 0 {
             return None;
         }
+        // Pop one free index, then fully initialize it before exposing it as
+        // a live order. The free-list itself is a stack, so this is O(1).
         self.free_top -= 1;
         let idx = self.free_stack[self.free_top];
         let order = &mut self.orders[idx as usize];
@@ -120,15 +137,21 @@ impl OrderPool {
     pub fn free(&mut self, idx: u32) {
         debug_assert!(self.orders[idx as usize].in_use);
         self.orders[idx as usize].in_use = false;
+        // Push the slot back so the next allocation can reuse it.
         self.free_stack[self.free_top] = idx;
         self.free_top += 1;
     }
 
+    /// Returns the order stored at `idx`; `idx` must be a valid arena index.
     #[inline(always)]
     pub fn get(&self, idx: u32) -> &Order {
         &self.orders[idx as usize]
     }
 
+    /// Returns mutable access to the order stored at `idx`.
+    ///
+    /// The caller must preserve the pool and price-level bookkeeping
+    /// invariants when changing fields used by the book.
     #[inline(always)]
     pub fn get_mut(&mut self, idx: u32) -> &mut Order {
         &mut self.orders[idx as usize]
@@ -139,7 +162,9 @@ impl OrderPool {
 /// price tick.
 #[derive(Debug, Clone, Copy)]
 pub struct PriceLevel {
+    /// Oldest order at this price, or [`NIL`] when the queue is empty.
     pub head: u32,
+    /// Newest order at this price, or [`NIL`] when the queue is empty.
     pub tail: u32,
     /// Number of orders resting at this level; lets callers detect when a
     /// level has drained without walking the list.
@@ -149,6 +174,7 @@ pub struct PriceLevel {
 }
 
 impl PriceLevel {
+    /// Creates an empty queue with no resting quantity.
     pub const fn empty() -> Self {
         Self {
             head: NIL,
@@ -158,6 +184,7 @@ impl PriceLevel {
         }
     }
 
+    /// Checks the queue's head sentinel rather than traversing its orders.
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.head == NIL
@@ -205,6 +232,8 @@ impl PriceLevel {
             let order = pool.get(idx);
             (order.prev_idx, order.next_idx)
         };
+        // Join the removed node's neighbors together, updating an endpoint
+        // when the node was the head or tail. No traversal is needed.
         if prev != NIL {
             pool.get_mut(prev).next_idx = next;
         } else {
@@ -230,7 +259,7 @@ impl PriceLevel {
 
     /// Reduces the resting quantity of the (head) order that was partially
     /// filled by `delta`. Caller is responsible for verifying `idx` belongs
-    /// to this level.
+    /// to this level and that `delta` does not exceed the order's remainder.
     #[inline(always)]
     pub fn reduce_qty(&mut self, pool: &mut OrderPool, idx: u32, delta: u64) {
         let order = pool.get_mut(idx);

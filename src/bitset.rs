@@ -28,6 +28,7 @@ impl Default for TwoLevelBitset {
 }
 
 impl TwoLevelBitset {
+    /// Creates an empty bitset with no active price ticks.
     pub const fn new() -> Self {
         Self {
             summary: 0,
@@ -35,12 +36,17 @@ impl TwoLevelBitset {
         }
     }
 
+    /// Returns `true` when no price tick is active.
     #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.summary == 0
     }
 
-    /// Mark `tick` as active. O(1), no allocation.
+    /// Marks `tick` as active. `tick` must be less than [`TICKS`].
+    ///
+    /// The lower-level bit records the tick itself. The summary bit records
+    /// that its 64-tick word is non-empty, allowing a later best-price lookup
+    /// to skip all empty words.
     #[inline(always)]
     pub fn set(&mut self, tick: usize) {
         debug_assert!(tick < TICKS);
@@ -50,7 +56,11 @@ impl TwoLevelBitset {
         self.summary |= 1u64 << word_idx;
     }
 
-    /// Mark `tick` as inactive. O(1), no allocation.
+    /// Marks `tick` as inactive. `tick` must be less than [`TICKS`].
+    ///
+    /// The summary bit is cleared only when this was the last active tick in
+    /// its word; otherwise it must remain set so the summary has no false
+    /// negatives.
     #[inline(always)]
     pub fn clear(&mut self, tick: usize) {
         debug_assert!(tick < TICKS);
@@ -62,6 +72,7 @@ impl TwoLevelBitset {
         }
     }
 
+    /// Returns whether `tick` is active. `tick` must be less than [`TICKS`].
     #[inline(always)]
     pub fn test(&self, tick: usize) -> bool {
         debug_assert!(tick < TICKS);
@@ -72,6 +83,10 @@ impl TwoLevelBitset {
 
     /// Returns the lowest active tick (used for best-ask lookups), using
     /// `trailing_zeros` hardware bit-scan (`tzcnt`) at both levels.
+    ///
+    /// The first set bit in the summary identifies the lowest non-empty
+    /// word; the first set bit in that word identifies the tick within it.
+    /// Returns `None` when the summary is empty.
     #[inline(always)]
     pub fn lowest(&self) -> Option<usize> {
         if self.summary == 0 {
@@ -86,6 +101,10 @@ impl TwoLevelBitset {
 
     /// Returns the highest active tick (used for best-bid lookups), using
     /// `leading_zeros` hardware bit-scan (`lzcnt`) at both levels.
+    ///
+    /// The highest set bit in the summary identifies the highest non-empty
+    /// word; the highest set bit in that word identifies the tick within it.
+    /// Returns `None` when the summary is empty.
     #[inline(always)]
     pub fn highest(&self) -> Option<usize> {
         if self.summary == 0 {
