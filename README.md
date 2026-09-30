@@ -14,25 +14,34 @@ matching engine written in Rust.
   bid / best ask resolution via hardware bit-scan (`tzcnt` / `lzcnt`) over a
   dense 4096-tick space.
 - **Flat open-addressing hash map** (`src/hashmap.rs`) — O(1) `OrderId -> OrderIndex`
-  lookup for cancellation, fixed capacity, no allocation after construction.
+  lookup for cancellation, fixed capacity, no allocation after construction,
+  and a random per-instance hash seed so crafted order IDs cannot force
+  collisions.
 - **Matching engine core** (`src/engine.rs`) — price-time priority limit order
   book supporting full/partial fills, resting remainders, and multi-level
-  spread crossing; emits `OrderAccepted`, `Trade`, `OrderPartiallyFilled`,
-  `OrderFilled`, `OrderCancelled`, and `OrderRejected` events via an
-  allocation-free `EventBatch`.
+  spread crossing; streams `OrderAccepted`, `Trade`, `OrderPartiallyFilled`,
+  `OrderFilled`, `OrderCancelled`, and `OrderRejected` events to a
+  caller-supplied `EventSink`, so no execution report is ever dropped.
 - **Lock-free SPSC ring buffer** (`src/ringbuffer.rs`) — Disruptor-style input
-  queue for feeding the engine from a producer thread.
-- **Memory-mapped binary WAL** (`src/wal.rs`) — fixed-width append-only log for
-  deterministic state replay.
+  queue with separate, non-cloneable `Producer` / `Consumer` handles, so the
+  single-producer/single-consumer contract is enforced by the type system.
+- **Memory-mapped binary WAL** (`src/wal.rs`) — versioned, little-endian,
+  checksummed fixed-width records; readers stop at the first torn or
+  unwritten record, and `WalWriter::open_append` resumes a log after a crash.
 
 ## Usage
 
 ```rust
-use matching_engine::{Engine, Side};
+use matching_engine::{Engine, Event, Side};
 
 let mut engine = Engine::new(10_000); // pre-allocates all storage up front
-engine.process_order(1, Side::Sell, 100, 10); // resting ask
-let events = engine.process_order(2, Side::Buy, 100, 10); // crosses and fills
+// Any `EventSink` works: a `Vec<Event>`, a reusable `EventBatch`, or a closure.
+// Reusing a sink with enough capacity keeps every call allocation-free.
+let mut events: Vec<Event> = Vec::with_capacity(64);
+
+engine.process_order(1, Side::Sell, 100, 10, &mut events); // resting ask
+events.clear();
+engine.process_order(2, Side::Buy, 100, 10, &mut events); // crosses and fills
 for event in &events {
     println!("{event:?}");
 }
@@ -41,7 +50,8 @@ for event in &events {
 ## Testing & benchmarking
 
 ```sh
-cargo test                    # unit + integration tests
-cargo test --test zero_alloc  # verifies zero heap allocations on the hot path
-cargo bench                   # criterion micro-benchmarks
+cargo test                     # unit, integration, and doc tests
+cargo test --test zero_alloc   # verifies zero heap allocations on the hot path
+cargo test --test model_check  # differential test against a reference order book
+cargo bench                    # criterion micro-benchmarks
 ```

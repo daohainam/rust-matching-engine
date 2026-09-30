@@ -1,13 +1,14 @@
-//! Execution report events emitted by the matching engine, plus a
-//! fixed-capacity, heap-allocation-free container used to collect them
-//! during a single `process_order` / `cancel_order` call.
+//! Execution report events emitted by the matching engine, the [`EventSink`]
+//! trait the engine streams them through, and [`EventBatch`], a bounded,
+//! heap-allocation-free sink.
 
-/// Maximum number of events retained from one engine call.
+/// Capacity of an [`EventBatch`].
 ///
-/// A call that produces more events still completes its matching work, but
-/// events after this limit are dropped by [`EventBatch::push`]. Consumers
-/// that require a complete execution report should size this limit for their
-/// workload and monitor the maximum number of fills per call.
+/// A batch is a bounded convenience sink: events pushed after this limit are
+/// counted by [`EventBatch::dropped`] instead of stored. The engine itself
+/// never drops events; callers that need a complete execution report for
+/// arbitrarily deep sweeps should use an unbounded sink (a closure, a
+/// `Vec<Event>`, a queue) or check [`EventBatch::is_truncated`] after a call.
 pub const MAX_EVENTS_PER_CALL: usize = 64;
 
 /// One observable outcome of placing or cancelling an order.
@@ -36,14 +37,49 @@ pub enum Event {
     OrderRejected { order_id: u64 },
 }
 
+/// Receives the events produced by one engine call, in the order they occur.
+///
+/// The engine streams every event through this trait rather than collecting
+/// them into a fixed-size buffer, so no execution report can be lost. The
+/// engine itself never allocates; a call is allocation-free as long as its
+/// sink is, as with a reused [`EventBatch`], a `Vec<Event>` with enough
+/// reserved capacity, or a closure that forwards into a preallocated queue.
+pub trait EventSink {
+    /// Accepts the next event.
+    fn emit(&mut self, event: Event);
+}
+
+impl<F: FnMut(Event)> EventSink for F {
+    #[inline(always)]
+    fn emit(&mut self, event: Event) {
+        self(event);
+    }
+}
+
+impl EventSink for Vec<Event> {
+    #[inline(always)]
+    fn emit(&mut self, event: Event) {
+        self.push(event);
+    }
+}
+
+impl EventSink for EventBatch {
+    #[inline(always)]
+    fn emit(&mut self, event: Event) {
+        self.push(event);
+    }
+}
+
 /// A fixed-capacity, stack-allocated buffer of [`Event`]s. Pushing beyond
-/// `MAX_EVENTS_PER_CALL` silently drops the event rather than allocating or
-/// panicking, keeping the hot path allocation-free and panic-free; callers
-/// that need more headroom can raise `MAX_EVENTS_PER_CALL`.
-#[derive(Debug, Clone, Copy)]
+/// [`MAX_EVENTS_PER_CALL`] counts the event as dropped rather than allocating
+/// or panicking; [`is_truncated`](Self::is_truncated) reports whether that
+/// happened. Reuse one batch across calls (calling [`clear`](Self::clear) in
+/// between) to avoid re-initializing its storage every time.
+#[derive(Debug, Clone)]
 pub struct EventBatch {
     events: [Event; MAX_EVENTS_PER_CALL],
     len: usize,
+    dropped: usize,
 }
 
 impl Default for EventBatch {
@@ -59,18 +95,20 @@ impl EventBatch {
         Self {
             events: [Event::OrderAccepted { order_id: 0 }; MAX_EVENTS_PER_CALL],
             len: 0,
+            dropped: 0,
         }
     }
 
-    /// Appends an event unless the fixed-capacity buffer is already full.
+    /// Appends an event, or counts it as dropped if the batch is full.
     ///
-    /// A full buffer silently drops the new event; it never allocates or
-    /// interrupts the engine operation.
+    /// A full batch never allocates or interrupts the engine operation.
     #[inline(always)]
     pub fn push(&mut self, event: Event) {
         if self.len < MAX_EVENTS_PER_CALL {
             self.events[self.len] = event;
             self.len += 1;
+        } else {
+            self.dropped += 1;
         }
     }
 
@@ -92,10 +130,24 @@ impl EventBatch {
         self.len == 0
     }
 
-    /// Makes the batch logically empty without clearing its fixed storage.
+    /// Returns how many events did not fit since the last [`clear`](Self::clear).
+    #[inline(always)]
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    /// Returns whether any event was dropped since the last [`clear`](Self::clear).
+    #[inline(always)]
+    pub fn is_truncated(&self) -> bool {
+        self.dropped > 0
+    }
+
+    /// Makes the batch logically empty and resets the dropped count, without
+    /// clearing its fixed storage.
     #[inline(always)]
     pub fn clear(&mut self) {
         self.len = 0;
+        self.dropped = 0;
     }
 }
 
@@ -105,5 +157,44 @@ impl<'a> IntoIterator for &'a EventBatch {
 
     fn into_iter(self) -> Self::IntoIter {
         self.as_slice().iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_batch_counts_dropped_events_until_cleared() {
+        let mut batch = EventBatch::new();
+        for order_id in 0..(MAX_EVENTS_PER_CALL as u64 + 6) {
+            batch.emit(Event::OrderAccepted { order_id });
+        }
+        assert_eq!(batch.len(), MAX_EVENTS_PER_CALL);
+        assert_eq!(batch.dropped(), 6);
+        assert!(batch.is_truncated());
+        assert_eq!(
+            batch.as_slice().last(),
+            Some(&Event::OrderAccepted {
+                order_id: MAX_EVENTS_PER_CALL as u64 - 1
+            })
+        );
+
+        batch.clear();
+        assert!(batch.is_empty());
+        assert!(!batch.is_truncated());
+    }
+
+    #[test]
+    fn closures_and_vectors_are_sinks() {
+        let mut seen = 0;
+        let mut count = |_: Event| seen += 1;
+        count.emit(Event::OrderFilled { order_id: 1 });
+        count.emit(Event::OrderFilled { order_id: 2 });
+        assert_eq!(seen, 2);
+
+        let mut events = Vec::new();
+        events.emit(Event::OrderCancelled { order_id: 3 });
+        assert_eq!(events, vec![Event::OrderCancelled { order_id: 3 }]);
     }
 }

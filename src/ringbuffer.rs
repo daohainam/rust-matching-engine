@@ -2,126 +2,239 @@
 //! LMAX Disruptor pattern, used as the input queue feeding the matching
 //! engine's single-threaded hot path.
 //!
-//! Capacity is fixed at construction (power of two) and the backing storage
-//! is allocated once up front; `push`/`pop` never allocate. Producer and
-//! consumer cursors are cache-line padded to avoid false sharing.
+//! [`spsc_channel`] returns one [`Producer`] and one [`Consumer`]. Neither
+//! handle is `Clone`, and `push`/`pop` take `&mut self`, so the type system
+//! guarantees a single writer and a single reader; each handle can be moved
+//! to its own thread.
 //!
-//! The API is safe to use concurrently only with exactly one producer calling
-//! `push` and one consumer calling `pop`. Rust's type system does not assign
-//! those roles, so callers must not clone/share the buffer among multiple
-//! producers or multiple consumers.
+//! Capacity is fixed at construction (rounded up to a power of two) and the
+//! backing storage is allocated once up front; `push`/`pop` never allocate.
+//! The shared cursors live on separate cache lines, and each handle caches
+//! the other side's cursor so the fast path touches only its own line.
+//!
+//! ```
+//! use matching_engine::ringbuffer::spsc_channel;
+//!
+//! let (mut producer, mut consumer) = spsc_channel::<u64>(1024);
+//! let feeder = std::thread::spawn(move || {
+//!     for i in 0..10 {
+//!         while producer.push(i).is_err() {
+//!             std::hint::spin_loop();
+//!         }
+//!     }
+//! });
+//! let mut received = Vec::new();
+//! while received.len() < 10 {
+//!     if let Some(value) = consumer.pop() {
+//!         received.push(value);
+//!     }
+//! }
+//! feeder.join().unwrap();
+//! assert_eq!(received, (0..10).collect::<Vec<_>>());
+//! ```
+//!
+//! A second producer cannot be created by cloning a handle...
+//!
+//! ```compile_fail,E0599
+//! use matching_engine::ringbuffer::spsc_channel;
+//!
+//! let (producer, _consumer) = spsc_channel::<u64>(4);
+//! let second_producer = producer.clone();
+//! ```
+//!
+//! ...and a shared reference is not enough to push, so wrapping a handle in
+//! an `Arc` does not create one either.
+//!
+//! ```compile_fail,E0596
+//! use matching_engine::ringbuffer::spsc_channel;
+//!
+//! let (producer, _consumer) = spsc_channel::<u64>(4);
+//! let shared = &producer;
+//! shared.push(1).unwrap();
+//! ```
 
 use std::cell::UnsafeCell;
+use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-#[repr(align(64))]
-/// Adds padding so frequently written cursors are less likely to share a
-/// cache line and invalidate each other's cache entries.
+/// Aligns a value to 128 bytes: x86 prefetchers pull cache lines in adjacent
+/// pairs, so 64-byte padding alone can still let the two cursors interfere.
+#[repr(align(128))]
 struct CachePadded<T>(T);
 
-/// A fixed-capacity SPSC ring buffer. `T` must be `Copy` so that slots can
-/// be overwritten without running destructors on the hot path.
-pub struct SpscRingBuffer<T: Copy> {
-    /// `UnsafeCell` allows the producer and consumer to mutate distinct slots
-    /// through shared references; cursor atomics coordinate slot ownership.
-    buffer: Box<[UnsafeCell<Option<T>>]>,
+/// Storage and cursors shared by one [`Producer`] and one [`Consumer`].
+struct Shared<T> {
+    /// Written by the producer and read by the consumer; the cursors decide
+    /// which side owns each slot at any moment.
+    buffer: Box<[UnsafeCell<MaybeUninit<T>>]>,
     mask: usize,
-    head: CachePadded<AtomicUsize>, // consumer cursor
-    tail: CachePadded<AtomicUsize>, // producer cursor
+    /// Consumer cursor: the number of values popped so far.
+    head: CachePadded<AtomicUsize>,
+    /// Producer cursor: the number of values pushed so far.
+    tail: CachePadded<AtomicUsize>,
 }
 
-unsafe impl<T: Copy + Send> Sync for SpscRingBuffer<T> {}
-unsafe impl<T: Copy + Send> Send for SpscRingBuffer<T> {}
+// SAFETY: slots are only accessed through the unique `Producer` (writes to
+// free slots) and the unique `Consumer` (reads of published slots), and each
+// slot changes hands through a Release store / Acquire load of a cursor.
+// Values cross threads, so `T` must be `Send`.
+unsafe impl<T: Send> Send for Shared<T> {}
+unsafe impl<T: Send> Sync for Shared<T> {}
 
-impl<T: Copy> SpscRingBuffer<T> {
-    /// Creates a ring buffer with capacity rounded up to the next power of two.
-    ///
-    /// `capacity` must be greater than zero. A power-of-two size lets each
-    /// monotonically increasing cursor wrap to a physical slot with a bitmask.
-    pub fn new(capacity: usize) -> Self {
-        let capacity = capacity.next_power_of_two();
-        let mut buffer = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            buffer.push(UnsafeCell::new(None));
-        }
-        Self {
-            buffer: buffer.into_boxed_slice(),
-            mask: capacity - 1,
-            head: CachePadded(AtomicUsize::new(0)),
-            tail: CachePadded(AtomicUsize::new(0)),
-        }
-    }
+/// Creates a ring buffer and returns its producer and consumer ends.
+///
+/// `capacity` is rounded up to the next power of two, which lets each
+/// monotonically increasing cursor map to a physical slot with a bitmask.
+///
+/// # Panics
+/// Panics if `capacity` is zero or its next power of two overflows `usize`.
+pub fn spsc_channel<T: Copy + Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
+    assert!(capacity > 0, "ring buffer capacity must be positive");
+    let capacity = capacity
+        .checked_next_power_of_two()
+        .expect("ring buffer capacity overflows usize");
+    let shared = Arc::new(Shared {
+        buffer: (0..capacity)
+            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+            .collect(),
+        mask: capacity - 1,
+        head: CachePadded(AtomicUsize::new(0)),
+        tail: CachePadded(AtomicUsize::new(0)),
+    });
+    let producer = Producer {
+        shared: Arc::clone(&shared),
+        tail: 0,
+        cached_head: 0,
+    };
+    let consumer = Consumer {
+        shared,
+        head: 0,
+        cached_tail: 0,
+    };
+    (producer, consumer)
+}
 
+/// The writing end of an SPSC ring buffer. There is exactly one per buffer.
+pub struct Producer<T> {
+    shared: Arc<Shared<T>>,
+    /// This handle's copy of the producer cursor; only it advances the cursor.
+    tail: usize,
+    /// Last observed consumer cursor, refreshed only when the ring looks full.
+    cached_head: usize,
+}
+
+impl<T: Copy> Producer<T> {
+    /// Returns the fixed number of slots.
     #[inline(always)]
     pub fn capacity(&self) -> usize {
-        self.mask + 1
+        self.shared.mask + 1
     }
 
-    /// Producer-only. Attempts to append `value`; returns `Err(value)` if full.
+    /// Attempts to append `value`; returns `Err(value)` if the ring is full.
     ///
-    /// The producer compares its tail cursor with the consumer's head cursor
-    /// to detect a full ring. The low bits of the tail choose a slot; after
-    /// writing it, a `Release` store publishes the new tail to the consumer.
+    /// The consumer's cursor is re-read (with `Acquire`, pairing with the
+    /// consumer's `Release`) only when the cached copy says the ring is full.
+    /// After writing the slot, a `Release` store publishes the new tail.
     /// O(1), lock-free, and allocation-free.
-    pub fn push(&self, value: T) -> Result<(), T> {
-        let tail = self.tail.0.load(Ordering::Relaxed);
-        // Acquire pairs with the consumer's Release store to head, so a slot
-        // is not reused until the consumer has finished taking its value.
-        let head = self.head.0.load(Ordering::Acquire);
-        if tail.wrapping_sub(head) >= self.capacity() {
-            return Err(value);
+    pub fn push(&mut self, value: T) -> Result<(), T> {
+        let capacity = self.capacity();
+        if self.tail.wrapping_sub(self.cached_head) >= capacity {
+            self.cached_head = self.shared.head.0.load(Ordering::Acquire);
+            if self.tail.wrapping_sub(self.cached_head) >= capacity {
+                return Err(value);
+            }
         }
-        let idx = tail & self.mask;
-        // SAFETY: under the single-producer/single-consumer contract, this
-        // slot has been consumed (or never used) because tail - head is below
-        // capacity. The subsequent Release store publishes the completed write.
-        unsafe {
-            *self.buffer[idx].get() = Some(value);
-        }
-        self.tail.0.store(tail.wrapping_add(1), Ordering::Release);
+        let slot = &self.shared.buffer[self.tail & self.shared.mask];
+        // SAFETY: `tail - head < capacity`, and the Acquire load that produced
+        // `cached_head` synchronized with the consumer's Release store, so the
+        // consumer has finished reading this slot (or it was never used). It
+        // will not read it again until the Release store below publishes it,
+        // and this unique producer is the only writer.
+        unsafe { slot.get().write(MaybeUninit::new(value)) };
+        self.tail = self.tail.wrapping_add(1);
+        self.shared.tail.0.store(self.tail, Ordering::Release);
         Ok(())
     }
 
-    /// Consumer-only. Removes the oldest value, or returns `None` if empty.
+    /// Returns the number of queued values.
     ///
-    /// The consumer's `Acquire` load of the tail observes the producer's
-    /// published slot contents. After taking the value, a `Release` store to
-    /// the head lets the producer safely reuse that slot. O(1), lock-free,
-    /// and allocation-free.
-    pub fn pop(&self) -> Option<T> {
-        let head = self.head.0.load(Ordering::Relaxed);
-        // Acquire pairs with push's Release store, making the slot write
-        // visible before the consumer reads it.
-        let tail = self.tail.0.load(Ordering::Acquire);
-        if head == tail {
-            return None;
-        }
-        let idx = head & self.mask;
-        // SAFETY: the single consumer owns this slot because head != tail and
-        // the Acquire load observed the producer's published tail.
-        let value = unsafe { (*self.buffer[idx].get()).take() };
-        // Release the slot only after removing its value, so the producer's
-        // Acquire load of head cannot authorize an early overwrite.
-        self.head.0.store(head.wrapping_add(1), Ordering::Release);
-        value
-    }
-
-    /// Returns whether a cursor snapshot currently reports no queued values.
-    #[inline(always)]
-    pub fn is_empty(&self) -> bool {
-        self.head.0.load(Ordering::Acquire) == self.tail.0.load(Ordering::Acquire)
-    }
-
-    /// Returns the queued-value count from an atomic cursor snapshot.
-    ///
-    /// While producer and consumer are active, the result can become stale
-    /// immediately; use it for observation, not as a reservation or a signal
-    /// that the next `push`/`pop` must succeed.
-    #[inline(always)]
+    /// The consumer may drain concurrently, so the true count can only be
+    /// lower by the time the caller looks at it.
+    #[inline]
     pub fn len(&self) -> usize {
-        let tail = self.tail.0.load(Ordering::Acquire);
-        let head = self.head.0.load(Ordering::Acquire);
-        tail.wrapping_sub(head)
+        // `tail` is exact here and the consumer never passes it, so this
+        // cannot underflow.
+        self.tail
+            .wrapping_sub(self.shared.head.0.load(Ordering::Acquire))
+    }
+
+    /// Returns whether the consumer has drained every pushed value.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// The reading end of an SPSC ring buffer. There is exactly one per buffer.
+pub struct Consumer<T> {
+    shared: Arc<Shared<T>>,
+    /// This handle's copy of the consumer cursor; only it advances the cursor.
+    head: usize,
+    /// Last observed producer cursor, refreshed only when the ring looks empty.
+    cached_tail: usize,
+}
+
+impl<T: Copy> Consumer<T> {
+    /// Returns the fixed number of slots.
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.shared.mask + 1
+    }
+
+    /// Removes the oldest value, or returns `None` if the ring is empty.
+    ///
+    /// The producer's cursor is re-read (with `Acquire`, pairing with the
+    /// producer's `Release`) only when the cached copy says the ring is empty.
+    /// After reading the slot, a `Release` store to the head lets the
+    /// producer reuse it. O(1), lock-free, and allocation-free.
+    pub fn pop(&mut self) -> Option<T> {
+        if self.head == self.cached_tail {
+            self.cached_tail = self.shared.tail.0.load(Ordering::Acquire);
+            if self.head == self.cached_tail {
+                return None;
+            }
+        }
+        let slot = &self.shared.buffer[self.head & self.shared.mask];
+        // SAFETY: `head < tail`, and the Acquire load that produced
+        // `cached_tail` synchronized with the producer's Release store that
+        // published this slot, so it holds an initialized value. The producer
+        // will not overwrite it until the Release store below frees it.
+        let value = unsafe { slot.get().read().assume_init() };
+        self.head = self.head.wrapping_add(1);
+        self.shared.head.0.store(self.head, Ordering::Release);
+        Some(value)
+    }
+
+    /// Returns the number of queued values.
+    ///
+    /// The producer may push concurrently, so the true count can only be
+    /// higher by the time the caller looks at it.
+    #[inline]
+    pub fn len(&self) -> usize {
+        // `head` is exact here and the producer's tail never falls behind
+        // it, so this cannot underflow.
+        self.shared
+            .tail
+            .0
+            .load(Ordering::Acquire)
+            .wrapping_sub(self.head)
+    }
+
+    /// Returns whether no values are currently queued.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -132,45 +245,64 @@ mod tests {
 
     #[test]
     fn push_pop_single_thread() {
-        let rb: SpscRingBuffer<u64> = SpscRingBuffer::new(4);
-        assert!(rb.is_empty());
-        assert!(rb.push(1).is_ok());
-        assert!(rb.push(2).is_ok());
-        assert!(rb.push(3).is_ok());
-        assert!(rb.push(4).is_ok());
-        assert!(rb.push(5).is_err()); // full
-        assert_eq!(rb.pop(), Some(1));
-        assert_eq!(rb.pop(), Some(2));
-        assert!(rb.push(6).is_ok());
-        assert_eq!(rb.pop(), Some(3));
-        assert_eq!(rb.pop(), Some(4));
-        assert_eq!(rb.pop(), Some(6));
-        assert_eq!(rb.pop(), None);
+        let (mut tx, mut rx) = spsc_channel::<u64>(4);
+        assert!(rx.is_empty());
+        assert_eq!(tx.capacity(), 4);
+        assert!(tx.push(1).is_ok());
+        assert!(tx.push(2).is_ok());
+        assert!(tx.push(3).is_ok());
+        assert!(tx.push(4).is_ok());
+        assert_eq!(tx.push(5), Err(5)); // full
+        assert_eq!(tx.len(), 4);
+        assert_eq!(rx.len(), 4);
+        assert_eq!(rx.pop(), Some(1));
+        assert_eq!(rx.pop(), Some(2));
+        assert!(tx.push(6).is_ok());
+        assert_eq!(rx.pop(), Some(3));
+        assert_eq!(rx.pop(), Some(4));
+        assert_eq!(rx.pop(), Some(6));
+        assert_eq!(rx.pop(), None);
+        assert!(tx.is_empty());
+    }
+
+    #[test]
+    fn capacity_rounds_up_to_a_power_of_two() {
+        let (tx, rx) = spsc_channel::<u8>(5);
+        assert_eq!(tx.capacity(), 8);
+        assert_eq!(rx.capacity(), 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be positive")]
+    fn zero_capacity_is_rejected() {
+        let _ = spsc_channel::<u8>(0);
     }
 
     #[test]
     fn spsc_across_threads_preserves_order() {
-        use std::sync::Arc;
-        let rb = Arc::new(SpscRingBuffer::<u64>::new(1024));
-        let producer = rb.clone();
-        let n = 100_000u64;
-        let handle = thread::spawn(move || {
+        let n: u64 = if cfg!(miri) { 1_000 } else { 100_000 };
+        let (mut tx, mut rx) = spsc_channel::<u64>(if cfg!(miri) { 16 } else { 1024 });
+        let producer = thread::spawn(move || {
             let mut i = 0u64;
             while i < n {
-                if producer.push(i).is_ok() {
+                if tx.push(i).is_ok() {
                     i += 1;
+                } else {
+                    std::hint::spin_loop();
                 }
             }
         });
-        let mut received = Vec::with_capacity(n as usize);
-        while received.len() < n as usize {
-            if let Some(v) = rb.pop() {
-                received.push(v);
+        let mut expected = 0u64;
+        while expected < n {
+            match rx.pop() {
+                Some(value) => {
+                    assert_eq!(value, expected);
+                    expected += 1;
+                }
+                None => std::hint::spin_loop(),
             }
         }
-        handle.join().unwrap();
-        for (expected, actual) in (0..n).zip(received.iter()) {
-            assert_eq!(expected, *actual);
-        }
+        producer.join().unwrap();
+        assert_eq!(rx.pop(), None);
     }
 }

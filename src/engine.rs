@@ -4,10 +4,11 @@
 //! This module intentionally performs **no heap allocation** inside
 //! [`Engine::process_order`] or [`Engine::cancel_order`]: all storage
 //! (order arena, hash map, price-level arrays, bitsets) is allocated once
-//! up front in [`Engine::new`].
+//! up front in [`Engine::new`], and execution reports are streamed to a
+//! caller-supplied [`EventSink`] instead of being collected internally.
 
 use crate::bitset::{TwoLevelBitset, TICKS};
-use crate::events::{Event, EventBatch};
+use crate::events::{Event, EventSink};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side};
 
@@ -56,6 +57,13 @@ impl Engine {
     /// here. This moves their allocation cost to setup instead of order
     /// processing. A resting order consumes one arena slot regardless of its
     /// quantity; fully matched incoming orders do not need a slot.
+    ///
+    /// The ID map uses a randomly seeded hash, so crafted order IDs cannot
+    /// force collisions; matching results never depend on the seed.
+    ///
+    /// # Panics
+    /// Panics if `order_capacity` is zero or does not fit in a `u32` arena
+    /// index (`order_capacity >= u32::MAX`).
     pub fn new(order_capacity: usize) -> Self {
         Self {
             pool: OrderPool::new(order_capacity),
@@ -89,13 +97,14 @@ impl Engine {
     /// Returns the total resting quantity at `tick` on the requested `side`.
     ///
     /// This is an aggregate across every order queued at that price. An empty
-    /// price level returns zero. `tick` must be less than [`MAX_TICKS`].
+    /// price level, or a `tick` at or above [`MAX_TICKS`], returns zero.
     #[inline]
     pub fn depth_at(&self, side: Side, tick: u32) -> u64 {
-        match side {
-            Side::Buy => self.bid_levels[tick as usize].total_qty,
-            Side::Sell => self.ask_levels[tick as usize].total_qty,
-        }
+        let levels = match side {
+            Side::Buy => &self.bid_levels,
+            Side::Sell => &self.ask_levels,
+        };
+        levels.get(tick as usize).map_or(0, |level| level.total_qty)
     }
 
     /// Returns up to `levels` non-empty price ticks on `side`, best first.
@@ -107,9 +116,10 @@ impl Engine {
     /// order-processing path. Finding each level after the best one searches
     /// the intervening ticks; unlike [`best_bid`](Self::best_bid) and
     /// [`best_ask`](Self::best_ask), the work is not strictly proportional
-    /// only to the number of returned levels.
+    /// only to the number of returned levels. At most [`MAX_TICKS`] levels
+    /// exist, so a larger `levels` (e.g. `usize::MAX`) returns every level.
     pub fn depth_snapshot(&self, side: Side, levels: usize) -> Vec<(u32, u64)> {
-        let mut out = Vec::with_capacity(levels);
+        let mut out = Vec::with_capacity(levels.min(MAX_TICKS));
         match side {
             Side::Buy => {
                 let mut tick = self.bid_bitset.highest();
@@ -157,31 +167,33 @@ impl Engine {
     /// Any unfilled quantity is added to the book if an order slot is
     /// available and the price-level quantity can be represented.
     ///
-    /// The returned batch records acceptance, trades, maker fill updates,
-    /// and the taker's final fill or partial-fill state. If the remainder
-    /// cannot rest, an `OrderRejected` event is also emitted; trades already
-    /// completed by this call are not undone.
+    /// Every event is emitted to `sink` in order: acceptance, then each trade
+    /// followed by the maker's fill update, then the taker's final fill or
+    /// partial-fill state. If the remainder cannot rest, an `OrderRejected`
+    /// event is also emitted; trades already completed by this call are not
+    /// undone. The engine does not allocate, so the call is allocation-free
+    /// whenever `sink` is.
     ///
     /// O(1) amortized to place; each matched maker node is processed in
     /// O(1), so total cost is O(1) + O(fills).
-    pub fn process_order(
+    pub fn process_order<S: EventSink + ?Sized>(
         &mut self,
         order_id: u64,
         side: Side,
         price_tick: u32,
         qty: u64,
-    ) -> EventBatch {
-        let mut events = EventBatch::new();
+        sink: &mut S,
+    ) {
         // Reject invalid input before emitting acceptance or changing book state.
         if qty == 0
             || order_id == crate::hashmap::RESERVED_KEY
             || (price_tick as usize) >= MAX_TICKS
             || self.id_map.get(order_id).is_some()
         {
-            events.push(Event::OrderRejected { order_id });
-            return events;
+            sink.emit(Event::OrderRejected { order_id });
+            return;
         }
-        events.push(Event::OrderAccepted { order_id });
+        sink.emit(Event::OrderAccepted { order_id });
 
         // Matching spends down the incoming quantity; only the remainder can
         // become a new resting order.
@@ -196,7 +208,7 @@ impl Engine {
                 order_id,
                 price_tick,
                 &mut remaining,
-                &mut events,
+                sink,
                 Crossing::TakerBuy,
             ),
             // Incoming sell crosses resting bids priced at or above the limit.
@@ -208,20 +220,20 @@ impl Engine {
                 order_id,
                 price_tick,
                 &mut remaining,
-                &mut events,
+                sink,
                 Crossing::TakerSell,
             ),
         }
 
         let filled = qty - remaining;
         if remaining == 0 {
-            events.push(Event::OrderFilled { order_id });
+            sink.emit(Event::OrderFilled { order_id });
             self.sequence = self.sequence.wrapping_add(1);
-            return events;
+            return;
         }
 
         if filled > 0 {
-            events.push(Event::OrderPartiallyFilled {
+            sink.emit(Event::OrderPartiallyFilled {
                 order_id,
                 remaining_qty: remaining,
             });
@@ -259,15 +271,14 @@ impl Engine {
                     // level.
                     self.id_map.remove(order_id);
                     self.pool.free(idx);
-                    events.push(Event::OrderRejected { order_id });
+                    sink.emit(Event::OrderRejected { order_id });
                 }
             }
             None => {
-                events.push(Event::OrderRejected { order_id });
+                sink.emit(Event::OrderRejected { order_id });
             }
         }
         self.sequence = self.sequence.wrapping_add(1);
-        events
     }
 
     /// Generic crossing loop shared by buy/sell taker orders, operating on
@@ -281,7 +292,7 @@ impl Engine {
     /// `&mut Engine` accessor closures) so the borrow checker can see that
     /// `pool`, `levels`, and `bitset` never alias one another.
     #[allow(clippy::too_many_arguments)]
-    fn match_incoming(
+    fn match_incoming<S: EventSink + ?Sized>(
         pool: &mut OrderPool,
         levels: &mut [PriceLevel],
         bitset: &mut TwoLevelBitset,
@@ -289,7 +300,7 @@ impl Engine {
         taker_order_id: u64,
         price_tick: u32,
         remaining: &mut u64,
-        events: &mut EventBatch,
+        sink: &mut S,
         direction: Crossing,
     ) {
         loop {
@@ -330,7 +341,7 @@ impl Engine {
                 // A trade can consume the maker, the taker, or both exactly.
                 let trade_qty = (*remaining).min(maker_qty);
 
-                events.push(Event::Trade {
+                sink.emit(Event::Trade {
                     maker_order_id,
                     taker_order_id,
                     price_tick: tick as u32,
@@ -344,14 +355,14 @@ impl Engine {
                     level.remove(pool, maker_idx);
                     pool.free(maker_idx);
                     id_map.remove(maker_order_id);
-                    events.push(Event::OrderFilled {
+                    sink.emit(Event::OrderFilled {
                         order_id: maker_order_id,
                     });
                 } else {
                     // The maker remains at the head; both its remaining
                     // quantity and the level's aggregate must be reduced.
                     level.reduce_qty(pool, maker_idx, trade_qty);
-                    events.push(Event::OrderPartiallyFilled {
+                    sink.emit(Event::OrderPartiallyFilled {
                         order_id: maker_order_id,
                         remaining_qty: maker_qty - trade_qty,
                     });
@@ -374,16 +385,15 @@ impl Engine {
     ///
     /// The ID map locates the arena slot, then the order is unlinked from its
     /// price-level FIFO queue. If it was the last order at that price, the
-    /// price is removed from the active-level bitset. The returned event batch
-    /// contains `OrderCancelled` only when an order was found; otherwise the
-    /// batch is empty. The boolean has the same meaning as “found and removed.”
+    /// price is removed from the active-level bitset. When an order was found
+    /// and removed, `OrderCancelled` is emitted to `sink` and `true` is
+    /// returned; otherwise nothing is emitted and the result is `false`.
     ///
     /// Lookup and unlink are constant-time in the usual case; hash-table
     /// probing can require additional work when resolving collisions.
-    pub fn cancel_order(&mut self, order_id: u64) -> (bool, EventBatch) {
-        let mut events = EventBatch::new();
+    pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
         let Some(idx) = self.id_map.remove(order_id) else {
-            return (false, events);
+            return false;
         };
         let order = *self.pool.get(idx);
         match order.side {
@@ -403,8 +413,8 @@ impl Engine {
             }
         }
         self.pool.free(idx);
-        events.push(Event::OrderCancelled { order_id });
-        (true, events)
+        sink.emit(Event::OrderCancelled { order_id });
+        true
     }
 
     /// Returns the number of currently resting orders across both sides.
@@ -417,19 +427,33 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::{EventBatch, MAX_EVENTS_PER_CALL};
 
-    fn accepted_and(events: &EventBatch) -> Vec<Event> {
-        events.as_slice().to_vec()
+    /// Places an order and returns every event it produced.
+    fn place(
+        engine: &mut Engine,
+        order_id: u64,
+        side: Side,
+        price_tick: u32,
+        qty: u64,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        engine.process_order(order_id, side, price_tick, qty, &mut events);
+        events
+    }
+
+    /// Cancels an order and returns whether it was found plus its events.
+    fn cancel(engine: &mut Engine, order_id: u64) -> (bool, Vec<Event>) {
+        let mut events = Vec::new();
+        let found = engine.cancel_order(order_id, &mut events);
+        (found, events)
     }
 
     #[test]
     fn resting_order_with_no_match() {
         let mut engine = Engine::new(16);
-        let events = engine.process_order(1, Side::Buy, 100, 10);
-        assert_eq!(
-            accepted_and(&events),
-            vec![Event::OrderAccepted { order_id: 1 }]
-        );
+        let events = place(&mut engine, 1, Side::Buy, 100, 10);
+        assert_eq!(events, vec![Event::OrderAccepted { order_id: 1 }]);
         assert_eq!(engine.best_bid(), Some(100));
         assert_eq!(engine.best_ask(), None);
         assert_eq!(engine.depth_at(Side::Buy, 100), 10);
@@ -438,10 +462,10 @@ mod tests {
     #[test]
     fn full_fill_taker_and_maker() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Sell, 100, 10);
-        let events = engine.process_order(2, Side::Buy, 100, 10);
+        place(&mut engine, 1, Side::Sell, 100, 10);
+        let events = place(&mut engine, 2, Side::Buy, 100, 10);
         assert_eq!(
-            accepted_and(&events),
+            events,
             vec![
                 Event::OrderAccepted { order_id: 2 },
                 Event::Trade {
@@ -462,10 +486,10 @@ mod tests {
     #[test]
     fn partial_fill_leaves_maker_resting() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Sell, 100, 10);
-        let events = engine.process_order(2, Side::Buy, 100, 4);
+        place(&mut engine, 1, Side::Sell, 100, 10);
+        let events = place(&mut engine, 2, Side::Buy, 100, 4);
         assert_eq!(
-            accepted_and(&events),
+            events,
             vec![
                 Event::OrderAccepted { order_id: 2 },
                 Event::Trade {
@@ -488,10 +512,10 @@ mod tests {
     #[test]
     fn partial_fill_leaves_taker_resting_remainder() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Sell, 100, 4);
-        let events = engine.process_order(2, Side::Buy, 100, 10);
+        place(&mut engine, 1, Side::Sell, 100, 4);
+        let events = place(&mut engine, 2, Side::Buy, 100, 10);
         assert_eq!(
-            accepted_and(&events),
+            events,
             vec![
                 Event::OrderAccepted { order_id: 2 },
                 Event::Trade {
@@ -515,31 +539,31 @@ mod tests {
     #[test]
     fn cancel_head_middle_tail_of_price_queue() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Buy, 50, 1);
-        engine.process_order(2, Side::Buy, 50, 1);
-        engine.process_order(3, Side::Buy, 50, 1);
+        place(&mut engine, 1, Side::Buy, 50, 1);
+        place(&mut engine, 2, Side::Buy, 50, 1);
+        place(&mut engine, 3, Side::Buy, 50, 1);
         assert_eq!(engine.depth_at(Side::Buy, 50), 3);
 
         // Cancel middle.
-        let (ok, events) = engine.cancel_order(2);
+        let (ok, events) = cancel(&mut engine, 2);
         assert!(ok);
         assert_eq!(events.as_slice(), &[Event::OrderCancelled { order_id: 2 }]);
         assert_eq!(engine.depth_at(Side::Buy, 50), 2);
 
         // Cancel head.
-        let (ok, _) = engine.cancel_order(1);
+        let (ok, _) = cancel(&mut engine, 1);
         assert!(ok);
         assert_eq!(engine.depth_at(Side::Buy, 50), 1);
         assert_eq!(engine.best_bid(), Some(50));
 
         // Cancel tail (last remaining order at this level).
-        let (ok, _) = engine.cancel_order(3);
+        let (ok, _) = cancel(&mut engine, 3);
         assert!(ok);
         assert_eq!(engine.best_bid(), None);
         assert_eq!(engine.live_order_count(), 0);
 
         // Cancelling again fails cleanly.
-        let (ok, events) = engine.cancel_order(3);
+        let (ok, events) = cancel(&mut engine, 3);
         assert!(!ok);
         assert!(events.is_empty());
     }
@@ -547,12 +571,12 @@ mod tests {
     #[test]
     fn crosses_multiple_ask_price_levels_in_price_time_priority() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Sell, 100, 5);
-        engine.process_order(2, Side::Sell, 101, 5);
-        engine.process_order(3, Side::Sell, 102, 5);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        place(&mut engine, 2, Side::Sell, 101, 5);
+        place(&mut engine, 3, Side::Sell, 102, 5);
 
         // Aggressive buy sweeps three levels: 100, 101, and partially 102.
-        let events = engine.process_order(4, Side::Buy, 102, 12);
+        let events = place(&mut engine, 4, Side::Buy, 102, 12);
         let trades: Vec<_> = events
             .as_slice()
             .iter()
@@ -572,11 +596,11 @@ mod tests {
     #[test]
     fn crosses_multiple_bid_price_levels_for_incoming_sell() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Buy, 102, 5);
-        engine.process_order(2, Side::Buy, 101, 5);
-        engine.process_order(3, Side::Buy, 100, 5);
+        place(&mut engine, 1, Side::Buy, 102, 5);
+        place(&mut engine, 2, Side::Buy, 101, 5);
+        place(&mut engine, 3, Side::Buy, 100, 5);
 
-        let events = engine.process_order(4, Side::Sell, 100, 12);
+        let events = place(&mut engine, 4, Side::Sell, 100, 12);
         let trades: Vec<_> = events
             .as_slice()
             .iter()
@@ -595,10 +619,10 @@ mod tests {
     #[test]
     fn price_time_priority_within_a_level_is_fifo() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Sell, 100, 5);
-        engine.process_order(2, Side::Sell, 100, 5);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        place(&mut engine, 2, Side::Sell, 100, 5);
 
-        let events = engine.process_order(3, Side::Buy, 100, 6);
+        let events = place(&mut engine, 3, Side::Buy, 100, 6);
         let fills: Vec<_> = events
             .as_slice()
             .iter()
@@ -613,20 +637,20 @@ mod tests {
     #[test]
     fn rejects_duplicate_order_id_and_zero_qty() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Buy, 100, 10);
-        let events = engine.process_order(1, Side::Buy, 100, 5);
+        place(&mut engine, 1, Side::Buy, 100, 10);
+        let events = place(&mut engine, 1, Side::Buy, 100, 5);
         assert_eq!(events.as_slice(), &[Event::OrderRejected { order_id: 1 }]);
 
-        let events = engine.process_order(2, Side::Buy, 100, 0);
+        let events = place(&mut engine, 2, Side::Buy, 100, 0);
         assert_eq!(events.as_slice(), &[Event::OrderRejected { order_id: 2 }]);
     }
 
     #[test]
     fn depth_snapshot_orders_best_to_worst() {
         let mut engine = Engine::new(16);
-        engine.process_order(1, Side::Buy, 100, 1);
-        engine.process_order(2, Side::Buy, 105, 2);
-        engine.process_order(3, Side::Buy, 102, 3);
+        place(&mut engine, 1, Side::Buy, 100, 1);
+        place(&mut engine, 2, Side::Buy, 105, 2);
+        place(&mut engine, 3, Side::Buy, 102, 3);
 
         let snapshot = engine.depth_snapshot(Side::Buy, 10);
         assert_eq!(snapshot, vec![(105, 2), (102, 3), (100, 1)]);
@@ -635,10 +659,10 @@ mod tests {
     #[test]
     fn arena_exhaustion_rejects_resting_order() {
         let mut engine = Engine::new(2);
-        engine.process_order(1, Side::Buy, 100, 1);
-        engine.process_order(2, Side::Buy, 101, 1);
+        place(&mut engine, 1, Side::Buy, 100, 1);
+        place(&mut engine, 2, Side::Buy, 101, 1);
         // Arena is full; a third non-matching order can't be rested.
-        let events = engine.process_order(3, Side::Buy, 99, 1);
+        let events = place(&mut engine, 3, Side::Buy, 99, 1);
         assert_eq!(
             events.as_slice(),
             &[
@@ -657,7 +681,7 @@ mod tests {
         // while still consuming a pool slot forever (a resource-exhaustion
         // vector for an attacker who just picks order_id = u64::MAX).
         let mut engine = Engine::new(16);
-        let events = engine.process_order(u64::MAX, Side::Buy, 100, 10);
+        let events = place(&mut engine, u64::MAX, Side::Buy, 100, 10);
         assert_eq!(
             events.as_slice(),
             &[Event::OrderRejected { order_id: u64::MAX }]
@@ -666,7 +690,7 @@ mod tests {
         assert_eq!(engine.best_bid(), None);
 
         // Cancelling the reserved id must also fail cleanly, never panic.
-        let (ok, events) = engine.cancel_order(u64::MAX);
+        let (ok, events) = cancel(&mut engine, u64::MAX);
         assert!(!ok);
         assert!(events.is_empty());
     }
@@ -678,12 +702,12 @@ mod tests {
         // be rejected and its pool slot released rather than corrupting the
         // level's bookkeeping.
         let mut engine = Engine::new(16);
-        let events = engine.process_order(1, Side::Buy, 100, u64::MAX);
+        let events = place(&mut engine, 1, Side::Buy, 100, u64::MAX);
         assert_eq!(events.as_slice(), &[Event::OrderAccepted { order_id: 1 }]);
         assert_eq!(engine.depth_at(Side::Buy, 100), u64::MAX);
         assert_eq!(engine.live_order_count(), 1);
 
-        let events = engine.process_order(2, Side::Buy, 100, 1);
+        let events = place(&mut engine, 2, Side::Buy, 100, 1);
         assert_eq!(
             events.as_slice(),
             &[
@@ -696,7 +720,65 @@ mod tests {
         assert_eq!(engine.live_order_count(), 1);
         assert_eq!(engine.depth_at(Side::Buy, 100), u64::MAX);
 
-        let (ok, _) = engine.cancel_order(2);
+        let (ok, _) = cancel(&mut engine, 2);
         assert!(!ok, "rejected order must not have been inserted");
+    }
+
+    #[test]
+    fn deep_sweep_reports_every_execution() {
+        // Regression: a fixed 64-event buffer used to drop every report after
+        // the 32nd fully filled maker although the book had executed them.
+        let mut engine = Engine::new(128);
+        for maker in 0..40u64 {
+            place(&mut engine, maker, Side::Sell, 100, 1);
+        }
+
+        let events = place(&mut engine, 1_000, Side::Buy, 100, 40);
+        let trades = events
+            .iter()
+            .filter(|e| matches!(e, Event::Trade { .. }))
+            .count();
+        let maker_fills = events
+            .iter()
+            .filter(|e| matches!(e, Event::OrderFilled { order_id } if *order_id < 40))
+            .count();
+        assert_eq!(trades, 40);
+        assert_eq!(maker_fills, 40);
+        assert_eq!(
+            events.first(),
+            Some(&Event::OrderAccepted { order_id: 1_000 })
+        );
+        assert_eq!(events.last(), Some(&Event::OrderFilled { order_id: 1_000 }));
+        assert_eq!(engine.live_order_count(), 0);
+    }
+
+    #[test]
+    fn bounded_batch_sink_reports_truncation() {
+        let mut engine = Engine::new(128);
+        for maker in 0..40u64 {
+            place(&mut engine, maker, Side::Sell, 100, 1);
+        }
+
+        let mut batch = EventBatch::new();
+        engine.process_order(1_000, Side::Buy, 100, 40, &mut batch);
+        // Accepted + 40 x (Trade, maker OrderFilled) + taker OrderFilled.
+        assert_eq!(batch.len() + batch.dropped(), 82);
+        assert_eq!(batch.len(), MAX_EVENTS_PER_CALL);
+        assert!(batch.is_truncated());
+    }
+
+    #[test]
+    fn depth_queries_accept_any_input_without_panicking() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 5);
+        place(&mut engine, 2, Side::Sell, 200, 7);
+
+        assert_eq!(engine.depth_at(Side::Buy, MAX_TICKS as u32), 0);
+        assert_eq!(engine.depth_at(Side::Sell, u32::MAX), 0);
+        assert_eq!(engine.depth_snapshot(Side::Buy, usize::MAX), vec![(100, 5)]);
+        assert_eq!(
+            engine.depth_snapshot(Side::Sell, usize::MAX),
+            vec![(200, 7)]
+        );
     }
 }
