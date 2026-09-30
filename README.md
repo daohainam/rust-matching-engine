@@ -25,7 +25,7 @@ microseconds, this repository shows one way to do it, step by step.
 ## Quick start
 
 ```rust
-use matching_engine::{Engine, Side};
+use matching_engine::{Engine, Event, Side};
 
 let mut engine = Engine::new(10_000); // pre-allocates all storage up front
 engine.process_order(1, Side::Sell, 100, 10); // resting ask: 10 @ tick 100

@@ -6,6 +6,14 @@
 //! Collisions are resolved with linear probing. Deletions use backward-shift
 //! deletion so that lookups never need tombstones (which would otherwise
 //! degrade worst-case probe length over time).
+//!
+//! Keys are caller-supplied order IDs, so every table mixes a secret
+//! per-instance seed into its hash. Without it the SplitMix64 finalizer could
+//! simply be inverted to craft IDs that all share one probe chain, turning
+//! every operation into a scan of that chain.
+
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 
 /// Sentinel key value reserved to mean "unoccupied slot". Callers must
 /// never insert a real key equal to this value; [`FlatHashMap::insert`]
@@ -29,6 +37,9 @@ pub struct FlatHashMap {
     slots: Box<[Slot]>,
     mask: usize,
     len: usize,
+    /// Secret mixed into every hash so slot positions cannot be predicted
+    /// (and deliberately collided) from key values alone.
+    seed: u64,
 }
 
 impl FlatHashMap {
@@ -38,7 +49,16 @@ impl FlatHashMap {
     /// `max(capacity_hint, 16)`. Keeping the expected load at or below one
     /// half leaves empty slots that stop unsuccessful linear probes. The
     /// allocation happens once; map operations never resize or allocate.
+    /// The hash seed is random, drawn from the standard library's
+    /// [`RandomState`].
     pub fn with_capacity(capacity_hint: usize) -> Self {
+        Self::with_capacity_and_seed(capacity_hint, RandomState::new().hash_one(0u64))
+    }
+
+    /// Like [`with_capacity`](Self::with_capacity), but with an explicit hash
+    /// seed for reproducible layouts. A seed an adversary can guess gives up
+    /// the protection against deliberately colliding keys.
+    pub fn with_capacity_and_seed(capacity_hint: usize, seed: u64) -> Self {
         let capacity = (capacity_hint.max(16) * 2).next_power_of_two();
         let slots = vec![
             Slot {
@@ -52,14 +72,16 @@ impl FlatHashMap {
             slots,
             mask: capacity - 1,
             len: 0,
+            seed,
         }
     }
 
     #[inline(always)]
-    fn hash(key: u64) -> usize {
-        // SplitMix64's finalizer avalanches nearby IDs across the machine
-        // word; the caller then masks the low bits to select a table slot.
-        let mut z = key.wrapping_add(0x9E3779B97F4A7C15);
+    fn hash(&self, key: u64) -> usize {
+        // XOR in the secret seed, then let SplitMix64's finalizer avalanche
+        // nearby IDs across the machine word; the caller then masks the low
+        // bits to select a table slot.
+        let mut z = (key ^ self.seed).wrapping_add(0x9E3779B97F4A7C15);
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
         (z ^ (z >> 31)) as usize
@@ -100,7 +122,7 @@ impl FlatHashMap {
         // repeated calls. Callers (e.g. `Engine`) must reject this reserved
         // value before it ever reaches the map.
         assert!(key != EMPTY, "u64::MAX is reserved as the empty sentinel");
-        let mut idx = Self::hash(key) & self.mask;
+        let mut idx = self.hash(key) & self.mask;
         loop {
             let slot = &mut self.slots[idx];
             if slot.key == EMPTY {
@@ -125,7 +147,7 @@ impl FlatHashMap {
     /// an empty slot so a missing key's probe can terminate.
     #[inline]
     pub fn get(&self, key: u64) -> Option<u32> {
-        let mut idx = Self::hash(key) & self.mask;
+        let mut idx = self.hash(key) & self.mask;
         loop {
             let slot = &self.slots[idx];
             if slot.key == EMPTY {
@@ -142,7 +164,7 @@ impl FlatHashMap {
     /// deletion to keep probe chains short without tombstones. The scan and
     /// any shifts take O(capacity) in the worst case.
     pub fn remove(&mut self, key: u64) -> Option<u32> {
-        let mut idx = Self::hash(key) & self.mask;
+        let mut idx = self.hash(key) & self.mask;
         loop {
             let slot = self.slots[idx];
             if slot.key == EMPTY {
@@ -166,7 +188,7 @@ impl FlatHashMap {
             if slot.key == EMPTY {
                 return;
             }
-            let ideal = Self::hash(slot.key) & self.mask;
+            let ideal = self.hash(slot.key) & self.mask;
             // A key displaced from its ideal slot must remain reachable from
             // that slot. Move it into the hole only when its probe path crosses
             // the hole; otherwise leave the gap for a later search to stop at.
@@ -256,5 +278,60 @@ mod tests {
         let mut map = FlatHashMap::with_capacity(16);
         assert_eq!(map.get(RESERVED_KEY), None);
         assert_eq!(map.remove(RESERVED_KEY), None);
+    }
+
+    /// Inverts the SplitMix64 finalizer to produce a key whose hash under
+    /// `seed` is exactly `target_hash`, as an attacker could for a known seed.
+    fn craft_key(target_hash: u64, seed: u64) -> u64 {
+        fn undo_xorshift(y: u64, shift: u32) -> u64 {
+            (1..)
+                .map(|k| k * shift)
+                .take_while(|&s| s < 64)
+                .fold(y, |x, s| x ^ (y >> s))
+        }
+        fn inverse(odd: u64) -> u64 {
+            // Newton's iteration doubles the correct low bits each round.
+            (0..6).fold(odd, |x, _| {
+                x.wrapping_mul(2u64.wrapping_sub(odd.wrapping_mul(x)))
+            })
+        }
+        let z = undo_xorshift(target_hash, 31).wrapping_mul(inverse(0x94D049BB133111EB));
+        let z = undo_xorshift(z, 27).wrapping_mul(inverse(0xBF58476D1CE4E5B9));
+        undo_xorshift(z, 30).wrapping_sub(0x9E3779B97F4A7C15) ^ seed
+    }
+
+    #[test]
+    fn keys_crafted_for_one_seed_spread_out_under_another() {
+        let crafted: Vec<u64> = (1..=1_000u64).map(|i| craft_key(i << 32, 0)).collect();
+
+        // With a known seed, every crafted key targets the same ideal slot...
+        let known = FlatHashMap::with_capacity_and_seed(1_000, 0);
+        assert!(crafted.iter().all(|&key| known.hash(key) & known.mask == 0));
+
+        // ...but under any other seed they scatter like ordinary keys.
+        let seeded = FlatHashMap::with_capacity_and_seed(1_000, 0x5EED_1234_ABCD_9876);
+        let mut buckets = vec![0usize; seeded.capacity()];
+        for &key in &crafted {
+            buckets[seeded.hash(key) & seeded.mask] += 1;
+        }
+        let worst = buckets.into_iter().max().unwrap();
+        assert!(worst < 32, "worst bucket held {worst} crafted keys");
+    }
+
+    #[test]
+    fn seeded_maps_behave_identically() {
+        // The seed changes only where keys live, never what the map returns.
+        let mut a = FlatHashMap::with_capacity_and_seed(64, 1);
+        let mut b = FlatHashMap::with_capacity_and_seed(64, 2);
+        for i in 0..100u64 {
+            assert_eq!(a.insert(i * 7, i as u32), b.insert(i * 7, i as u32));
+        }
+        for i in (0..100u64).step_by(3) {
+            assert_eq!(a.remove(i * 7), b.remove(i * 7));
+        }
+        for i in 0..700u64 {
+            assert_eq!(a.get(i), b.get(i));
+        }
+        assert_eq!(a.len(), b.len());
     }
 }
