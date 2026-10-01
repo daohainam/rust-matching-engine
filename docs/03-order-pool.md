@@ -318,4 +318,22 @@ out again.
 - **`PriceLevel`** caches `count` and `total_qty`, so depth queries and
   "is this level empty?" checks are O(1).
 
+## 3.10 Try it yourself
+
+Run the pool's unit tests, including the one that shows a double free is caught:
+
+```sh
+cargo test pool::
+```
+
+Then check the layout from 3.3 yourself. Add this to the end of `main` in
+[`examples/walkthrough.rs`](../examples/walkthrough.rs) and run the example:
+
+```rust,ignore
+println!("Order is {} bytes", std::mem::size_of::<matching_engine::pool::Order>());
+```
+
+Remove `#[repr(C)]` from `Order` in [`src/pool.rs`](../src/pool.rs), run it again,
+and compare with 3.3. (Undo the change afterwards.)
+
 **Next:** [4. The price ladder bitset](04-price-ladder-bitset.md)
