@@ -61,7 +61,7 @@ the first round of fixes started from.
 | **Limit orders only** | No market, IOC, FOK, stop, iceberg; no modify (cancel + new loses priority); no self-trade prevention; no accounts. |
 | **One instrument per `Engine`** | Run several engines for several symbols. |
 | **Engine is not wired to the WAL or ring buffer** | The caller does it; [`examples/pipeline.rs`](../examples/pipeline.rs) shows how. The WAL's `sequence` is caller-supplied and independent of the engine's own counter. |
-| **WAL format is small** | Version 1 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking (8.11). |
+| **WAL format is small** | Version 1 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
 | **Failing loudly** | `assert!`/`expect` on invariants panic on a bookkeeping bug, in every build profile. With `panic = "abort"` (set in this repo's release profile, and needed in *your* binary's profile because Cargo ignores a dependency's) that aborts the process. Intentional for a financial component. |
 | **`depth_snapshot` is slow-ish** | It allocates a `Vec` and scans ticks linearly (documented in the source). Reporting only. |
 

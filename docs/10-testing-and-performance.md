@@ -368,7 +368,7 @@ Knowing the gaps is part of reading tests critically.
 
 | Gap | Why it matters | What would close it |
 |---|---|---|
-| **Memory-ordering bugs are probabilistic** | The ARM job runs the threaded ring-buffer test on a weakly ordered CPU, and Miri checks the `unsafe` code, but both only see the thread interleavings that happen to occur. | The [`loom`](https://docs.rs/loom) model checker explores interleavings exhaustively (an exercise in chapter 10). |
+| **Memory-ordering bugs are probabilistic** | The ARM job runs the threaded ring-buffer test on a weakly ordered CPU, and Miri checks the `unsafe` code, but both only see the thread interleavings that happen to occur. | The [`loom`](https://docs.rs/loom) model checker explores interleavings exhaustively (an exercise in chapter 11). |
 | **Real crashes and power loss** | The WAL tests use hand-built crash images; nothing kills a process mid-write or cuts the power. | A harness that runs a writer in a child process and kills it at random points; power-loss testing needs a VM or a fault-injecting block device. |
 | **Performance regressions** | CI only *compiles* the benchmarks, so a slowdown would go unnoticed. | Criterion baselines (`cargo bench -- --save-baseline before`, later `--baseline before`), or a benchmark job on a quiet, dedicated machine. |
 | **`depth_snapshot` corner cases** | `model_check` compares full snapshots and a unit test covers `usize::MAX`, but `levels = 0` and "fewer levels than exist" are untested. | Two small unit tests. |
