@@ -131,6 +131,9 @@ An incoming order might be bigger than what is available. Then it is filled
   disappears; the taker continues to the next resting order.
 - If the taker is smaller than the maker, the taker is fully filled and the
   maker stays in the book with a smaller remaining quantity.
+- If both have exactly the same quantity, **both** are fully filled at once: the
+  maker leaves the book and the taker is done. (The engine reports an
+  `OrderFilled` event for each of them.)
 - If, after trading with everything it can, the taker still has quantity left,
   the **remainder rests** in the book as a new waiting order.
 
