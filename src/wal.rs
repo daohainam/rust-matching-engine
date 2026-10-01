@@ -564,6 +564,22 @@ mod tests {
         assert_eq!(read_all(&path.0).unwrap(), vec![sample(0)]);
     }
 
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn finalizing_an_empty_log_keeps_only_the_header() {
+        // The preallocated space is trimmed, but the header stays: an empty
+        // log is still a valid log that `open_append` can continue.
+        let path = TempPath::new("empty");
+        let writer = WalWriter::create(&path.0, 16).unwrap();
+        assert!(writer.is_empty());
+        writer.finalize().unwrap();
+
+        assert_eq!(file_len(&path), WAL_HEADER_SIZE);
+        assert!(read_all(&path.0).unwrap().is_empty());
+        let writer = WalWriter::open_append(&path.0, 1).unwrap();
+        assert!(writer.is_empty());
+    }
+
     // Crash images are written directly: a writer leaked with
     // `mem::forget` would keep its view mapped, which blocks the truncation
     // `open_append` performs on Windows.
