@@ -355,6 +355,12 @@ impl Engine {
                     level.remove(pool, maker_idx);
                     pool.free(maker_idx);
                     id_map.remove(maker_order_id);
+                    if level.is_empty() {
+                        // Drop the price from the summary index *before*
+                        // reporting the fill: the sink must only ever see a
+                        // consistent book.
+                        bitset.clear(tick);
+                    }
                     sink.emit(Event::OrderFilled {
                         order_id: maker_order_id,
                     });
@@ -369,15 +375,13 @@ impl Engine {
                 }
             }
 
-            if levels[tick].is_empty() {
-                // No orders remain at this price, so remove it from the
-                // summary index before asking for the next best price.
-                bitset.clear(tick);
-            } else {
+            if !levels[tick].is_empty() {
                 // Maker side still has quantity (taker fully consumed);
                 // nothing more to match at this or any worse tick.
                 break;
             }
+            // The level drained and its bit is already clear, so the next
+            // bitset lookup finds the next best price.
         }
     }
 
@@ -765,6 +769,28 @@ mod tests {
         assert_eq!(batch.len() + batch.dropped(), 82);
         assert_eq!(batch.len(), MAX_EVENTS_PER_CALL);
         assert!(batch.is_truncated());
+    }
+
+    #[test]
+    fn panicking_sink_leaves_the_book_consistent() {
+        // `emit` is only called between complete state changes. A sink that
+        // panics on the maker's fill must therefore not leave the drained
+        // price in the bitset (which would make `best_ask` report an empty
+        // level). `AssertUnwindSafe` is needed because `&mut Engine` is not
+        // `UnwindSafe`: Rust warns that state may be half-updated.
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.process_order(2, Side::Buy, 100, 5, &mut |event: Event| {
+                if event == (Event::OrderFilled { order_id: 1 }) {
+                    panic!("sink failed");
+                }
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(engine.best_ask(), None);
+        assert!(engine.depth_snapshot(Side::Sell, usize::MAX).is_empty());
+        assert_eq!(engine.live_order_count(), 0);
     }
 
     #[test]

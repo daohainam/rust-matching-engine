@@ -44,6 +44,15 @@ pub enum Event {
 /// engine itself never allocates; a call is allocation-free as long as its
 /// sink is, as with a reused [`EventBatch`], a `Vec<Event>` with enough
 /// reserved capacity, or a closure that forwards into a preallocated queue.
+///
+/// The engine calls [`emit`](Self::emit) only between complete state
+/// changes, so the book is consistent whenever a sink runs. A sink should not
+/// panic. If one does and the panic is caught, the book is still consistent,
+/// but the request was only partly applied (some trades done, the remainder
+/// never rested), so the engine no longer matches a replay of its requests:
+/// drop it and rebuild it from the write-ahead log. With `panic = "abort"`
+/// (this crate's release profile) a panic ends the process instead, and
+/// recovery is a replay anyway.
 pub trait EventSink {
     /// Accepts the next event.
     fn emit(&mut self, event: Event);
