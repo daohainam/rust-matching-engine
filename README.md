@@ -155,6 +155,9 @@ tests/
   model_check.rs differential test against a simple reference order book
   wal_replay.rs  replaying the WAL reproduces every event
   zero_alloc.rs  counting global allocator proves zero heap allocations
+  docs_sync.rs   chapter 8 must show examples/pipeline.rs verbatim
+examples/
+  pipeline.rs    ring buffer -> WAL -> engine -> replay, in one program
 benches/
   matching_engine_bench.rs   criterion micro-benchmarks
 docs/            the chapters listed above
@@ -181,6 +184,7 @@ Details, consequences and workarounds are in
 cargo test                      # unit, integration and doc tests (this README included)
 cargo test --test model_check   # the engine against a simple reference book
 cargo test --test zero_alloc    # verifies zero heap allocations on the hot path
+cargo run --example pipeline    # the complete program from chapter 8
 cargo bench                     # criterion micro-benchmarks
 ```
 

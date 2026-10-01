@@ -576,105 +576,173 @@ Several of these make good exercises (chapter 10).
 
 # Part C: Putting it all together
 
-This complete program ties the three components into one pipeline: a producer
+This complete program ties the three components into one pipeline: a gateway
 thread, the ring buffer, the WAL, the engine, and finally a replay that rebuilds
-an identical book from the log. (It was compiled and run against this crate.)
+an identical book from the log alone. It is the file
+[`examples/pipeline.rs`](../examples/pipeline.rs); run it with:
+
+```sh
+cargo run --example pipeline
+```
+
+CI compiles and runs it on every push, and the test `tests/docs_sync.rs` fails if
+the copy below ever differs from the file, so what you read here is exactly what
+runs.
 
 ```rust
-use std::sync::Arc;
+//! The whole pipeline in one program (chapter 8, Part C).
+//!
+//! A gateway thread pushes requests into an SPSC ring buffer. The matching
+//! thread logs each request to the write-ahead log *before* applying it to the
+//! engine. Finally a replica engine is rebuilt from the log alone and must end
+//! in exactly the same state.
+//!
+//! Run it with `cargo run --example pipeline`.
+
 use std::thread;
 
-use matching_engine::ringbuffer::SpscRingBuffer;
+use matching_engine::ringbuffer::spsc_channel;
 use matching_engine::wal::{read_all, WalRecord, WalRecordKind, WalWriter};
-use matching_engine::{Engine, Side};
+use matching_engine::{Engine, Event, Side};
 
 /// What the gateway thread sends to the matching thread.
 #[derive(Clone, Copy)]
 enum Command {
-    New { id: u64, side: Side, tick: u32, qty: u64 },
-    Cancel { id: u64 },
+    New {
+        id: u64,
+        side: Side,
+        tick: u32,
+        qty: u64,
+    },
+    Cancel {
+        id: u64,
+    },
+}
+
+/// Applies one logged request. The live run and the replay share this
+/// function, so both are guaranteed to make exactly the same engine calls.
+fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
+    match record.kind {
+        WalRecordKind::NewOrder => engine.process_order(
+            record.order_id,
+            record.side,
+            record.price_tick,
+            record.qty,
+            events,
+        ),
+        WalRecordKind::Cancel => {
+            engine.cancel_order(record.order_id, events);
+        }
+    }
 }
 
 fn main() -> std::io::Result<()> {
     const N: u64 = 10_000;
-    let queue = Arc::new(SpscRingBuffer::<Command>::new(1024));
+    let (mut producer, mut consumer) = spsc_channel::<Command>(1024);
 
-    // Producer: pretend to be a network gateway.
-    let producer = {
-        let queue = Arc::clone(&queue);
-        thread::spawn(move || {
-            for id in 1..=N {
-                let mut cmd = if id % 5 == 0 {
-                    Command::Cancel { id: id - 1 }
-                } else {
-                    let side = if id % 2 == 0 { Side::Buy } else { Side::Sell };
-                    Command::New { id, side, tick: 1000 + (id % 7) as u32, qty: 1 + id % 3 }
-                };
-                // push hands the value back when the queue is full: retry.
-                while let Err(back) = queue.push(cmd) {
-                    cmd = back;
-                    std::hint::spin_loop();
+    // Gateway: the only producer. `producer` is dropped when the thread
+    // ends, which tells the consumer that no more commands will come.
+    let gateway = thread::spawn(move || {
+        for id in 1..=N {
+            let mut cmd = if id % 5 == 0 {
+                Command::Cancel { id: id - 1 }
+            } else {
+                let side = if id % 2 == 0 { Side::Buy } else { Side::Sell };
+                Command::New {
+                    id,
+                    side,
+                    tick: 1000 + (id % 7) as u32,
+                    qty: 1 + id % 3,
                 }
+            };
+            // `push` hands the value back when the queue is full: retry.
+            while let Err(back) = producer.push(cmd) {
+                cmd = back;
+                std::hint::spin_loop();
             }
-        })
-    };
+        }
+    });
 
-    // Consumer: the single matching thread.
-    let path = std::env::temp_dir().join("orders.wal");
+    // This demo always starts a fresh log. `WalWriter::create` refuses to
+    // overwrite an existing file, so an old one is deleted on purpose.
+    let path = std::env::temp_dir().join("matching_engine_pipeline.wal");
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+    }
     let mut wal = WalWriter::create(&path, 16_384)?;
     let mut engine = Engine::new(50_000);
-    for seq in 0..N {
-        let cmd = loop {
-            match queue.pop() {
-                Some(cmd) => break cmd,
-                None => std::hint::spin_loop(),
+    let mut events = Vec::new(); // one sink, reused for every call
+    let mut sequence = 0;
+    loop {
+        let Some(cmd) = consumer.pop() else {
+            if consumer.is_disconnected() {
+                break; // the gateway is gone and the queue is drained
             }
+            std::hint::spin_loop();
+            continue;
         };
+        let record = match cmd {
+            Command::New {
+                id,
+                side,
+                tick,
+                qty,
+            } => WalRecord::new_order(id, side, tick, qty, sequence),
+            Command::Cancel { id } => WalRecord::cancel(id, sequence),
+        };
+        sequence += 1;
         // 1. Write-ahead: log the request BEFORE applying it.
-        wal.append(match cmd {
-            Command::New { id, side, tick, qty } => WalRecord::new_order(id, side, tick, qty, seq),
-            Command::Cancel { id } => WalRecord::cancel(id, seq),
-        })?;
+        wal.append(record)?;
         // 2. Apply it to the book.
-        let _events = match cmd {
-            Command::New { id, side, tick, qty } => engine.process_order(id, side, tick, qty),
-            Command::Cancel { id } => engine.cancel_order(id).1,
-        };
-        // 3. A real system would publish `_events` to downstream consumers here.
+        events.clear();
+        apply(&mut engine, &record, &mut events);
+        // 3. A real system would publish `events` downstream here.
     }
-    producer.join().unwrap();
-    wal.flush()?;
+    gateway.join().expect("gateway thread panicked");
+    wal.finalize()?; // flush, trim the preallocated tail, sync
 
-    // Recovery: rebuild an identical engine from the log alone.
-    const NEW_ORDER: u8 = WalRecordKind::NewOrder as u8;
-    const CANCEL: u8 = WalRecordKind::Cancel as u8;
+    // Recovery: rebuild the book from the log alone. The replica must use
+    // the same capacity, because capacity decides which orders can rest.
+    let records = read_all(&path)?;
+    assert_eq!(
+        records.len() as u64,
+        sequence,
+        "every logged request is read back"
+    );
     let mut replica = Engine::new(50_000);
-    for rec in read_all(&path)? {
-        match rec.kind {
-            NEW_ORDER => {
-                let side = if rec.side == 0 { Side::Buy } else { Side::Sell };
-                replica.process_order(rec.order_id, side, rec.price_tick, rec.qty);
-            }
-            CANCEL => {
-                replica.cancel_order(rec.order_id);
-            }
-            _ => break, // zero padding after the last real record
-        }
+    for record in &records {
+        events.clear();
+        apply(&mut replica, record, &mut events);
     }
+    std::fs::remove_file(&path)?;
 
     assert_eq!(engine.live_order_count(), replica.live_order_count());
-    assert_eq!(engine.depth_snapshot(Side::Buy, 100), replica.depth_snapshot(Side::Buy, 100));
-    assert_eq!(engine.depth_snapshot(Side::Sell, 100), replica.depth_snapshot(Side::Sell, 100));
-    println!("replayed book is identical: {} resting orders", replica.live_order_count());
+    for side in [Side::Buy, Side::Sell] {
+        assert_eq!(
+            engine.depth_snapshot(side, usize::MAX),
+            replica.depth_snapshot(side, usize::MAX)
+        );
+    }
+    println!(
+        "replayed {sequence} requests: identical book with {} resting orders",
+        replica.live_order_count()
+    );
     Ok(())
 }
 ```
 
 What it demonstrates:
 
-- **Decoupling:** the producer never touches the engine; it only pushes commands.
+- **Decoupling:** the gateway never touches the engine; it only pushes commands.
+- **Clean shutdown:** when the gateway thread ends, its `Producer` is dropped, and
+  the matching loop stops on `is_disconnected()` once the queue is drained. If the
+  gateway panicked, the same thing happens and `join` reports the panic, so
+  nothing hangs.
 - **Ordering:** the WAL append happens *before* the engine call.
-- **Determinism:** a fresh engine fed the logged requests ends in exactly the same
-  state, which is what makes the WAL useful for recovery, testing, and audits.
+- **One code path:** the live run and the replay both go through `apply`, so they
+  cannot drift apart.
+- **Determinism:** a fresh engine of the same capacity, fed the logged requests,
+  ends in exactly the same state. That is what makes the WAL useful for recovery,
+  testing, and audits.
 
 **Next:** [9. Testing and performance](09-testing-and-performance.md)

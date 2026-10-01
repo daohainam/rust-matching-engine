@@ -41,6 +41,8 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --release --locked
       - run: cargo bench --no-run --locked
+      # The complete program from chapter 8, Part C.
+      - run: cargo run --release --locked --example pipeline
 
   msrv:
     name: MSRV (1.88)
