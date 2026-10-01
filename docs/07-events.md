@@ -23,7 +23,18 @@ pub enum Event {
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     OrderFilled          { order_id: u64 },
     OrderCancelled       { order_id: u64 },
-    OrderRejected        { order_id: u64 },
+    OrderRejected        { order_id: u64, reason: RejectReason },
+}
+
+pub enum RejectReason {
+    // Input errors: the order is rejected alone, before OrderAccepted.
+    ZeroQuantity,          // qty was 0
+    ReservedOrderId,       // order_id was u64::MAX
+    PriceOutOfRange,       // price_tick was 4096 or more
+    DuplicateOrderId,      // a resting order already has this id
+    // The remainder could not rest: always after OrderAccepted.
+    BookFull,              // every arena slot is in use
+    LevelQuantityOverflow, // the level's total would not fit in a u64
 }
 ```
 
@@ -34,11 +45,13 @@ pub enum Event {
 | `OrderPartiallyFilled` | An order traded but still has quantity left. | a maker (after each partial fill), or the taker (once, at the end) |
 | `OrderFilled` | An order has nothing left. | a maker (when it is consumed), or the taker |
 | `OrderCancelled` | A resting order was cancelled on request. | the cancelled order |
-| `OrderRejected` | An order was refused: bad input, or no room for it to rest. | the incoming order |
+| `OrderRejected` | An order was refused: bad input, or no room for it to rest. `reason` says which. | the incoming order |
 
 `Event` derives `Debug, Clone, Copy, PartialEq, Eq`, so events are cheap to copy
 and trivial to compare in tests. One `Event` is 32 bytes (the biggest variant,
-`Trade`, holds `8 + 8 + 4 + 8 = 28` bytes plus the tag and padding).
+`Trade`, holds `8 + 8 + 4 + 8 = 28` bytes plus the tag and padding). Adding a
+`RejectReason` to `OrderRejected` costs nothing: `8 + 1` bytes still fits in the
+space `Trade` needs anyway.
 
 ## 7.2 Ordering rules
 
@@ -77,8 +90,8 @@ These are taken straight from the unit tests in `engine.rs`.
 | Taker smaller than maker | `Accepted`, `Trade`, `PartiallyFilled(maker, left)`, `Filled(taker)` |
 | Taker bigger than maker; remainder rests | `Accepted`, `Trade`, `Filled(maker)`, `PartiallyFilled(taker, left)` |
 | Taker sweeps several levels | `Accepted`, then `Trade`+maker-event per fill, then the taker's final event |
-| Invalid input / duplicate id | `Rejected` |
-| Order can't rest (arena full / overflow) | `Accepted`, `Rejected` (no trades happened) |
+| Invalid input / duplicate id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
+| Order can't rest (arena full / overflow) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (no trades happened) |
 | Cancel succeeds | `Cancelled` |
 | Cancel of unknown id | *(no events; the returned `bool` is `false`)* |
 
@@ -254,7 +267,7 @@ fn log_event(event: Event) {
         }
         Event::OrderFilled { order_id } => println!("filled    #{order_id}"),
         Event::OrderCancelled { order_id } => println!("cancelled #{order_id}"),
-        Event::OrderRejected { order_id } => println!("rejected  #{order_id}"),
+        Event::OrderRejected { order_id, reason } => println!("rejected  #{order_id}: {reason:?}"),
     }
 }
 
