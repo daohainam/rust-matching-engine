@@ -48,6 +48,22 @@ Why indices instead of pointers?
   is not fighting us. (A self-referential web of `&mut Order` references would
   be impossible to express in safe Rust.)
 
+The price of that freedom: **the compiler no longer checks that an index is
+still valid.** Suppose some code keeps slot index `7` for order `#42`, then
+`#42` is cancelled and slot 7 is handed to a new order `#99`. The old index still
+"works": `pool.get(7)` happily returns `#99`'s data, with no error. This is the
+index version of a *dangling pointer*, often called a **stale index**. It cannot
+cause undefined behaviour (the slot is always a valid `Order`), but it can
+silently read or change the wrong order.
+
+The engine avoids it by discipline: it never keeps an index across calls. The
+only long-lived references to a slot are the hash map entry and the queue links,
+and both are removed in the same step that frees the slot. Only `free` checks the
+slot's `in_use` flag (3.7); `get` does not. A common fix, if you need more safety,
+is a **generational index**: store a counter in each slot that increases every
+time the slot is reused, and put the counter into the index as well, so an old
+index no longer matches.
+
 ## 3.3 The `Order` record
 
 ```rust
