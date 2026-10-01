@@ -67,14 +67,6 @@ pub struct Order {
 `#[repr(C)]` keeps fields in declaration order. The compiler inserts *padding*
 so every field is aligned. Measured with `offset_of!`:
 
-Why ask for `repr(C)` at all? Without it, Rust uses its default layout and is
-free to **reorder fields** to reduce padding; for this struct it picks a
-40-byte layout on its own. `repr(C)` gives up those 8 bytes in exchange for a
-layout that is fixed and predictable: the picture below is guaranteed, not a
-compiler detail that might change, which makes it something we can draw,
-measure and teach. Either choice is reasonable; the experiments in the note
-below compare them.
-
 ```text
  byte  0         8        16        24   28   32        36        40   41     48
        +---------+---------+---------+----+----+--------+--------+----+------+
@@ -84,6 +76,25 @@ below compare them.
                                             ^^^ 3 bytes padding             ^^^ 7 bytes padding
        total size_of::<Order>() = 48 bytes
 ```
+
+Where do the two gaps come from? Each type has an **alignment**: a `u32` must
+start at an address that is a multiple of 4, a `u64` at a multiple of 8.
+
+- **3 bytes after `side`.** `side` is one byte, at offset 28, so the next free
+  byte is 29. `next_idx` is a `u32` and must start at a multiple of 4, so the
+  compiler skips bytes 29 to 31 and puts it at 32.
+- **7 bytes at the end.** The fields end at byte 41 (`in_use` is at 40). But
+  `Order` contains `u64`s, so the whole struct must be 8-byte aligned, and its
+  size is rounded up to a multiple of 8: 48. That way, in an array of orders,
+  every element (and every `u64` inside it) starts properly aligned too.
+
+Why ask for `repr(C)` at all? Without it, Rust uses its default layout and is
+free to **reorder fields** to reduce padding; for this struct it picks a
+40-byte layout on its own. `repr(C)` gives up those 8 bytes in exchange for a
+layout that is fixed and predictable: the picture above is guaranteed, not a
+compiler detail that might change, which makes it something we can draw,
+measure and teach. Either choice is reasonable; the experiments in the note
+below compare them.
 
 > [!NOTE]
 > The source comment says the order is "sized to fit within a single 64-byte
