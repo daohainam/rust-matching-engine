@@ -45,7 +45,7 @@
 
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 use crate::pool::Side;
@@ -253,21 +253,6 @@ fn valid_records(body: &[u8]) -> impl Iterator<Item = WalRecord> + '_ {
         .map_while(|record| WalRecord::decode(record).ok())
 }
 
-/// Maps `file` read-only, validates its header, and hands the bytes to `f`.
-fn with_validated_map<R>(file: &File, f: impl FnOnce(&[u8]) -> R) -> io::Result<R> {
-    let len = usize::try_from(file.metadata()?.len())
-        .map_err(|_| invalid_data("WAL file too large to map".into()))?;
-    if len < WAL_HEADER_SIZE {
-        return Err(invalid_data("file is shorter than a WAL header".into()));
-    }
-    // SAFETY: the view is read-only and dropped before this function returns.
-    // As with any file mapping, the file must not be truncated or rewritten
-    // by another process while it is mapped.
-    let map = unsafe { MmapOptions::new().len(len).map(file)? };
-    validate_header(&map)?;
-    Ok(f(&map))
-}
-
 /// Append-only memory-mapped WAL writer.
 ///
 /// The backing file is preallocated and grown (then remapped) only when
@@ -307,13 +292,16 @@ impl WalWriter {
     /// room for at least `spare_records` more before the file must grow.
     ///
     /// Any bytes after the last valid record (a torn write or stale data)
-    /// are discarded, so they can never be mistaken for records later.
+    /// are discarded, so they can never be mistaken for records later. The
+    /// whole file is read once, with plain I/O, to find that record.
     pub fn open_append<P: AsRef<Path>>(path: P, spare_records: usize) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).write(true).open(path)?;
-        let valid_len = with_validated_map(&file, |bytes| {
-            WAL_HEADER_SIZE + valid_records(&bytes[WAL_HEADER_SIZE..]).count() * WAL_RECORD_SIZE
-        })?;
-        // Truncating (with no view mapped, which Windows requires) and then
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        validate_header(&bytes)?;
+        let valid_len =
+            WAL_HEADER_SIZE + valid_records(&bytes[WAL_HEADER_SIZE..]).count() * WAL_RECORD_SIZE;
+        // Truncating (no view is mapped yet, which Windows requires) and then
         // re-extending in `map` zero-fills everything after the valid prefix.
         file.set_len(valid_len as u64)?;
         Self::map(file, valid_len, spare_records)
@@ -437,12 +425,15 @@ impl Drop for WalWriter {
 /// Reading stops at the first partial or invalid record, which marks the end
 /// of the log (for example the zero-filled preallocated tail left by a crash,
 /// or a torn final write). A missing or unsupported header is reported as
-/// [`io::ErrorKind::InvalidData`]. The file must not be written concurrently.
+/// [`io::ErrorKind::InvalidData`].
+///
+/// The file is read into memory with plain I/O rather than mapped. A copy
+/// cannot race a writer that is appending to the same file: at worst it ends
+/// in a half-written record, which fails its checksum and ends the log.
 pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
-    let file = File::open(path)?;
-    with_validated_map(&file, |bytes| {
-        valid_records(&bytes[WAL_HEADER_SIZE..]).collect()
-    })
+    let bytes = std::fs::read(path)?;
+    validate_header(&bytes)?;
+    Ok(valid_records(&bytes[WAL_HEADER_SIZE..]).collect())
 }
 
 #[cfg(test)]
