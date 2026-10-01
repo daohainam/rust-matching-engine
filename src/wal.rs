@@ -270,19 +270,14 @@ fn with_validated_map<R>(file: &File, f: impl FnOnce(&[u8]) -> R) -> io::Result<
 
 /// Append-only memory-mapped WAL writer.
 ///
-/// The backing file is pre-sized to `capacity_records` and grown (then
-/// remapped) only when that space is exhausted. Appending within the mapped
-/// capacity writes directly to the mapping; call [`flush`](Self::flush) or
-/// [`finalize`](Self::finalize) when the caller needs to request persistence.
-///
-/// [`finalize`](Self::finalize) unmaps the file before truncating it (Windows
-/// refuses to shrink a file with a mapped view open) and ends the writer's
-/// life: afterwards [`append`](Self::append) and [`flush`](Self::flush) return
-/// an error instead of re-mapping the file.
+/// The backing file is preallocated and grown (then remapped) only when
+/// that space is exhausted. Appending within the mapped capacity writes
+/// directly to the mapping; call [`flush`](Self::flush) when the appended
+/// records must be durable, and [`finalize`](Self::finalize) when done.
 pub struct WalWriter {
-    /// `None` once the writer has been finalized.
+    /// Always `Some` while the writer is usable; taken by `finalize`/`Drop`.
     mmap: Option<MmapMut>,
-    file: std::fs::File,
+    file: File,
     next_offset: usize,
     capacity_bytes: usize,
 }
@@ -337,7 +332,6 @@ impl WalWriter {
         let mmap = unsafe { MmapOptions::new().len(capacity_bytes).map_mut(&file)? };
         Ok(Self {
             mmap: Some(mmap),
-            mmap: Some(mmap),
             file,
             next_offset,
             capacity_bytes,
@@ -355,19 +349,12 @@ impl WalWriter {
     ///
     /// Usually this copies into already-mapped memory. If the record would
     /// exceed the current mapping, the file is grown and remapped first.
-    ///
-    /// Returns an error if the writer has already been
-    /// [`finalize`](Self::finalize)d; the file is never re-mapped.
     pub fn append(&mut self, record: WalRecord) -> io::Result<()> {
-        if self.mmap.is_none() {
-            return Err(finalized_error());
-        }
         if self.next_offset + WAL_RECORD_SIZE > self.capacity_bytes {
             self.grow()?;
         }
-        let bytes = record.to_bytes();
-        let mmap = self.mmap.as_mut().ok_or_else(finalized_error)?;
-        mmap[self.next_offset..self.next_offset + WAL_RECORD_SIZE].copy_from_slice(&bytes);
+        let start = self.next_offset;
+        self.mapping()[start..start + WAL_RECORD_SIZE].copy_from_slice(&record.encode());
         self.next_offset += WAL_RECORD_SIZE;
         Ok(())
     }
@@ -382,38 +369,42 @@ impl WalWriter {
         // Extending a file while it is mapped is allowed on every supported
         // platform; only shrinking requires unmapping first.
         self.file.set_len(new_capacity as u64)?;
+        // SAFETY: as in `map`.
         let mmap = unsafe { MmapOptions::new().len(new_capacity).map_mut(&self.file)? };
         self.mmap = Some(mmap);
         self.capacity_bytes = new_capacity;
         Ok(())
     }
 
-    /// Requests that dirty mapped pages be flushed to the backing file.
-    ///
-    /// Returns an error if the writer has already been
-    /// [`finalize`](Self::finalize)d.
+    /// Writes dirty mapped pages back to the file and waits until the
+    /// storage device reports them durable (`msync` / `FlushViewOfFile` +
+    /// `FlushFileBuffers`).
     pub fn flush(&self) -> io::Result<()> {
-        self.mmap.as_ref().ok_or_else(finalized_error)?.flush()
+        match &self.mmap {
+            Some(mmap) => mmap.flush(),
+            None => Ok(()),
+        }
     }
 
-    /// Flushes the mapping, unmaps it, and truncates the file to the bytes
-    /// actually written.
+    /// Flushes the log, releases the mapping, trims the preallocated tail,
+    /// and syncs the file, leaving exactly the header plus every record.
     ///
-    /// This removes unused preallocated tail space, leaving only complete
-    /// appended records. The mapping is dropped *before* the file is
-    /// truncated because Windows refuses to shrink a file that still has a
-    /// mapped view open. Safe to call multiple times: later calls only
-    /// re-apply the truncation. If the flush fails the writer stays usable
-    /// and `finalize` can be retried.
-    ///
-    /// After `finalize` the writer is closed: [`append`](Self::append) and
-    /// [`flush`](Self::flush) return an error.
-    pub fn finalize(&mut self) -> io::Result<()> {
-        if let Some(mmap) = &self.mmap {
-            mmap.flush()?;
-        }
-        self.mmap = None;
-        self.file.set_len(self.next_offset as u64)
+    /// Consumes the writer so nothing can be appended afterwards; use
+    /// [`open_append`](Self::open_append) to continue the log later. Dropping
+    /// a writer performs the same steps but ignores any I/O error.
+    pub fn finalize(mut self) -> io::Result<()> {
+        self.release()
+    }
+
+    fn release(&mut self) -> io::Result<()> {
+        let Some(mmap) = self.mmap.take() else {
+            return Ok(());
+        };
+        mmap.flush()?;
+        // Windows refuses to shrink a file while any view of it is mapped.
+        drop(mmap);
+        self.file.set_len(self.next_offset as u64)?;
+        self.file.sync_all()
     }
 
     /// Returns the number of records in the log, including any that were
@@ -433,12 +424,8 @@ impl Drop for WalWriter {
     fn drop(&mut self) {
         // Best-effort finalization: callers can call `finalize` themselves
         // when they need to observe and handle any I/O error.
-        let _ = self.finalize();
+        let _ = self.release();
     }
-}
-
-fn finalized_error() -> io::Error {
-    io::Error::other("WAL writer is already finalized")
 }
 
 /// Reads every valid record from a WAL file for replay.
@@ -457,84 +444,194 @@ pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// A per-process temp file path that is removed when dropped.
+    struct TempPath(PathBuf);
+
+    impl TempPath {
+        fn new(name: &str) -> Self {
+            Self(std::env::temp_dir().join(format!("wal_{name}_{}.bin", std::process::id())))
+        }
+    }
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    fn sample(i: u64) -> WalRecord {
+        match i % 3 {
+            2 => WalRecord::cancel(i - 1, i),
+            0 => WalRecord::new_order(i, Side::Buy, 100 + i as u32, 10 + i, i),
+            _ => WalRecord::new_order(i, Side::Sell, 200 + i as u32, u64::MAX - i, i),
+        }
+    }
+
+    /// Builds a raw log image: a valid header followed by the given slots.
+    fn image(slots: &[[u8; WAL_RECORD_SIZE]]) -> Vec<u8> {
+        let mut bytes = encode_header().to_vec();
+        for slot in slots {
+            bytes.extend_from_slice(slot);
+        }
+        bytes
+    }
+
+    fn file_len(path: &TempPath) -> usize {
+        std::fs::metadata(&path.0).unwrap().len() as usize
+    }
 
     #[test]
-    fn append_and_replay_roundtrip() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("wal_test_{}.bin", std::process::id()));
+    fn encode_decode_roundtrip() {
+        for i in 0..12 {
+            let record = sample(i);
+            assert_eq!(WalRecord::decode(&record.encode()), Ok(record));
+        }
+    }
+
+    #[test]
+    fn decode_rejects_zeroed_and_corrupted_records() {
+        assert_eq!(
+            WalRecord::decode(&[0; WAL_RECORD_SIZE]),
+            Err(WalDecodeError::InvalidKind(0))
+        );
+
+        let good = sample(0).encode();
+        let mut bad_side = good;
+        bad_side[1] = 7;
+        assert_eq!(
+            WalRecord::decode(&bad_side),
+            Err(WalDecodeError::InvalidSide(7))
+        );
+
+        // A flipped bit anywhere in the covered fields or in the checksum
+        // itself is detected.
+        for byte in [2, 4, 8, 15, 16, 24, 31, 32, 35] {
+            let mut torn = good;
+            torn[byte] ^= 0x01;
+            assert_eq!(
+                WalRecord::decode(&torn),
+                Err(WalDecodeError::ChecksumMismatch),
+                "flip in byte {byte} went undetected"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Miri cannot map files.
+    fn append_grow_finalize_and_read_back() {
+        let path = TempPath::new("roundtrip");
+        let mut writer = WalWriter::create(&path.0, 4).unwrap();
+        // Force several growths beyond the preallocated capacity.
+        for i in 0..10 {
+            writer.append(sample(i)).unwrap();
+        }
+        assert_eq!(writer.len(), 10);
+        writer.finalize().unwrap();
+
+        assert_eq!(file_len(&path), WAL_HEADER_SIZE + 10 * WAL_RECORD_SIZE);
+        let records = read_all(&path.0).unwrap();
+        assert_eq!(records, (0..10).map(sample).collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn dropping_a_writer_finalizes_it() {
+        let path = TempPath::new("drop");
         {
-            let mut writer = WalWriter::create(&path, 4).unwrap();
-            writer
-                .append(WalRecord::new_order(1, Side::Buy, 100, 10, 0))
-                .unwrap();
-            writer
-                .append(WalRecord::new_order(2, Side::Sell, 101, 5, 1))
-                .unwrap();
-            writer.append(WalRecord::cancel(1, 2)).unwrap();
-            // Force growth beyond the pre-sized capacity.
-            for i in 3..10u64 {
-                writer
-                    .append(WalRecord::new_order(i, Side::Buy, 100, 1, i))
-                    .unwrap();
-            }
-            writer.flush().unwrap();
+            let mut writer = WalWriter::create(&path.0, 8).unwrap();
+            writer.append(sample(0)).unwrap();
         }
+        assert_eq!(file_len(&path), WAL_HEADER_SIZE + WAL_RECORD_SIZE);
+        assert_eq!(read_all(&path.0).unwrap(), vec![sample(0)]);
+    }
 
-        let records = read_all(&path).unwrap();
-        assert_eq!(records.len(), 10);
-        assert_eq!(records[0].kind, WalRecordKind::NewOrder as u8);
-        assert_eq!(records[0].order_id, 1);
-        assert_eq!(records[0].price_tick, 100);
-        assert_eq!(records[2].kind, WalRecordKind::Cancel as u8);
-        assert_eq!(records[2].order_id, 1);
-        assert_eq!(records[9].order_id, 9);
+    // Crash images are written directly: a writer leaked with
+    // `mem::forget` would keep its view mapped, which blocks the truncation
+    // `open_append` performs on Windows.
 
-        let _ = std::fs::remove_file(&path);
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn read_stops_at_zeroed_preallocated_tail() {
+        let path = TempPath::new("zero_tail");
+        let mut slots: Vec<_> = (0..3).map(|i| sample(i).encode()).collect();
+        slots.extend([[0u8; WAL_RECORD_SIZE]; 5]);
+        std::fs::write(&path.0, image(&slots)).unwrap();
+
+        assert_eq!(
+            read_all(&path.0).unwrap(),
+            (0..3).map(sample).collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn finalize_truncates_file_and_closes_writer() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("wal_finalize_test_{}.bin", std::process::id()));
+    #[cfg_attr(miri, ignore)]
+    fn read_stops_before_a_torn_record() {
+        let path = TempPath::new("torn");
+        let mut slots: Vec<_> = (0..4).map(|i| sample(i).encode()).collect();
+        slots[2][20] ^= 0xFF;
+        std::fs::write(&path.0, image(&slots)).unwrap();
 
-        let mut writer = WalWriter::create(&path, 16).unwrap();
-        for i in 0..3u64 {
-            writer
-                .append(WalRecord::new_order(i, Side::Buy, 100, 1, i))
-                .unwrap();
-        }
-
-        writer.finalize().unwrap();
-        let expected = (writer.len() * WAL_RECORD_SIZE) as u64;
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
-
-        // Idempotent, and the writer is closed afterwards.
-        writer.finalize().unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
-        assert!(writer.flush().is_err());
-        assert!(writer.append(WalRecord::cancel(1, 3)).is_err());
-        assert_eq!(writer.len(), 3);
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), expected);
-
-        drop(writer);
-        let records = read_all(&path).unwrap();
-        assert_eq!(records.len(), 3);
-        assert!(records.iter().all(|r| r.kind == WalRecordKind::NewOrder as u8));
-
-        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            read_all(&path.0).unwrap(),
+            (0..2).map(sample).collect::<Vec<_>>()
+        );
     }
 
     #[test]
-    fn finalize_on_empty_writer_leaves_empty_file() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("wal_empty_test_{}.bin", std::process::id()));
+    #[cfg_attr(miri, ignore)]
+    fn read_ignores_a_partial_trailing_record() {
+        let path = TempPath::new("partial");
+        let mut bytes = image(&[sample(0).encode(), sample(1).encode()]);
+        bytes.extend_from_slice(&sample(2).encode()[..17]);
+        std::fs::write(&path.0, bytes).unwrap();
 
-        let mut writer = WalWriter::create(&path, 4).unwrap();
+        assert_eq!(read_all(&path.0).unwrap(), vec![sample(0), sample(1)]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn open_append_resumes_after_the_last_valid_record() {
+        let path = TempPath::new("resume");
+        let mut slots: Vec<_> = (0..3).map(|i| sample(i).encode()).collect();
+        slots[2][9] ^= 0x10; // torn third record
+        slots.push(sample(3).encode()); // stale data after the tear
+        std::fs::write(&path.0, image(&slots)).unwrap();
+
+        let mut writer = WalWriter::open_append(&path.0, 2).unwrap();
+        assert_eq!(writer.len(), 2);
+        for i in 10..15 {
+            writer.append(sample(i)).unwrap();
+        }
         writer.finalize().unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
-        assert!(read_all(&path).unwrap().is_empty());
 
-        drop(writer);
-        let _ = std::fs::remove_file(&path);
+        let expected: Vec<_> = (0..2).chain(10..15).map(sample).collect();
+        assert_eq!(read_all(&path.0).unwrap(), expected);
+        assert_eq!(file_len(&path), WAL_HEADER_SIZE + 7 * WAL_RECORD_SIZE);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_files_without_a_valid_header() {
+        let path = TempPath::new("bad_header");
+        let is_invalid_data = |result: io::Result<Vec<WalRecord>>| matches!(result, Err(e) if e.kind() == io::ErrorKind::InvalidData);
+
+        std::fs::write(&path.0, [0u8; 8]).unwrap();
+        assert!(is_invalid_data(read_all(&path.0)), "short file");
+
+        let mut bytes = image(&[sample(0).encode()]);
+        bytes[0] ^= 0xFF;
+        std::fs::write(&path.0, &bytes).unwrap();
+        assert!(is_invalid_data(read_all(&path.0)), "bad magic");
+        assert!(
+            matches!(WalWriter::open_append(&path.0, 1), Err(e) if e.kind() == io::ErrorKind::InvalidData),
+            "open_append must reject a bad magic too"
+        );
+
+        let mut bytes = image(&[sample(0).encode()]);
+        bytes[8] = 2;
+        std::fs::write(&path.0, &bytes).unwrap();
+        assert!(is_invalid_data(read_all(&path.0)), "future version");
     }
 }
