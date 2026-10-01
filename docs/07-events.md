@@ -284,4 +284,18 @@ assert_eq!(
 );
 ```
 
+## 7.7 Try it yourself
+
+Run the event tests and the two engine tests that compare sinks:
+
+```sh
+cargo test events::
+cargo test deep_sweep_reports_every_execution
+cargo test bounded_batch_sink_reports_truncation
+```
+
+Then try a closure sink. In [`examples/walkthrough.rs`](../examples/walkthrough.rs),
+replace the `Vec<Event>` in `place` with a closure that prints only `Trade`
+events as they happen, and check that the output still matches 1.10.
+
 **Next:** [8. Ring buffer and WAL](08-ringbuffer-and-wal.md)
