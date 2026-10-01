@@ -134,7 +134,7 @@ the next.
 | 8 | [The ring buffer](docs/08-ring-buffer.md) | The SPSC queue, memory ordering, false sharing, what the type system enforces, disconnect detection |
 | 9 | [The write-ahead log](docs/09-write-ahead-log.md) | Why log, the record format, memory-mapped files, crash safety and its limits, and a complete wired-up program |
 | 10 | [Testing and performance](docs/10-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
-| 11 | [Limitations and exercises](docs/11-limitations-and-exercises.md) | What was fixed and how, known sharp edges, graded exercises, further reading |
+| 11 | [Limitations and exercises](docs/11-limitations-and-exercises.md) | Known sharp edges, graded exercises, retracing past fixes commit by commit, further reading |
 
 **Meet a word you don't know?** The [glossary](docs/glossary.md) explains every
 term the chapters use, from *bid* and *tick* to *memory ordering* and *torn

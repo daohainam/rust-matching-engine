@@ -156,7 +156,7 @@ does exactly that). It is not the engine's own `sequence` counter from chapter 6
 Because it goes up by one per record, it lets you:
 
 - **detect gaps**: if record 41 is followed by record 43, something is missing
-  or damaged (exercise 23 in [chapter 11](11-limitations-and-exercises.md) builds
+  or damaged (exercise 20 in [chapter 11](11-limitations-and-exercises.md) builds
   on this);
 - **name a request** outside the log, for example to remember "events have been
   published up to request 41" (see *What about the events?* in 9.5).

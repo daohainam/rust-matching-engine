@@ -211,7 +211,7 @@ const _: () = assert!(
 produces a program at all. Try it: set `TICKS` to 4160 and `cargo build` stops
 with `error[E0080]: evaluation panicked: TICKS must be a multiple of 64 and at
 most 4096`. Turning a comment into a compile-time check is cheap insurance for
-exactly the kind of change exercise 14 asks for.
+exactly the kind of change exercise 13 asks for.
 
 Need more ticks? Add another level: three levels of `u64` cover `64³ = 262,144`
 ticks, with `highest()` / `lowest()` still taking only 3 bit-scans. (That is one
