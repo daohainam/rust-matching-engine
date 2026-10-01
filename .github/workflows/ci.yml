@@ -43,6 +43,8 @@ jobs:
       - run: cargo bench --no-run --locked
       # The complete program from chapter 8, Part C.
       - run: cargo run --release --locked --example pipeline
+      # Chapter 1's worked example; its assertions pin the book after each step.
+      - run: cargo run --release --locked --example walkthrough
 
   msrv:
     name: MSRV (1.88)
