@@ -265,6 +265,31 @@ the log.
    there.
 3. Only then start accepting new requests.
 
+Here is what the file looks like at each step, for a writer that crashed while
+writing its fourth record:
+
+```text
+ after the crash:
+   [ header ][ rec 0 ][ rec 1 ][ rec 2 ][ rec 3: torn ][ 00 00 00 ... preallocated, never written ]
+                                         ^ checksum fails
+
+ read_all:      header OK, rec 0, rec 1, rec 2 are valid; rec 3 fails -> stop.
+                Returns 3 records; replay them into Engine::new(same capacity).
+
+ open_append:   finds the same first invalid record, cuts the file there,
+                and grows it again with fresh zeros:
+   [ header ][ rec 0 ][ rec 1 ][ rec 2 ][ 00 00 00 ... room for new records ]
+                                         ^ the next append writes here
+```
+
+The torn record is lost. If the crash interrupted that very append, losing it is
+correct: the log is written *ahead*, so the request had not been applied to the
+engine yet. After a power loss, though, the lost tail can also hold requests that
+*were* applied but not yet flushed to disk; 9.6 explains how `flush` decides
+that. The test
+`open_append_resumes_after_the_last_valid_record` builds the same situation (a torn
+record with stale data after it) and checks that only the valid records survive.
+
 On the very first start there is no log yet, so a service typically does this:
 
 ```rust
