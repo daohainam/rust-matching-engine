@@ -287,7 +287,8 @@ much later.
 ## 3.8 Walk-through with the running example
 
 Start from an empty engine with capacity 16 and replay the first three orders of
-the worked example.
+the worked example. Every call also takes the event sink as its last argument
+(`&mut events`); it is left out of the table to keep the rows short.
 
 | Step | Call | `pool` effect | Queue state |
 |---|---|---|---|
@@ -295,7 +296,7 @@ the worked example.
 | 2 | `process_order(2, Sell, 101, 3)` | `allocate` -> slot 1 | `ask[101]`: slot 1 |
 | 3 | `process_order(3, Sell, 101, 4)` | `allocate` -> slot 2; `push_back` links `1 -> 2` | `ask[101]`: slot 1, slot 2 (`total_qty = 7`) |
 | 4 | `cancel_order(2)` *(hypothetical)* | `remove(slot 1)`: head becomes slot 2; `free(1)` | `ask[101]`: slot 2 only (`total_qty = 4`) |
-| 5 | `process_order(4, Sell, 100, 1)` | `allocate` pops the **most recently freed** slot 1 | `ask[100]`: slot 1 |
+| 5 | `process_order(7, Sell, 100, 1)` *(new id; `#4` is taken in chapter 1)* | `allocate` pops the **most recently freed** slot 1 | `ask[100]`: slot 1 |
 
 Step 5 shows LIFO reuse: slot 1 was freed in step 4 and is the first one handed
 out again.
