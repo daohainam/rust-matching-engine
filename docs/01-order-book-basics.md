@@ -181,7 +181,17 @@ extension ideas.
 
 Follow this example carefully; we reuse it in
 [chapter 6](06-matching-algorithm.md) to show what the engine does internally.
-Every output below was produced by running the real engine.
+Every output below was produced by running the real engine, and you can
+reproduce it yourself:
+
+```sh
+cargo run --example walkthrough
+```
+
+The program ([`examples/walkthrough.rs`](../examples/walkthrough.rs)) sends the
+orders below one by one and prints the events and the book after each step.
+Its book shows the total quantity per price; the queues of individual orders in
+the diagrams below are what chapters 3 and 6 build.
 
 **Step 1 to 5: five orders arrive, none can trade, so all of them rest.**
 

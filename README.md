@@ -131,6 +131,10 @@ the next.
 | 9 | [Testing and performance](docs/09-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
 | 10 | [Limitations and exercises](docs/10-limitations-and-exercises.md) | What was fixed and how, known sharp edges, graded exercises, further reading |
 
+**Want to see it run first?** `cargo run --example walkthrough` replays the
+worked example from chapter 1 and prints the events and the book after every
+order.
+
 **In a hurry?** Read chapter 1 (concepts), skim chapter 2 (the map), then jump to
 chapter 6 (the algorithm); follow its links back to chapters 3 to 5 when a data
 structure is unfamiliar.
@@ -157,6 +161,7 @@ tests/
   zero_alloc.rs  counting global allocator proves zero heap allocations
   docs_sync.rs   chapter 8 must show examples/pipeline.rs verbatim
 examples/
+  walkthrough.rs chapter 1's worked example, printing events and the book
   pipeline.rs    ring buffer -> WAL -> engine -> replay, in one program
 benches/
   matching_engine_bench.rs   criterion micro-benchmarks
@@ -184,6 +189,7 @@ Details, consequences and workarounds are in
 cargo test                      # unit, integration and doc tests (this README included)
 cargo test --test model_check   # the engine against a simple reference book
 cargo test --test zero_alloc    # verifies zero heap allocations on the hot path
+cargo run --example walkthrough # chapter 1's worked example, step by step
 cargo run --example pipeline    # the complete program from chapter 8
 cargo bench                     # criterion micro-benchmarks
 ```
