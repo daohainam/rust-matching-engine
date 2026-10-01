@@ -758,4 +758,22 @@ What it demonstrates:
   ends in exactly the same state. That is what makes the WAL useful for recovery,
   testing, and audits.
 
+## 8.12 Try it yourself
+
+Run the ring buffer and WAL tests, the replay test, and the complete program
+from Part C:
+
+```sh
+cargo test ringbuffer::
+cargo test wal::
+cargo test --test wal_replay
+cargo run --example pipeline
+```
+
+Then simulate a crash. In [`examples/pipeline.rs`](../examples/pipeline.rs), call
+`std::process::abort()` inside the matching loop after, say, 5,000 requests, and
+run the example. Write a few lines that open the log with `read_all` and count
+how many records survived. (Undo the change afterwards: chapter 8 must show the
+example exactly as it is in the repository, and `cargo test` checks that.)
+
 **Next:** [9. Testing and performance](09-testing-and-performance.md)
