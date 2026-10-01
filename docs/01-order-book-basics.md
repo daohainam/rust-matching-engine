@@ -276,4 +276,25 @@ Events are how the engine talks to the outside world; see
 | Arena           | A big pre-allocated array that objects live in (chapter 3)               |
 | Hot path        | The code that runs for every order; the part that must be fastest        |
 
+## 1.12 Try it yourself
+
+Run the worked example and compare its output with 1.10:
+
+```sh
+cargo run --example walkthrough
+```
+
+Then change it. In [`examples/walkthrough.rs`](../examples/walkthrough.rs), make
+`#6` a `Buy 14 @ 101` instead of `@ 102`. **Before running it**, predict which
+makers it trades with, how much is left over, and at what price the remainder
+rests. (The `assert_eq!` lines after step 6 will fail with the new numbers;
+update them to your prediction.)
+
+The unit test that pins down price-time priority is a short, readable example
+of the engine's API:
+
+```sh
+cargo test price_time_priority_within_a_level_is_fifo
+```
+
 **Next:** [2. Architecture overview](02-architecture.md)
