@@ -135,6 +135,10 @@ the next.
 | 9 | [Testing and performance](docs/09-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
 | 10 | [Limitations and exercises](docs/10-limitations-and-exercises.md) | What was fixed and how, known sharp edges, graded exercises, further reading |
 
+**Meet a word you don't know?** The [glossary](docs/glossary.md) explains every
+term the chapters use, from *bid* and *tick* to *memory ordering* and *torn
+write*, and says which chapter covers it.
+
 **Want to see it run first?** `cargo run --example walkthrough` replays the
 worked example from chapter 1 and prints the events and the book after every
 order.
@@ -169,7 +173,7 @@ examples/
   pipeline.rs    ring buffer -> WAL -> engine -> replay, in one program
 benches/
   matching_engine_bench.rs   criterion micro-benchmarks
-docs/            the chapters listed above
+docs/            the chapters listed above, plus glossary.md
 .github/workflows/ci.yml     CI: Linux (x64 and arm64), Windows, Miri, MSRV
 ```
 
