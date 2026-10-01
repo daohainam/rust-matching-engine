@@ -218,8 +218,8 @@ if prev != NIL { pool.get_mut(prev).next_idx = next; } else { self.head = next; 
 if next != NIL { pool.get_mut(next).prev_idx = prev; } else { self.tail = prev; }
 ```
 
-Then the removed node's own links are reset to `NIL`, `count -= 1`, and
-`total_qty -= remaining_qty`.
+Then the removed node's own links are reset to `NIL`, and `count` and
+`total_qty` are decreased (with checked subtraction, see 3.7).
 
 This is exactly why the list is **doubly** linked: to cancel `B` in O(1) we must
 be able to reach `A` (to update `A.next`) without walking from the head.
@@ -252,7 +252,7 @@ corrupt.
 
 ## 3.7 Defensive checks
 
-The pool protects itself against two kinds of trouble, both visible in the code:
+The pool protects itself against three kinds of trouble, all visible in the code:
 
 **Overflow on insert.** `push_back` uses `checked_add` on `total_qty`. If a
 hostile or buggy client sends a quantity so large that the level's total would
@@ -260,19 +260,29 @@ exceed `u64::MAX`, `push_back` returns `false` *without touching anything*. The
 method is `#[must_use]`, and the engine reacts by removing the order's `id_map`
 entry, freeing the slot and emitting `OrderRejected`.
 
-**Underflow on remove / reduce.** These use `.checked_sub(..).expect(..)`. If
-the books are ever inconsistent, the program panics immediately instead of
-silently wrapping a `u64` to a gigantic number. The crate's release profile sets
-`panic = "abort"`, which turns such a panic into a process abort in a binary built
-with that setting (see [chapter 9](09-testing-and-performance.md#95-build-profiles)
-for the caveat about libraries). That is the intent: for a financial system,
-stopping loudly beats continuing with a corrupt book.
+**Underflow on remove / reduce.** `remove` decreases both `count` and
+`total_qty`, and `reduce_qty` decreases `remaining_qty` and `total_qty`, all with
+`.checked_sub(..).expect(..)`. If the books are ever inconsistent, the program
+panics immediately with a message naming the broken invariant, instead of
+silently wrapping a counter to a gigantic number.
 
-> [!WARNING]
-> `OrderPool::free` only uses a `debug_assert!` to catch double frees. In a
-> release build, freeing the same slot twice would push it on the free stack
-> twice, and two different orders could later receive the same slot. The engine
-> never does this, but it is a rule any code calling `free` must follow.
+**Double free.** `OrderPool::free` checks the slot's `in_use` flag with a real
+`assert!`. Freeing the same slot twice would otherwise push it on the free stack
+twice, and two different orders could later receive the same slot, silently
+corrupting both of their queues. The engine never does this; the check is there
+so that a bug in new code (an exercise, say) fails at the faulty call instead of
+much later.
+
+> [!NOTE]
+> **Why `assert!` and not `debug_assert!`?** A `debug_assert!` is compiled out
+> of release builds, which is exactly where nobody is watching. Release builds
+> also stop checking arithmetic overflow, so a bare `count -= 1` would wrap
+> silently there. These checks cost one predictable branch each, on data that is
+> already in cache. The crate's release profile sets `panic = "abort"`, which
+> turns such a panic into a process abort in a binary built with that setting
+> (see [chapter 9](09-testing-and-performance.md#95-build-profiles) for the
+> caveat about libraries). That is the intent: for a financial system, stopping
+> loudly beats continuing with a corrupt book.
 
 ## 3.8 Walk-through with the running example
 
