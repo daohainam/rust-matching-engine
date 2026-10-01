@@ -41,7 +41,8 @@ pub struct Order {
     pub next_idx: u32,
     /// Arena index of the previous order in this price level's FIFO queue.
     pub prev_idx: u32,
-    /// Whether this arena slot currently contains a live order.
+    /// Whether this arena slot currently contains a live order;
+    /// [`OrderPool::free`] checks it to catch double frees.
     pub in_use: bool,
 }
 
@@ -133,9 +134,18 @@ impl OrderPool {
     }
 
     /// Releases a slot back to the free list. O(1) worst case.
+    ///
+    /// # Panics
+    /// Panics if the slot is not in use (a double free).
     #[inline]
     pub fn free(&mut self, idx: u32) {
-        debug_assert!(self.orders[idx as usize].in_use);
+        // A real check, not `debug_assert!`: in release builds a double free
+        // would push the slot twice, and two different orders could later be
+        // handed the same slot.
+        assert!(
+            self.orders[idx as usize].in_use,
+            "OrderPool::free: slot {idx} is not in use (double free)"
+        );
         self.orders[idx as usize].in_use = false;
         // Push the slot back so the next allocation can reuse it.
         self.free_stack[self.free_top] = idx;
@@ -289,6 +299,15 @@ mod tests {
         let c = pool.allocate(3, Side::Buy, 10, 300, 2).unwrap();
         assert_eq!(pool.live_count(), 2);
         assert_ne!(b, c);
+    }
+
+    #[test]
+    #[should_panic(expected = "double free")]
+    fn double_free_is_detected() {
+        let mut pool = OrderPool::new(4);
+        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
+        pool.free(a);
+        pool.free(a);
     }
 
     #[test]
