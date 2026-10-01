@@ -454,4 +454,28 @@ debugging. (It uses `wrapping_add`, so it never panics.)
 `live_order_count`, the bitset and pool accessors) removes call overhead in the
 hot loop.
 
+## 6.11 Try it yourself
+
+Run every engine test, then the differential test that compares the engine with
+a deliberately simple reference book over 160,000 random calls:
+
+```sh
+cargo test engine::
+cargo test --test model_check
+```
+
+To watch the trace from 6.5 happen, run the chapter 1 example:
+
+```sh
+cargo run --example walkthrough
+```
+
+Then break something on purpose. In `match_incoming` in
+[`src/engine.rs`](../src/engine.rs), change `Crossing::TakerBuy => tick as u32 <= price_tick`
+to `Crossing::TakerBuy => (tick as u32) < price_tick`, so a buy no longer trades
+at exactly its limit price. (The parentheses are needed: without them Rust reads
+`u32 <` as the start of a generic type such as `u32<...>`.) Predict which tests
+fail, run `cargo test`, and see whether you were right. (Undo the change
+afterwards.)
+
 **Next:** [7. Events](07-events.md)
