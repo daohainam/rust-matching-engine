@@ -32,7 +32,8 @@ struct Slot {
 /// Fixed-capacity open-addressing hash map from `u64` order ID to `u32`
 /// order index. All storage is pre-allocated in `new()`; the table never
 /// resizes, so callers must choose a hint large enough for the maximum live
-/// entry count and keep at least one slot empty for probe termination.
+/// entry count. [`insert`](Self::insert) always keeps at least one slot empty,
+/// which is what lets every probe loop terminate.
 pub struct FlatHashMap {
     slots: Box<[Slot]>,
     mask: usize,
@@ -107,12 +108,13 @@ impl FlatHashMap {
     /// Collisions are resolved by checking consecutive slots until an empty
     /// slot or matching key is found. This is expected O(1) with a suitable
     /// load factor, but can take O(capacity) in the worst case. The table does
-    /// not grow, and callers must leave at least one slot empty so a missing
-    /// key has a stopping point.
+    /// not grow.
     ///
     /// # Panics
     /// Panics if `key` is [`RESERVED_KEY`], because that value marks empty
-    /// slots and cannot also represent a stored key.
+    /// slots and cannot also represent a stored key. Also panics if inserting
+    /// a new key would fill the last empty slot, since every probe loop needs
+    /// an empty slot to stop at.
     pub fn insert(&mut self, key: u64, value: u32) -> Option<u32> {
         // This is a real (non-debug-only) check rather than `debug_assert!`:
         // in release builds, a caller-supplied `key == EMPTY` would be
@@ -126,6 +128,13 @@ impl FlatHashMap {
         loop {
             let slot = &mut self.slots[idx];
             if slot.key == EMPTY {
+                // `get`, `insert` and `remove` all stop at the first EMPTY
+                // slot, so the last one must never be filled: fail loudly
+                // here instead of letting a later lookup spin forever.
+                assert!(
+                    self.len + 1 < self.mask + 1,
+                    "FlatHashMap is full: at least one slot must stay empty"
+                );
                 slot.key = key;
                 slot.value = value;
                 self.len += 1;
@@ -143,8 +152,8 @@ impl FlatHashMap {
     /// Looks up `key` using linear probing.
     ///
     /// Expected O(1) for a suitably sized table; worst-case O(capacity) when
-    /// many slots must be examined. As with insertion, the table must retain
-    /// an empty slot so a missing key's probe can terminate.
+    /// many slots must be examined. A missing key's probe always terminates
+    /// because [`insert`](Self::insert) never fills the last empty slot.
     #[inline]
     pub fn get(&self, key: u64) -> Option<u32> {
         let mut idx = self.hash(key) & self.mask;
@@ -271,6 +280,18 @@ mod tests {
         // still incrementing `len`, corrupting the map's bookkeeping.
         let mut map = FlatHashMap::with_capacity(16);
         map.insert(RESERVED_KEY, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "FlatHashMap is full")]
+    fn insert_refuses_to_fill_the_last_empty_slot() {
+        // 32 slots: 31 keys fit, the 32nd would leave no slot for a probe to
+        // stop at, so `get` of a missing key would loop forever.
+        let mut map = FlatHashMap::with_capacity(16);
+        assert_eq!(map.capacity(), 32);
+        for key in 0..32u64 {
+            map.insert(key, 0);
+        }
     }
 
     #[test]
