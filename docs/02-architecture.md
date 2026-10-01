@@ -167,7 +167,7 @@ sequenceDiagram
         E->>M: insert id -> slot
         E->>L: push to own level queue, set own bitset bit
     end
-    Note over E,C: If no slot is free (or the level total would overflow), OrderRejected is emitted instead
+    Note over E,C: If no slot is free (or the level total would overflow), OrderRejected(BookFull or LevelQuantityOverflow) is emitted instead
 ```
 
 (The diagram is simplified: the exact order and all failure branches are in
