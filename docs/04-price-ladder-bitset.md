@@ -249,4 +249,17 @@ The bit is maintained at exactly three places:
 - Best price = two hardware bit-scans: **O(1)**, no loops, no allocation.
 - `clear` only clears the summary bit when the whole word becomes empty.
 
+## 4.9 Try it yourself
+
+Run the bitset's unit tests:
+
+```sh
+cargo test bitset::
+```
+
+Then write a small test of your own at the end of the `tests` module in
+[`src/bitset.rs`](../src/bitset.rs): set ticks `5`, `70` and `4000`, predict what
+`lowest()` and `highest()` return, and which bits of `summary` are set, then
+check with `assert_eq!`. Clear tick `5` and predict again.
+
 **Next:** [5. The flat hash map](05-hash-map.md)
