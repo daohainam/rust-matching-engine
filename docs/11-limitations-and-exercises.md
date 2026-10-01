@@ -53,15 +53,24 @@ grouped by topic; inside each group they go from easier to harder. Hints are
 deliberately short, because the chapters contain the ingredients.
 
 Work on a branch (`git switch -c my-exercise`) so `main` stays as the chapters
-describe it, and run `cargo test` often.
+describe it, and run `cargo test` often. Every exercise ends with a **Done when**
+line: a test to write or an output to see, so you know when you have finished.
 
 ### Getting comfortable
 
 🟢 **1. `Engine::spread()`.** Return `Option<u32>`: best ask minus best bid, or
 `None` if either side is empty. Test it on the worked example from chapter 1.
 
+**Done when:** a test replays steps 1 to 5 of the worked example and gets
+`Some(1)` (ask 101, bid 100), and gets `None` both on an empty book and after step
+6, when no asks are left.
+
 🟢 **2. Order count per level.** `PriceLevel::count` already exists. Add
 `Engine::order_count_at(side, tick) -> u32`. *Hint: mirror `depth_at`.*
+
+**Done when:** after steps 1 to 5 of the worked example,
+`order_count_at(Side::Sell, 101)` is 2 and `order_count_at(Side::Buy, 99)` is 1,
+and a tick of 4096 or more returns 0 instead of panicking.
 
 🟢 **3. Draw the queues.** [`examples/walkthrough.rs`](../examples/walkthrough.rs)
 prints the total quantity per price. Extend it to print each level's queue of
@@ -69,10 +78,16 @@ orders, like the diagrams in chapter 1 (`[#2:3] -> [#3:4]`). *Hint: walk
 `head -> next_idx` until `NIL`; you will need to expose read access to a level's
 orders, for example with an iterator method on `Engine`.*
 
-🟢 **4. Watch truncation happen.** Rest 40 sells at one price, sweep them with one
-buy into an `EventBatch`, and print `len()` and `dropped()`. Then repeat with a
+**Done when:** after step 5, `cargo run --example walkthrough` prints the 101
+level as `[#2:3] -> [#3:4]`, and `cargo test` still passes.
+
+🟢 **4. Watch truncation happen.** Rest 40 sells of quantity 1 at one price, sweep
+them with one buy of 40 into an `EventBatch`, and print `len()` and `dropped()`. Then repeat with a
 `Vec<Event>`. *Compare with the unit tests `bounded_batch_sink_reports_truncation`
 and `deep_sweep_reports_every_execution`.*
+
+**Done when:** the batch reports `len() == 64` and `dropped() == 18`, and the
+`Vec` holds all 82 events (1 acceptance, 40 trades, 40 maker fills, 1 taker fill).
 
 ### Understanding the internals
 
@@ -83,16 +98,25 @@ reaches 40 bytes by itself (see [3.3](03-order-pool.md#33-the-order-record)).
 Then try `#[repr(C, align(64))]` instead and benchmark both against the original.
 *Which wins, and does it depend on the book size?*
 
+**Done when:** a test pins `size_of::<Order>()` at 40, every other test still
+passes, and you have benchmark numbers for all three layouts.
+
 🟡 **6. Fast `next_set`.** Replace the linear `next_lower_active` /
 `next_higher_active` in `depth_snapshot` with bitset methods `prev_set(tick)` /
 `next_set(tick)`. *Hint: mask off the bits at and below (or above) `tick` in its
 word with a shift, check the word; if empty, use the summary word the same way.*
 Unit-test against the old linear version with random bitsets.
 
+**Done when:** a test compares `next_set` / `prev_set` with the linear versions on
+thousands of random bitsets, and `cargo test --test model_check` still passes.
+
 🟡 **7. What does the seed cost?** The hash map mixes a secret seed into every
 hash (chapter 5). Write a criterion benchmark of `get` on a full-ish map, then a
 copy of `FlatHashMap` without the seed, and compare. *Hint: put the copy in the
 benchmark file, not in `src/`, so the engine keeps its protection.*
+
+**Done when:** you have both numbers from the same machine, and can say whether
+the difference is bigger than the run-to-run noise criterion reports.
 
 ### New features
 
@@ -102,14 +126,25 @@ the unfilled remainder: `OrderCancelled`, or `OrderRejected` with a new
 `RejectReason`? Justify your choice.
 (Remember the rule from 6.9: the book must be consistent at every `emit`.)
 
+**Done when:** tests show that an IOC order that partly fills emits its trades and
+then your chosen remainder event, an IOC order that cannot trade at all emits no
+trades, and in both cases `live_order_count()` does not grow.
+
 🟡 **9. Market orders.** A buy with `price_tick = 4095` crosses every ask, but its
 remainder would *rest* at 4095, which is not what a market order means. Build real
 market orders on top of IOC (exercise 8).
+
+**Done when:** a market buy sweeps the asks at every price and never rests, and a
+market order on an empty book emits only acceptance and the remainder event.
 
 🟡 **10. Reduce-quantity in place.** Let a trader *lower* an order's quantity
 without losing time priority (raising it must still lose priority, as a
 cancel + new would). *Hint: adjust `remaining_qty` and `level.total_qty`
 together, as `reduce_qty` does. Reducing to zero should behave like a cancel.*
+
+**Done when:** a test rests two orders at one price, reduces the first, and shows
+that a taker still fills the first one first; `depth_at` drops by the reduction,
+and reducing to zero emits `OrderCancelled`.
 
 🔴 **11. Self-trade prevention.** Add an `account: u32` to `Order`. When a taker
 would trade with its own account's resting order, apply a policy (cancel oldest,
@@ -119,12 +154,19 @@ emitted. Pass the taker's account in, and remember that "cancel oldest" removes
 a maker, so it must keep the level, the bitset and the id map consistent exactly
 as a full fill does.*
 
+**Done when:** each policy has a test where taker and maker share an account, and
+`model_check` still passes when every order has its own account.
+
 ### Engineering and verification
 
 🟡 **12. Shrinking failures.** `tests/model_check.rs` finds bugs with long random
 request streams, but a failure is reported deep inside a 20,000-step run. Port
 its generator to [`proptest`](https://docs.rs/proptest), so that a failure
 shrinks to the smallest request sequence that reproduces it.
+
+**Done when:** after you break the engine on purpose (the `<=` to `<` change from
+[6.11](06-matching-algorithm.md#611-try-it-yourself)), proptest reports a failing
+sequence of only a few requests.
 
 🔴 **13. Three-level bitset.** Generalise `TwoLevelBitset` to `N` levels of `u64`
 (3 levels = 262,144 ticks). Keep `lowest()` and `highest()` loop-free for a fixed
@@ -134,6 +176,10 @@ the middle level. `lowest()` becomes three bit-scans: top word, then the middle
 word it points to, then the bottom word. `set` and `clear` update up to three
 words; `clear` may only clear a summary bit once the word below it is zero.*
 
+**Done when:** the existing bitset tests pass with three levels, a new test finds
+`lowest()` and `highest()` among ticks near 0, 4,096 and 262,143, and
+`model_check` still passes.
+
 🔴 **14. Shard by symbol.** Run four `Engine`s on four threads, each fed by its own
 ring buffer, routing requests by a symbol id. Verify that the books are
 independent and throughput scales. *Hint: start from
@@ -141,6 +187,9 @@ independent and throughput scales. *Hint: start from
 `Producer` per shard and pick it with `symbol % 4`; each matching thread keeps
 its own `Engine` and its own WAL file. For the independence check, replay each
 shard's log separately and compare with a single-threaded run per symbol.*
+
+**Done when:** each shard's book equals a single-threaded replay of that shard's
+requests, and a benchmark shows throughput with 1, 2 and 4 shards.
 
 🔴 **15. Model-check the ring buffer with [`loom`](https://docs.rs/loom).** Write
 loom tests for `push`/`pop` and for `is_disconnected`. Then weaken one `Acquire`
@@ -152,6 +201,9 @@ job may miss. *Hint: loom needs its own versions of the concurrency types. Under
 ...)`, and run with `RUSTFLAGS="--cfg loom" cargo test --release`. Keep the
 tests small (two or three pushes): loom tries every interleaving.*
 
+**Done when:** the loom tests pass with the real orderings, and loom reports a
+failure once one `Acquire` is weakened to `Relaxed`.
+
 ### Making the WAL production-shaped
 
 🟡 **16. Record the capacity.** Replay is only deterministic with the same `Engine`
@@ -159,23 +211,42 @@ capacity (9.1). Store it in the header's reserved bytes (format version 2), and
 make replay refuse a log written for a different capacity. Keep version 1 logs
 readable.
 
+**Done when:** replaying a version 2 log into an engine of a different capacity
+returns a clear error, and the version 1 logs written by the existing tests still
+read correctly.
+
 🟡 **17. One writer per file.** Take an exclusive lock with `File::try_lock` in
 `create` and `open_append` (stable since Rust 1.89, so raise `rust-version`), and
 test that a second writer gets a clear error instead of corrupting the log.
 
+**Done when:** a test shows that opening a second writer on a log that is in use
+fails with an error, and that the first writer keeps working.
+
 🔴 **18. Atomic `create`.** Write the header to `path.tmp`, sync it, rename it to
 `path`, then sync the parent directory (on Unix). For each step, explain what a
 crash right before it would leave behind, and why the step is needed.
+
+**Done when:** you can explain each step's purpose in one sentence, and a test
+shows that a leftover `path.tmp` from an interrupted `create` does not stop the
+next `create`.
 
 🔴 **19. No surprise `SIGBUS`.** Make a full disk an `io::Error` from `create` or
 `append` instead of a crash later: allocate the file's blocks up front
 (`posix_fallocate` through the `libc` crate, or by writing zeros). Measure how
 much slower growth becomes.
 
+**Done when:** on a deliberately tiny filesystem (for example a size-limited
+`tmpfs` on Linux), filling the disk makes `create` or `append` return an
+`io::Error` instead of killing the process.
+
 🔴 **20. Corruption in the middle.** `open_append` discards everything after the
 first invalid record. Design a policy that tells a torn tail (normal after a
 crash) from damage in the middle (valid records *after* a bad one), and decide
 what each should do. *Hint: look at the sequence numbers.*
+
+**Done when:** a test with a damaged record followed by valid ones gets your
+policy's result (for example an error) instead of silently losing the valid
+records, while a torn tail still recovers as before.
 
 ## 11.3 Retrace the fixes
 
