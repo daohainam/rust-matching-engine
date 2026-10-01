@@ -27,6 +27,11 @@ the **limit order**. A limit order has four pieces of information:
 | `qty`      | How many units (shares, lots, contracts...).                   | `qty: u64`                  |
 | `order_id` | A unique label so the order can be referred to (e.g. cancelled). | `order_id: u64`             |
 
+"Unique" here means *unique among orders that are still in the book*. The engine
+rejects a new order whose id belongs to a resting order, but once an order has
+been fully filled or cancelled it forgets the id, so the same id can be used
+again. A real exchange usually forbids that; here it is the caller's job.
+
 The price is a **limit**, which means:
 
 - A **buy** at 100 says *"I'll pay 100 or less."*
