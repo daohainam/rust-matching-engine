@@ -256,11 +256,14 @@ impl PriceLevel {
         }
         pool.get_mut(idx).prev_idx = NIL;
         pool.get_mut(idx).next_idx = NIL;
-        self.count -= 1;
         // Using `checked_sub().expect(..)` rather than a bare `-=` turns a
         // broken bookkeeping invariant into a loud, deterministic panic in
         // every build profile instead of a silently wrapped (and much
-        // larger) `total_qty` in release builds.
+        // larger) counter in release builds.
+        self.count = self
+            .count
+            .checked_sub(1)
+            .expect("PriceLevel::count underflow: bookkeeping invariant violated");
         self.total_qty = self
             .total_qty
             .checked_sub(qty)
@@ -308,6 +311,17 @@ mod tests {
         let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
         pool.free(a);
         pool.free(a);
+    }
+
+    #[test]
+    #[should_panic(expected = "count underflow")]
+    fn removing_from_an_empty_level_is_detected() {
+        // The order was allocated but never pushed onto this level, so the
+        // level has nothing to remove: a bookkeeping bug in the caller.
+        let mut pool = OrderPool::new(4);
+        let mut level = PriceLevel::empty();
+        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
+        level.remove(&mut pool, a);
     }
 
     #[test]
