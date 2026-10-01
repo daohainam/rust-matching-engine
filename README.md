@@ -57,11 +57,15 @@ allocates by itself ([chapter 7](docs/07-events.md)).
 More of the API:
 
 ```rust
-use matching_engine::{Engine, Event, Side};
+use matching_engine::{Engine, Event, RejectReason, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
 engine.process_order(1, Side::Buy, 100, 10, &mut events); // resting bid: 10 @ tick 100
+
+engine.process_order(2, Side::Buy, 5_000, 10, &mut events); // tick 5000 is out of range
+let rejected = Event::OrderRejected { order_id: 2, reason: RejectReason::PriceOutOfRange };
+assert_eq!(events.last(), Some(&rejected)); // a rejection always says why
 
 assert_eq!(engine.best_bid(), Some(100)); // highest resting buy tick
 assert_eq!(engine.best_ask(), None); // lowest resting sell tick
@@ -146,7 +150,7 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, Event, EventBatch, EventSink, Side
+  lib.rs         crate root; re-exports Engine, Event, EventBatch, EventSink, RejectReason, Side
   engine.rs      matching core: process_order, cancel_order, depth queries
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
   bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
