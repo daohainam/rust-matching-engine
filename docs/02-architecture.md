@@ -54,12 +54,12 @@ flowchart LR
 | `bitset`     | [`src/bitset.rs`](../src/bitset.rs)       | Finds the best bid / best ask in O(1). | [4](04-price-ladder-bitset.md) |
 | `hashmap`    | [`src/hashmap.rs`](../src/hashmap.rs)     | Maps `order_id` to the order's arena slot, for cancellation. | [5](05-hash-map.md) |
 | `events`     | [`src/events.rs`](../src/events.rs)       | The `Event` enum, the `EventSink` trait the engine reports through, and a bounded `EventBatch` sink. | [7](07-events.md) |
-| `ringbuffer` | [`src/ringbuffer.rs`](../src/ringbuffer.rs) | Lock-free queue, split into `Producer` and `Consumer` handles, to feed the engine from another thread. | [8](08-ringbuffer-and-wal.md) |
-| `wal`        | [`src/wal.rs`](../src/wal.rs)             | Append-only binary log of requests, for replay and recovery. | [8](08-ringbuffer-and-wal.md) |
+| `ringbuffer` | [`src/ringbuffer.rs`](../src/ringbuffer.rs) | Lock-free queue, split into `Producer` and `Consumer` handles, to feed the engine from another thread. | [8](08-ring-buffer.md) |
+| `wal`        | [`src/wal.rs`](../src/wal.rs)             | Append-only binary log of requests, for replay and recovery. | [9](09-write-ahead-log.md) |
 
 Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`,
 but **not** on `ringbuffer` or `wal`. Those two are independent building blocks
-that *you* wire around the engine (chapter 8 shows how).
+that *you* wire around the engine (chapters 8 and 9 show how).
 
 The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the five names most
 users need: `Engine`, `Event`, `EventSink`, `EventBatch` and `Side`.
@@ -270,7 +270,7 @@ requests through a queue into one thread that owns the data.
 
 Note that in this pipeline the WAL append also runs on the matching thread. It is
 a plain memory copy almost always, but it occasionally has to grow and re-map
-the file, which is a latency spike (chapter 8).
+the file, which is a latency spike (chapter 9).
 
 To scale beyond one thread, run **one engine per instrument** (or per group of
 instruments), each on its own core.
@@ -278,7 +278,7 @@ instruments), each on its own core.
 ## 2.8 What "zero allocation" does and does not mean
 
 It means **no heap allocation inside `process_order` and `cancel_order`**, and
-this is tested (see [chapter 9](09-testing-and-performance.md)).
+this is tested (see [chapter 10](10-testing-and-performance.md)).
 
 These things *do* allocate, and that is fine because they are not on the hot path:
 
@@ -294,7 +294,7 @@ These things *do* allocate, and that is fine because they are not on the hot pat
 > `Vec<Event>` sink allocates when it grows (reuse one and it stops growing after
 > warm-up), a closure can do anything, and an `EventBatch` never allocates. The
 > zero-allocation test drives the engine through an `EventBatch` and a counting
-> closure, so it measures the engine alone (chapter 9).
+> closure, so it measures the engine alone (chapter 10).
 
 ## 2.9 Try it yourself
 
@@ -308,7 +308,7 @@ cargo doc --open
 Then open [`src/engine.rs`](../src/engine.rs) and find each `Engine` field from
 2.3 and the place where `new` allocates it. Every allocation that order
 processing needs happens in that one function (only inspection helpers such as
-`depth_snapshot` allocate later); [chapter 9](09-testing-and-performance.md) shows
+`depth_snapshot` allocate later); [chapter 10](10-testing-and-performance.md) shows
 the test that proves it:
 
 ```sh

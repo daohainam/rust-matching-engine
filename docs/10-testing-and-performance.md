@@ -1,4 +1,4 @@
-# 9. Testing and Performance
+# 10. Testing and Performance
 
 > **New word?** Every technical term in these chapters is explained in the
 > [glossary](glossary.md).
@@ -21,7 +21,7 @@ cargo bench                     # criterion micro-benchmarks
 > failing library test would hide the integration tests. Use `--no-fail-fast`, or
 > name one test binary explicitly as above, when you want every result.
 
-## 9.1 What each unit test proves
+## 10.1 What each unit test proves
 
 Every module has its own `#[cfg(test)] mod tests` at the bottom of the file.
 Reading them is a good way to learn the behaviour each module promises.
@@ -79,7 +79,7 @@ and it covers the states a crash can leave behind.
 A `compile_fail` doctest is how you test a *type-level* guarantee: `cargo test`
 fails if the forbidden code ever starts compiling.
 
-## 9.2 Differential testing: `tests/model_check.rs`
+## 10.2 Differential testing: `tests/model_check.rs`
 
 Hand-written tests only cover the cases their author thought of; bugs hide in
 combinations. The strongest test in this repository therefore compares the
@@ -117,7 +117,7 @@ Two details make it trustworthy:
 This is the single best way to gain confidence in an optimised data structure:
 the fast implementation and the obvious one must never disagree.
 
-## 9.3 Replay determinism: `tests/wal_replay.rs`
+## 10.3 Replay determinism: `tests/wal_replay.rs`
 
 This test runs 10,000 generated requests through a primary engine while logging
 each one to a WAL *before* applying it (with a small preallocation, so the file
@@ -129,7 +129,7 @@ The replica builds its own hash map, with its own **random seed**. The test
 therefore also proves the claim from chapter 5: the seed changes where entries
 are stored, never what the engine does.
 
-## 9.4 Proving "zero allocation"
+## 10.4 Proving "zero allocation"
 
 The claim *"`process_order` and `cancel_order` never allocate"* is easy to write
 in a comment and easy to break later by accident (one innocent `Vec::new()` or
@@ -204,7 +204,7 @@ cargo test --test zero_alloc
 cargo test --release --test zero_alloc
 ```
 
-## 9.5 Build profiles
+## 10.5 Build profiles
 
 From `Cargo.toml`:
 
@@ -224,7 +224,7 @@ lto = true
   violation (an `expect` in `PriceLevel`, the `assert!`s in `FlatHashMap::insert`
   and `OrderPool::free`) should kill the process immediately instead of
   unwinding, in keeping with "fail loudly rather than continue with a corrupt
-  book". Recovery is then a WAL replay (chapter 8).
+  book". Recovery is then a WAL replay (chapter 9).
 
   > [!NOTE]
   > **This setting only takes effect in a binary you build from this package.**
@@ -251,7 +251,7 @@ $env:RUSTFLAGS = "-C target-cpu=native"; cargo bench  # PowerShell
 
 (A binary built this way may not run on older CPUs.)
 
-## 9.6 The benchmarks
+## 10.6 The benchmarks
 
 [`benches/matching_engine_bench.rs`](../benches/matching_engine_bench.rs) uses the
 [criterion](https://docs.rs/criterion) library. Three benchmarks, each working
@@ -335,7 +335,7 @@ was a large share of their cost: a measured version of chapter 7's point that
 - Criterion may warn *"Unable to complete 100 samples in 5.0s"*. That is harmless:
   each routine is long (thousands of orders), so it simply takes a little longer.
 
-## 9.7 Continuous integration
+## 10.7 Continuous integration
 
 Every push and pull request runs [`.github/workflows/ci.yml`](../.github/workflows/ci.yml):
 
@@ -352,17 +352,17 @@ Each choice exists to catch a specific kind of failure:
 - **ARM** reorders memory accesses far more freely than x86. A ring buffer with a
   missing `Acquire` usually still passes on x86 and can fail on ARM, so the
   threaded SPSC test runs on real ARM hardware too. That is still probabilistic;
-  `loom` (chapter 10) would be exhaustive.
+  `loom` (chapter 11) would be exhaustive.
 - **A pinned toolchain, a committed `Cargo.lock`, and `--locked`** make CI
   reproducible: a new compiler lint or a new dependency release cannot turn the
   build red without a change in this repository. Upgrades become deliberate
   commits.
 - **Timeouts** make a hung test fail in minutes, not hours.
 - **The README doctest and `tests/docs_sync.rs`** keep the docs honest: the
-  README's examples and chapter 8's complete program are compiled and run, so they
+  README's examples and chapter 9's complete program are compiled and run, so they
   cannot silently fall out of date.
 
-## 9.8 What the tests do *not* cover
+## 10.8 What the tests do *not* cover
 
 Knowing the gaps is part of reading tests critically.
 
@@ -372,17 +372,17 @@ Knowing the gaps is part of reading tests critically.
 | **Real crashes and power loss** | The WAL tests use hand-built crash images; nothing kills a process mid-write or cuts the power. | A harness that runs a writer in a child process and kills it at random points; power-loss testing needs a VM or a fault-injecting block device. |
 | **Performance regressions** | CI only *compiles* the benchmarks, so a slowdown would go unnoticed. | Criterion baselines (`cargo bench -- --save-baseline before`, later `--baseline before`), or a benchmark job on a quiet, dedicated machine. |
 | **`depth_snapshot` corner cases** | `model_check` compares full snapshots and a unit test covers `usize::MAX`, but `levels = 0` and "fewer levels than exist" are untested. | Two small unit tests. |
-| **Two writers on one WAL file** | It is documented as unsupported, but nothing enforces or tests it. | A file lock (`File::try_lock`) and a test for it (chapter 10). |
+| **Two writers on one WAL file** | It is documented as unsupported, but nothing enforces or tests it. | A file lock (`File::try_lock`) and a test for it (chapter 11). |
 
-## 9.9 Where to go from here with performance work
+## 10.9 Where to go from here with performance work
 
 | Question | Tool |
 |---|---|
 | Where does the time go? | A sampling profiler: `perf` + flamegraphs on Linux, Visual Studio's profiler or `samply` on Windows. |
 | Did the compiler really emit `tzcnt`? | `cargo asm` / `cargo show-asm`, or Godbolt. |
-| Are there hidden allocations on other paths? | The counting allocator from 9.4; `heaptrack` / DHAT. |
+| Are there hidden allocations on other paths? | The counting allocator from 10.4; `heaptrack` / DHAT. |
 | Is cache behaviour the bottleneck? | `perf stat` cache-miss counters, `valgrind --tool=cachegrind`. |
 | What does the tail look like? | Record per-call durations into an HdrHistogram. |
 | Is the ring buffer really correct on weak memory models? | The ARM CI job and Miri (both in place); `loom` for an exhaustive check. |
 
-**Next:** [10. Limitations and exercises](10-limitations-and-exercises.md)
+**Next:** [11. Limitations and exercises](11-limitations-and-exercises.md)

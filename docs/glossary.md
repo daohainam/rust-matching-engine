@@ -24,10 +24,10 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | Execution report | A message telling a trader what happened to their order. Here, the engine's [events](07-events.md) play this role. | [7](07-events.md) |
 | Fill / partial fill | An execution of some or all of an order's quantity. After a *partial* fill, some quantity is left. | [1](01-order-book-basics.md) |
 | FIX | *Financial Information eXchange*, a common text protocol traders use to send orders to exchanges. A gateway would parse it. | [2](02-architecture.md) |
-| FOK (fill-or-kill) | An order that must fill completely at once, or not at all. Not implemented here (exercise in ch. 10). | [1](01-order-book-basics.md) |
+| FOK (fill-or-kill) | An order that must fill completely at once, or not at all. Not implemented here (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Gateway | The part of an exchange that receives orders from the network, checks them, and passes them on to the matching engine. | [2](02-architecture.md) |
 | Instrument | The thing being traded: one stock, one future, one currency pair. Each instrument has its own book. | [1](01-order-book-basics.md) |
-| IOC (immediate-or-cancel) | An order that trades what it can at once; any remainder is cancelled instead of resting. Not implemented here (exercise in ch. 10). | [1](01-order-book-basics.md) |
+| IOC (immediate-or-cancel) | An order that trades what it can at once; any remainder is cancelled instead of resting. Not implemented here (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Limit order | An order with a worst acceptable price: "buy at this price or lower", "sell at this price or higher". The only order type this engine supports. | [1](01-order-book-basics.md) |
 | Liquidity | How much can be traded without moving the price much. Resting orders *provide* liquidity; takers *remove* it. | [1](01-order-book-basics.md) |
 | Maker | The resting order in a trade. It was in the book first. | [1](01-order-book-basics.md) |
@@ -46,7 +46,7 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 
 | Term | Meaning | Ch. |
 |---|---|---|
-| Amortised cost | The average cost per operation over a long sequence, even if a few single operations are slower (for example, when the WAL file grows). | [8](08-ringbuffer-and-wal.md) |
+| Amortised cost | The average cost per operation over a long sequence, even if a few single operations are slower (for example, when the WAL file grows). | [9](09-write-ahead-log.md) |
 | Arena | One large array, allocated up front, that holds every object of a kind. Objects are named by their index instead of a pointer. Here: the order pool. | [3](03-order-pool.md) |
 | Avalanche | A property of a good hash function: changing one input bit changes about half of the output bits. | [5](05-hash-map.md) |
 | Backward-shift deletion | A way to delete from an open-addressing table without tombstones: entries after the hole move back to fill it, if that keeps them reachable. | [5](05-hash-map.md) |
@@ -73,15 +73,15 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | Term | Meaning | Ch. |
 |---|---|---|
 | Alignment / padding | Most types must start at an address that is a multiple of their size (their *alignment*). The compiler inserts unused *padding* bytes to make that true. | [3](03-order-pool.md) |
-| Benchmark | A program that measures how fast some code runs. | [9](09-testing-and-performance.md) |
+| Benchmark | A program that measures how fast some code runs. | [10](10-testing-and-performance.md) |
 | Branch prediction | The CPU guesses which way an `if` will go so it can keep working; a wrong guess costs time. Predictable branches are almost free. | [6](06-matching-algorithm.md) |
 | Cache / cache line | Small, fast memory inside the CPU. Data moves between memory and cache in fixed blocks called *cache lines*, usually 64 bytes. | [3](03-order-pool.md) |
-| False sharing | Two threads writing to different variables that happen to share one cache line, so the line bounces between CPU cores. Fixed by padding (`CachePadded`). | [8](08-ringbuffer-and-wal.md) |
+| False sharing | Two threads writing to different variables that happen to share one cache line, so the line bounces between CPU cores. Fixed by padding (`CachePadded`). | [8](08-ring-buffer.md) |
 | Heap allocation | Asking the memory allocator (`malloc`, `Box::new`, a growing `Vec`) for memory at run time. Slow and unpredictable, so the hot path avoids it. | [2](02-architecture.md) |
 | Hot path | The code that runs for every order. It must be the fastest part. | [2](02-architecture.md) |
-| Latency / tail latency | Time to handle one request / the time of the slowest requests (for example the slowest 1 in 100). Exchanges care most about the tail. | [8](08-ringbuffer-and-wal.md) |
+| Latency / tail latency | Time to handle one request / the time of the slowest requests (for example the slowest 1 in 100). Exchanges care most about the tail. | [8](08-ring-buffer.md) |
 | Prefetcher | CPU hardware that notices you reading memory in order and loads the next cache lines early. Flat arrays benefit from it. | [3](03-order-pool.md) |
-| Throughput | How many requests are handled per second. | [9](09-testing-and-performance.md) |
+| Throughput | How many requests are handled per second. | [10](10-testing-and-performance.md) |
 
 ## Rust
 
@@ -92,67 +92,67 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | `dyn Trait` | A value used through a trait at run time, without the compiler knowing its concrete type. Each call goes through a small table of function pointers. | [6](06-matching-algorithm.md) |
 | Generics / monomorphisation | `fn f<S: EventSink>(...)` works for any `S`. The compiler *monomorphises* it: it builds one copy of `f` per concrete type, so calls are direct and can be inlined. | [6](06-matching-algorithm.md) |
 | `#[inline]` | A hint to copy a function's body into its callers, removing the call overhead. | [6](06-matching-algorithm.md) |
-| `MaybeUninit<T>` | Memory that may not hold a valid `T` yet. Reading it as a `T` before writing it is undefined behaviour. | [8](08-ringbuffer-and-wal.md) |
-| Panic / `panic = "abort"` | A panic stops the current thread because of a bug (for example a failed `assert!`). With `panic = "abort"` in the final binary's profile, it ends the whole process instead. | [3](03-order-pool.md), [9](09-testing-and-performance.md) |
+| `MaybeUninit<T>` | Memory that may not hold a valid `T` yet. Reading it as a `T` before writing it is undefined behaviour. | [8](08-ring-buffer.md) |
+| Panic / `panic = "abort"` | A panic stops the current thread because of a bug (for example a failed `assert!`). With `panic = "abort"` in the final binary's profile, it ends the whole process instead. | [3](03-order-pool.md), [10](10-testing-and-performance.md) |
 | `#[repr(C)]` | Lays out a struct's fields in declaration order, like C does. Without it, Rust may reorder fields to save space. | [3](03-order-pool.md) |
-| `Send` / `Sync` | Marker traits. `Send`: a value may be moved to another thread. `Sync`: a value may be *shared* (`&T`) between threads. | [8](08-ringbuffer-and-wal.md) |
+| `Send` / `Sync` | Marker traits. `Send`: a value may be moved to another thread. `Sync`: a value may be *shared* (`&T`) between threads. | [8](08-ring-buffer.md) |
 | `?Sized` | Allows a generic type parameter to be a type whose size is unknown at compile time, such as `dyn EventSink`. | [6](06-matching-algorithm.md) |
 | Trait | A set of methods a type promises to provide, like an interface. `EventSink` is a trait. | [7](07-events.md) |
-| Undefined behaviour (UB) | Breaking a rule the compiler relies on (for example reading uninitialised memory). The program may then do *anything*; it is always a bug. | [8](08-ringbuffer-and-wal.md) |
-| `unsafe` | A block where the programmer, not the compiler, promises that the rules are followed. Every `unsafe` block here has a `// SAFETY:` comment saying why it is sound. | [8](08-ringbuffer-and-wal.md) |
-| `UnsafeCell<T>` | The only legal way in Rust to change data behind a shared `&` reference. Every safe interior-mutability type is built on it. | [8](08-ringbuffer-and-wal.md) |
+| Undefined behaviour (UB) | Breaking a rule the compiler relies on (for example reading uninitialised memory). The program may then do *anything*; it is always a bug. | [8](08-ring-buffer.md) |
+| `unsafe` | A block where the programmer, not the compiler, promises that the rules are followed. Every `unsafe` block here has a `// SAFETY:` comment saying why it is sound. | [8](08-ring-buffer.md) |
+| `UnsafeCell<T>` | The only legal way in Rust to change data behind a shared `&` reference. Every safe interior-mutability type is built on it. | [8](08-ring-buffer.md) |
 
 ## Concurrency
 
 | Term | Meaning | Ch. |
 |---|---|---|
-| Atomic (`AtomicUsize`, `AtomicBool`) | A variable that several threads can read and write safely without a lock; each operation happens all at once or not at all. | [8](08-ringbuffer-and-wal.md) |
-| Compare-and-swap (CAS) | An atomic "change the value to B only if it is still A" operation, needed when several threads write the same variable. The SPSC queue does not need it. | [8](08-ringbuffer-and-wal.md) |
-| Data race | Two threads touching the same memory at the same time, at least one writing, without synchronisation. Undefined behaviour in Rust. | [8](08-ringbuffer-and-wal.md) |
+| Atomic (`AtomicUsize`, `AtomicBool`) | A variable that several threads can read and write safely without a lock; each operation happens all at once or not at all. | [8](08-ring-buffer.md) |
+| Compare-and-swap (CAS) | An atomic "change the value to B only if it is still A" operation, needed when several threads write the same variable. The SPSC queue does not need it. | [8](08-ring-buffer.md) |
+| Data race | Two threads touching the same memory at the same time, at least one writing, without synchronisation. Undefined behaviour in Rust. | [8](08-ring-buffer.md) |
 | Disruptor (LMAX) | A well-known design from the LMAX exchange: a pre-allocated ring buffer feeding one busy thread that owns all state. This repo follows its spirit. | [2](02-architecture.md) |
-| Lock-free | Threads coordinate with atomics instead of locks (mutexes), so no thread ever waits for another to release a lock. | [8](08-ringbuffer-and-wal.md) |
-| Memory ordering (`Relaxed`, `Release`, `Acquire`) | Rules for when one thread's writes become visible to another. A `Release` store paired with an `Acquire` load guarantees that everything written before the store is visible after the load. `Relaxed` gives no such guarantee. | [8](08-ringbuffer-and-wal.md) |
-| Ring buffer | A fixed-size array used as a queue, whose read and write positions wrap around to the start. | [8](08-ringbuffer-and-wal.md) |
-| Spin loop | Waiting by checking a condition again and again instead of sleeping. Fast to react, but keeps one CPU core busy. | [8](08-ringbuffer-and-wal.md) |
-| SPSC | *Single producer, single consumer*: a queue with exactly one writing thread and one reading thread. That restriction is what makes it simple and fast. | [8](08-ringbuffer-and-wal.md) |
+| Lock-free | Threads coordinate with atomics instead of locks (mutexes), so no thread ever waits for another to release a lock. | [8](08-ring-buffer.md) |
+| Memory ordering (`Relaxed`, `Release`, `Acquire`) | Rules for when one thread's writes become visible to another. A `Release` store paired with an `Acquire` load guarantees that everything written before the store is visible after the load. `Relaxed` gives no such guarantee. | [8](08-ring-buffer.md) |
+| Ring buffer | A fixed-size array used as a queue, whose read and write positions wrap around to the start. | [8](08-ring-buffer.md) |
+| Spin loop | Waiting by checking a condition again and again instead of sleeping. Fast to react, but keeps one CPU core busy. | [8](08-ring-buffer.md) |
+| SPSC | *Single producer, single consumer*: a queue with exactly one writing thread and one reading thread. That restriction is what makes it simple and fast. | [8](08-ring-buffer.md) |
 | Thread | An independent flow of execution inside a program. Here, the gateway and the matching engine run on separate threads. | [2](02-architecture.md) |
 
 ## Files and durability
 
 | Term | Meaning | Ch. |
 |---|---|---|
-| Checksum | A small number computed from some bytes and stored with them. If the bytes change, the checksum (very likely) no longer matches. | [8](08-ringbuffer-and-wal.md) |
-| CRC / CRC32 | A standard checksum family (used by zip files and Ethernet). This repo uses a SplitMix64-based checksum instead, to avoid a dependency. | [8](08-ringbuffer-and-wal.md) |
-| Dirty page | A page of a file that was changed in memory but not yet written to the disk. | [8](08-ringbuffer-and-wal.md) |
-| Durability | The promise that data survives a crash or power loss once it is reported as saved. | [8](08-ringbuffer-and-wal.md) |
-| Endianness / little-endian | The byte order of a multi-byte number in memory. *Little-endian* stores the lowest byte first. The WAL always uses little-endian, so files work on any machine. | [8](08-ringbuffer-and-wal.md) |
-| `fsync` / `sync_all` / `msync` | Calls that force the operating system to write cached data to the disk. Until one of them succeeds, a power loss can lose the data. | [8](08-ringbuffer-and-wal.md) |
-| Header / magic number | The first bytes of a file, describing its format. The *magic number* is a fixed value that identifies the file type. | [8](08-ringbuffer-and-wal.md) |
-| MAC | *Message authentication code*: a checksum that needs a secret key, so an attacker cannot forge it. The WAL checksum is **not** a MAC. | [8](08-ringbuffer-and-wal.md) |
-| Memory-mapped file (mmap) | A file made to look like an array in memory. Writing to the array writes to the file, through the page cache. | [8](08-ringbuffer-and-wal.md) |
-| Page / page cache / page fault | The OS handles memory in *pages* (often 4 KiB). The *page cache* keeps recently used file pages in RAM. A *page fault* happens when a program touches a page that is not in RAM yet. | [8](08-ringbuffer-and-wal.md) |
-| Replay | Rebuilding state by feeding the logged requests into a fresh engine again. Works because the engine is deterministic. | [8](08-ringbuffer-and-wal.md) |
-| `SIGBUS` | A Unix signal that kills a process that touches a memory-mapped page the system cannot back with real storage (for example, the disk is full, or the file was shrunk by someone else). | [8](08-ringbuffer-and-wal.md) |
-| Sparse file | A file whose unwritten parts take no disk space; the OS reads them as zeros. | [8](08-ringbuffer-and-wal.md) |
-| Syscall | A request from a program to the operating system kernel (open a file, write to it, ...). Much slower than a normal function call. | [8](08-ringbuffer-and-wal.md) |
-| Torn write / torn record | A write that a crash interrupted halfway, leaving a record that is part new and part old (or zero). The checksum detects it. | [8](08-ringbuffer-and-wal.md) |
-| Write-ahead log (WAL) | A file where every request is recorded **before** it is applied, so the state can be rebuilt after a crash by replaying it. | [8](08-ringbuffer-and-wal.md) |
+| Checksum | A small number computed from some bytes and stored with them. If the bytes change, the checksum (very likely) no longer matches. | [9](09-write-ahead-log.md) |
+| CRC / CRC32 | A standard checksum family (used by zip files and Ethernet). This repo uses a SplitMix64-based checksum instead, to avoid a dependency. | [9](09-write-ahead-log.md) |
+| Dirty page | A page of a file that was changed in memory but not yet written to the disk. | [9](09-write-ahead-log.md) |
+| Durability | The promise that data survives a crash or power loss once it is reported as saved. | [9](09-write-ahead-log.md) |
+| Endianness / little-endian | The byte order of a multi-byte number in memory. *Little-endian* stores the lowest byte first. The WAL always uses little-endian, so files work on any machine. | [9](09-write-ahead-log.md) |
+| `fsync` / `sync_all` / `msync` | Calls that force the operating system to write cached data to the disk. Until one of them succeeds, a power loss can lose the data. | [9](09-write-ahead-log.md) |
+| Header / magic number | The first bytes of a file, describing its format. The *magic number* is a fixed value that identifies the file type. | [9](09-write-ahead-log.md) |
+| MAC | *Message authentication code*: a checksum that needs a secret key, so an attacker cannot forge it. The WAL checksum is **not** a MAC. | [9](09-write-ahead-log.md) |
+| Memory-mapped file (mmap) | A file made to look like an array in memory. Writing to the array writes to the file, through the page cache. | [9](09-write-ahead-log.md) |
+| Page / page cache / page fault | The OS handles memory in *pages* (often 4 KiB). The *page cache* keeps recently used file pages in RAM. A *page fault* happens when a program touches a page that is not in RAM yet. | [9](09-write-ahead-log.md) |
+| Replay | Rebuilding state by feeding the logged requests into a fresh engine again. Works because the engine is deterministic. | [9](09-write-ahead-log.md) |
+| `SIGBUS` | A Unix signal that kills a process that touches a memory-mapped page the system cannot back with real storage (for example, the disk is full, or the file was shrunk by someone else). | [9](09-write-ahead-log.md) |
+| Sparse file | A file whose unwritten parts take no disk space; the OS reads them as zeros. | [9](09-write-ahead-log.md) |
+| Syscall | A request from a program to the operating system kernel (open a file, write to it, ...). Much slower than a normal function call. | [9](09-write-ahead-log.md) |
+| Torn write / torn record | A write that a crash interrupted halfway, leaving a record that is part new and part old (or zero). The checksum detects it. | [9](09-write-ahead-log.md) |
+| Write-ahead log (WAL) | A file where every request is recorded **before** it is applied, so the state can be rebuilt after a crash by replaying it. | [9](09-write-ahead-log.md) |
 
 ## Testing and tools
 
 | Term | Meaning | Ch. |
 |---|---|---|
-| CI | *Continuous integration*: a server that builds and tests every change automatically. Here: GitHub Actions, see `.github/workflows/ci.yml`. | [9](09-testing-and-performance.md) |
-| Counting allocator | A global allocator that counts every allocation, used in a test to prove the hot path allocates nothing. | [9](09-testing-and-performance.md) |
-| Criterion | The Rust benchmarking library used by `cargo bench`. | [9](09-testing-and-performance.md) |
-| Differential testing | Running the same random inputs through the real code and a simple *reference implementation*, and requiring identical results. | [9](09-testing-and-performance.md) |
-| Doctest | A code example inside documentation that `cargo test` compiles and runs, so it cannot go out of date. | [9](09-testing-and-performance.md) |
-| Global allocator | The memory allocator a Rust program uses for all heap memory. A program can replace it with `#[global_allocator]`. | [9](09-testing-and-performance.md) |
-| Integration test | A test in `tests/` that uses the crate only through its public API, like a real user would. | [9](09-testing-and-performance.md) |
-| loom | A tool that runs a concurrent test under every possible thread interleaving, to find ordering bugs. Suggested as an exercise. | [9](09-testing-and-performance.md) |
-| LTO | *Link-time optimisation*: the compiler optimises across crate boundaries when building the final binary. | [9](09-testing-and-performance.md) |
-| Miri | An interpreter for Rust that detects undefined behaviour in `unsafe` code. CI runs the unit tests under it. | [9](09-testing-and-performance.md) |
-| MSRV | *Minimum supported Rust version*: the oldest compiler the crate promises to build with (here 1.88). | [9](09-testing-and-performance.md) |
-| Unit test | A small test next to the code it tests (`#[cfg(test)] mod tests`), which can see private items. | [9](09-testing-and-performance.md) |
+| CI | *Continuous integration*: a server that builds and tests every change automatically. Here: GitHub Actions, see `.github/workflows/ci.yml`. | [10](10-testing-and-performance.md) |
+| Counting allocator | A global allocator that counts every allocation, used in a test to prove the hot path allocates nothing. | [10](10-testing-and-performance.md) |
+| Criterion | The Rust benchmarking library used by `cargo bench`. | [10](10-testing-and-performance.md) |
+| Differential testing | Running the same random inputs through the real code and a simple *reference implementation*, and requiring identical results. | [10](10-testing-and-performance.md) |
+| Doctest | A code example inside documentation that `cargo test` compiles and runs, so it cannot go out of date. | [10](10-testing-and-performance.md) |
+| Global allocator | The memory allocator a Rust program uses for all heap memory. A program can replace it with `#[global_allocator]`. | [10](10-testing-and-performance.md) |
+| Integration test | A test in `tests/` that uses the crate only through its public API, like a real user would. | [10](10-testing-and-performance.md) |
+| loom | A tool that runs a concurrent test under every possible thread interleaving, to find ordering bugs. Suggested as an exercise. | [10](10-testing-and-performance.md) |
+| LTO | *Link-time optimisation*: the compiler optimises across crate boundaries when building the final binary. | [10](10-testing-and-performance.md) |
+| Miri | An interpreter for Rust that detects undefined behaviour in `unsafe` code. CI runs the unit tests under it. | [10](10-testing-and-performance.md) |
+| MSRV | *Minimum supported Rust version*: the oldest compiler the crate promises to build with (here 1.88). | [10](10-testing-and-performance.md) |
+| Unit test | A small test next to the code it tests (`#[cfg(test)] mod tests`), which can see private items. | [10](10-testing-and-performance.md) |
 
 **Back to:** [README](../README.md) · [1. Order book basics](01-order-book-basics.md)

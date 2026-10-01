@@ -237,11 +237,11 @@ Every structure agrees whenever your sink runs.
 A sink should still not panic. If one does:
 
 - If the program was built with `panic = "abort"`, the process stops. You
-  recover by replaying the write-ahead log, as after any crash (chapter 8). This
+  recover by replaying the write-ahead log, as after any crash (chapter 9). This
   crate's release profile sets it, but that only applies to binaries built from
   this package (its tests, examples and benches). Cargo ignores a dependency's
   profile, so if you use the engine as a library, *your* `Cargo.toml` decides;
-  see [9.5](09-testing-and-performance.md#95-build-profiles).
+  see [10.5](10-testing-and-performance.md#105-build-profiles).
 - If the panic is caught (with `catch_unwind`), the book is consistent, but the
   interrupted request was only **partly applied**: some trades happened, and the
   taker's remainder never rested. The engine now differs from what a replay of
@@ -314,4 +314,4 @@ Then try a closure sink. In [`examples/walkthrough.rs`](../examples/walkthrough.
 replace the `Vec<Event>` in `place` with a closure that prints only `Trade`
 events as they happen, and check that the output still matches 1.10.
 
-**Next:** [8. Ring buffer and WAL](08-ringbuffer-and-wal.md)
+**Next:** [8. The ring buffer](08-ring-buffer.md)

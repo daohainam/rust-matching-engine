@@ -1,4 +1,4 @@
-//! The whole pipeline in one program (chapter 8, Part C).
+//! The whole pipeline in one program (chapter 9, section 9.7).
 //!
 //! A gateway thread pushes requests into an SPSC ring buffer. The matching
 //! thread logs each request to the write-ahead log *before* applying it to the

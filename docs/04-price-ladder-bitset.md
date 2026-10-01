@@ -215,7 +215,7 @@ exactly the kind of change exercise 14 asks for.
 
 Need more ticks? Add another level: three levels of `u64` cover `64³ = 262,144`
 ticks, with `highest()` / `lowest()` still taking only 3 bit-scans. (That is one
-of the exercises in [chapter 10](10-limitations-and-exercises.md).)
+of the exercises in [chapter 11](11-limitations-and-exercises.md).)
 
 ## 4.7 How the engine uses it
 

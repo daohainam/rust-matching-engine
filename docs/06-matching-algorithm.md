@@ -423,7 +423,7 @@ no-match order, regardless of how many orders are in the book.
 ## 6.9 Invariants after every call
 
 These always hold between calls, and the last one even during a call. The
-differential test in chapter 9 (`tests/model_check.rs`) checks the observable ones
+differential test in chapter 10 (`tests/model_check.rs`) checks the observable ones
 (best prices, depths, live count, exact events) after every request:
 
 1. **The book is never crossed:** `best_bid < best_ask` whenever both exist.

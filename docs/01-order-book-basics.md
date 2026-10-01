@@ -177,7 +177,7 @@ dense, we can use **arrays indexed by tick** instead of trees or hash maps.
 | Depth queries (`depth_at`, `depth_snapshot`)           | Auctions, circuit breakers, fees                       |
 
 Keeping the feature set small is deliberate: it keeps the code short enough to
-read in one sitting. [Chapter 10](10-limitations-and-exercises.md) lists
+read in one sitting. [Chapter 11](11-limitations-and-exercises.md) lists
 extension ideas.
 
 ## 1.10 A complete worked example

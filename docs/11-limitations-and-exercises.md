@@ -1,4 +1,4 @@
-# 10. Known Limitations, Sharp Edges and Exercises
+# 11. Known Limitations, Sharp Edges and Exercises
 
 > **New word?** Every technical term in these chapters is explained in the
 > [glossary](glossary.md).
@@ -7,7 +7,7 @@ This is a teaching project, and it is more useful to learn from its rough edges
 than to pretend it has none. Everything below was found by reading the code and
 (where noted) confirmed by running it.
 
-## 10.1 What has been fixed, and how
+## 11.1 What has been fixed, and how
 
 Earlier versions had the problems below. Each fix is a small, focused commit, and
 reading them is one of the best lessons this repository offers: `git show` on a
@@ -20,36 +20,36 @@ git log --oneline --grep "detect double frees"   # then: git show <hash>
 
 | Where | Problem | Fixed by (commit subject) | Chapter |
 |---|---|---|---|
-| `wal.rs` | `finalize` called `set_len` while the file was still mapped, which Windows refuses (OS error 1224). `Drop` swallowed the error, so the log kept its zero padding and the reader returned extra all-zero records. | `fix(wal)!: sound, portable, crash-safe log format` (the map is now dropped before truncating) | [8.9](08-ringbuffer-and-wal.md#89-the-writers-lifecycle) |
+| `wal.rs` | `finalize` called `set_len` while the file was still mapped, which Windows refuses (OS error 1224). `Drop` swallowed the error, so the log kept its zero padding and the reader returned extra all-zero records. | `fix(wal)!: sound, portable, crash-safe log format` (the map is now dropped before truncating) | [9.4](09-write-ahead-log.md#94-the-writers-lifecycle) |
 | `events.rs` | Every call returned a fixed 64-event batch, so a taker that swept 32 or more makers **silently lost** reports. | `fix(events)!: stream execution reports through a caller-supplied sink` | [7.3](07-events.md#73-the-eventsink-trait) |
-| `ringbuffer.rs` | The SPSC contract was unchecked: `push` and `pop` took `&self`, so two producers compiled fine and raced (undefined behaviour). `len()` from a third thread could wrap. | `fix(ringbuffer)!: enforce SPSC roles with Producer/Consumer handles` | [8.5](08-ringbuffer-and-wal.md#85-safety-what-the-type-system-enforces) |
+| `ringbuffer.rs` | The SPSC contract was unchecked: `push` and `pop` took `&self`, so two producers compiled fine and raced (undefined behaviour). `len()` from a third thread could wrap. | `fix(ringbuffer)!: enforce SPSC roles with Producer/Consumer handles` | [8.5](08-ring-buffer.md#85-safety-what-the-type-system-enforces) |
 | `hashmap.rs` | The hash had no secret and SplitMix64 is invertible, so a client could craft colliding order ids and force long probe chains. | `fix(hashmap): seed the hash per instance to resist crafted order IDs` | [5.7](05-hash-map.md#57-complexity) |
-| `wal.rs` | Records were raw `repr(C)` bytes: native endianness, 4 bytes of uninitialised padding, no header, version or checksum, so a torn record looked valid. | `fix(wal)!: sound, portable, crash-safe log format` | [8.7](08-ringbuffer-and-wal.md#87-the-record-format) |
-| `wal.rs` | `create` truncated an existing file and there was no way to continue a log, so a naive restart erased the log it should replay. | `fix(wal)!: sound, portable, crash-safe log format` (adds `open_append`) and `feat(wal)!: refuse to overwrite an existing log in create` | [8.10](08-ringbuffer-and-wal.md#810-reading-and-replaying) |
+| `wal.rs` | Records were raw `repr(C)` bytes: native endianness, 4 bytes of uninitialised padding, no header, version or checksum, so a torn record looked valid. | `fix(wal)!: sound, portable, crash-safe log format` | [9.2](09-write-ahead-log.md#92-the-record-format) |
+| `wal.rs` | `create` truncated an existing file and there was no way to continue a log, so a naive restart erased the log it should replay. | `fix(wal)!: sound, portable, crash-safe log format` (adds `open_append`) and `feat(wal)!: refuse to overwrite an existing log in create` | [9.5](09-write-ahead-log.md#95-reading-and-replaying) |
 | `engine.rs` | `depth_at` and `depth_snapshot` could panic on unusual arguments. | `fix(engine): make depth queries panic-free` | [6.1](06-matching-algorithm.md#61-the-public-api) |
 | `wal.rs` | Merge `57c7c34` combined two rewrites of the file and broke the build. | `fix(wal): restore the PR #2 writer lost in merge 57c7c34` | |
 | `engine.rs` | The last maker's `OrderFilled` was reported while its drained price was still in the bitset, so a caught sink panic left a stale best price. | `fix(engine): update the price index before reporting a maker fill` | [6.3](06-matching-algorithm.md#63-match_incoming-the-heart-of-the-engine) |
 | `hashmap.rs` | `get`, `insert` and `remove` looped forever on a full table, and the size computation could wrap in release builds. | `fix(hashmap): panic instead of hanging when the table would fill`, `fix(hashmap): check the table size computation for overflow` | [5.5](05-hash-map.md#55-sizing-why-the-table-is-never-full) |
 | `pool.rs` | A double free was caught only by `debug_assert!`, and `count -= 1` wrapped silently in release builds. | `fix(pool): detect double frees in release builds`, `fix(pool): check the level order count for underflow` | [3.7](03-order-pool.md#37-defensive-checks) |
 | `bitset.rs` | The `TICKS` limit was only a comment. | `fix(bitset): enforce the TICKS limits at compile time` | [4.6](04-price-ladder-bitset.md#46-why-4096-ticks) |
-| `wal.rs` | Readers mapped the log a second time, which could race a live writer. | `fix(wal): read logs with plain file I/O` | [8.8](08-ringbuffer-and-wal.md#88-memory-mapped-files-in-one-minute) |
-| `ringbuffer.rs` | A consumer could not tell a finished producer from a slow one and spun forever. | `feat(ringbuffer): detect a dropped producer or consumer` | [8.5](08-ringbuffer-and-wal.md#telling-nothing-yet-from-nothing-ever-again) |
-| docs | The README and chapters described an old API, and nothing noticed. | `docs(readme): fix the examples for the current API and compile them` (README doctest), `docs(ch08): move the complete program into examples/pipeline.rs` (`tests/docs_sync.rs`) | [9.7](09-testing-and-performance.md#97-continuous-integration) |
+| `wal.rs` | Readers mapped the log a second time, which could race a live writer. | `fix(wal): read logs with plain file I/O` | [9.3](09-write-ahead-log.md#93-memory-mapped-files-in-one-minute) |
+| `ringbuffer.rs` | A consumer could not tell a finished producer from a slow one and spun forever. | `feat(ringbuffer): detect a dropped producer or consumer` | [8.5](08-ring-buffer.md#telling-nothing-yet-from-nothing-ever-again) |
+| docs | The README and chapters described an old API, and nothing noticed. | `docs(readme): fix the examples for the current API and compile them` (README doctest), `docs(ch08): move the complete program into examples/pipeline.rs` (`tests/docs_sync.rs`) | [10.7](10-testing-and-performance.md#107-continuous-integration) |
 
 To see the code *before* most of these fixes, check out `a192ebc`, the commit that
 the first round of fixes started from.
 
-## 10.2 Known limitations and sharp edges
+## 11.2 Known limitations and sharp edges
 
 ### Sharp edges that remain
 
 | Where | Issue | How bad | Chapter |
 |---|---|---|---|
-| `wal.rs` | The durability limits: a failed flush is final, a new file's directory entry is not synced on Unix, a full disk becomes `SIGBUS` on Linux, `create` is not atomic, damage in the middle of a log is treated like a torn tail, and one writer per file is not enforced. | Medium for a real deployment; fine for learning, as long as you know them. | [8.11](08-ringbuffer-and-wal.md#811-caveats-read-before-relying-on-the-wal) |
-| `wal.rs` + `engine.rs` | Replay is deterministic only with the **same `Engine` capacity**, and the log does not record it. | Medium: get it wrong and the replica silently differs. | [8.6](08-ringbuffer-and-wal.md#86-why-log-at-all) |
+| `wal.rs` | The durability limits: a failed flush is final, a new file's directory entry is not synced on Unix, a full disk becomes `SIGBUS` on Linux, `create` is not atomic, damage in the middle of a log is treated like a torn tail, and one writer per file is not enforced. | Medium for a real deployment; fine for learning, as long as you know them. | [9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal) |
+| `wal.rs` + `engine.rs` | Replay is deterministic only with the **same `Engine` capacity**, and the log does not record it. | Medium: get it wrong and the replica silently differs. | [9.1](09-write-ahead-log.md#91-why-log-at-all) |
 | `events.rs` | An `EventBatch` keeps only 64 events per call. It counts the rest, so this is no longer silent, but you must check `is_truncated()`. | Low: check it, or use an unbounded sink. | [7.4](07-events.md#74-what-happens-when-there-are-too-many-events) |
-| `engine.rs` | A sink that panics (with the panic caught) leaves a consistent book but a **partly applied** request. | Low: rebuild from the WAL; a binary built with `panic = "abort"` stops instead (your own profile decides, [9.5](09-testing-and-performance.md#95-build-profiles)). | [7.5](07-events.md#75-when-a-sink-panics) |
-| `ringbuffer.rs` | Its memory ordering is checked on ARM hardware and by Miri, but only for the interleavings that happen to occur. | Low | [9.8](09-testing-and-performance.md#98-what-the-tests-do-not-cover) |
+| `engine.rs` | A sink that panics (with the panic caught) leaves a consistent book but a **partly applied** request. | Low: rebuild from the WAL; a binary built with `panic = "abort"` stops instead (your own profile decides, [10.5](10-testing-and-performance.md#105-build-profiles)). | [7.5](07-events.md#75-when-a-sink-panics) |
+| `ringbuffer.rs` | Its memory ordering is checked on ARM hardware and by Miri, but only for the interleavings that happen to occur. | Low | [10.8](10-testing-and-performance.md#108-what-the-tests-do-not-cover) |
 | `hashmap.rs` | The seed protects against crafted ids only while it stays secret; `with_capacity_and_seed` with a guessable seed gives that up. | Low: the engine always uses a random seed. | [5.7](05-hash-map.md#57-complexity) |
 
 ### Design limits (by choice, not bugs)
@@ -73,7 +73,7 @@ the first round of fixes started from.
   double-free check in `OrderPool::free`. Both cost bytes, but help debugging and
   auditing.
 
-## 10.3 Exercises
+## 11.3 Exercises
 
 Difficulty: 🟢 warm-up · 🟡 a solid afternoon · 🔴 a real project.
 Hints are deliberately short; the chapters contain the ingredients. Exercises
@@ -116,7 +116,7 @@ Unit-test against the old linear version with random bitsets.
 🟡 **7. ✅ solved: stop returning a batch from every call.** Let the caller supply
 where events go, so nothing is copied and nothing is lost. *Solved by
 `fix(events)!: stream execution reports through a caller-supplied sink`; measure
-the difference with the benchmarks (chapter 9.6 has one run).*
+the difference with the benchmarks (section 10.6 has one run).*
 
 🟡 **8. ✅ solved: an overflow flag.** Make `EventBatch` record whether any event
 was dropped. *Solved in the same commit as exercise 7: `dropped()` and
@@ -147,7 +147,7 @@ cancel newest, or decrement both) and emit matching events.
 
 🔴 **13. ✅ solved: differential testing.** Compare the engine with a slow but
 obviously correct reference book on long random request streams. *Solved by
-`test: model-based engine check and WAL replay determinism` (chapter 9.2). Next
+`test: model-based engine check and WAL replay determinism` (section 10.2). Next
 step: port the generator to [`proptest`](https://docs.rs/proptest), so that a
 failure shrinks to the smallest request sequence that reproduces it.*
 
@@ -176,7 +176,7 @@ independent and throughput scales.
 ### Making the WAL production-shaped
 
 🟡 **19. Record the capacity.** Replay is only deterministic with the same `Engine`
-capacity (8.6). Store it in the header's reserved bytes (format version 2), and
+capacity (9.1). Store it in the header's reserved bytes (format version 2), and
 make replay refuse a log written for a different capacity. Keep version 1 logs
 readable.
 
@@ -203,7 +203,7 @@ loom tests for `push`/`pop` and for `is_disconnected`. Then weaken one `Acquire`
 to `Relaxed`, and watch loom find the bug that x86 hides and that even the ARM CI
 job may miss.
 
-## 10.4 Further reading
+## 11.4 Further reading
 
 - **How to Build a Fast Limit Order Book** (WK Selph): the classic write-up of
   the data-structure choices behind a fast book.
@@ -216,7 +216,7 @@ job may miss.
   including the linear-probing analysis quoted in chapter 5.
 - **"Are You Sure You Want to Use MMAP in Your Database Management System?"**
   (Crotty, Leis and Pavlo, CIDR 2022): why memory-mapped I/O makes error handling
-  and durability hard, with the problems the WAL caveats in 8.11 describe.
+  and durability hard, with the problems the WAL caveats in 9.6 describe.
 - **"Can Applications Recover from fsync Failures?"** (Rebello et al., USENIX ATC
   2020): what really happens after a failed flush, and why retrying is not enough.
 - **"How to Build an Exchange"** (Brian Nigito, Jane Street tech talk): how real

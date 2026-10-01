@@ -114,8 +114,8 @@ flowchart TB
 | Find an order by id | **Open-addressing hash map** with a random seed, backward-shift delete | expected O(1) | [5](docs/05-hash-map.md) |
 | Match an incoming order | Walk levels best-first, FIFO within a level | O(1 + fills) | [6](docs/06-matching-algorithm.md) |
 | Report results without allocating | Stream events into a caller-supplied **`EventSink`** | O(1) per event | [7](docs/07-events.md) |
-| Feed the engine from another thread | **SPSC ring buffer** with separate `Producer` / `Consumer` handles (Release/Acquire) | O(1), lock-free | [8](docs/08-ringbuffer-and-wal.md) |
-| Recover after a crash | **Memory-mapped WAL** with per-record checksums + deterministic replay | amortised O(1) append | [8](docs/08-ringbuffer-and-wal.md) |
+| Feed the engine from another thread | **SPSC ring buffer** with separate `Producer` / `Consumer` handles (Release/Acquire) | O(1), lock-free | [8](docs/08-ring-buffer.md) |
+| Recover after a crash | **Memory-mapped WAL** with per-record checksums + deterministic replay | amortised O(1) append | [9](docs/09-write-ahead-log.md) |
 
 ## Learning path
 
@@ -131,9 +131,10 @@ the next.
 | 5 | [The flat hash map](docs/05-hash-map.md) | Linear probing, SplitMix64, a secret seed against crafted ids, load factor, backward-shift deletion |
 | 6 | [The matching algorithm](docs/06-matching-algorithm.md) | `process_order` and `cancel_order` line by line, flowcharts, a full state trace, edge cases |
 | 7 | [Events](docs/07-events.md) | Event semantics and ordering, the `EventSink` trait, choosing a sink, `EventBatch` truncation |
-| 8 | [Ring buffer and WAL](docs/08-ringbuffer-and-wal.md) | SPSC queue and memory ordering, disconnect detection, log format and crash safety, a complete wired-up program |
-| 9 | [Testing and performance](docs/09-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
-| 10 | [Limitations and exercises](docs/10-limitations-and-exercises.md) | What was fixed and how, known sharp edges, graded exercises, further reading |
+| 8 | [The ring buffer](docs/08-ring-buffer.md) | The SPSC queue, memory ordering, false sharing, what the type system enforces, disconnect detection |
+| 9 | [The write-ahead log](docs/09-write-ahead-log.md) | Why log, the record format, memory-mapped files, crash safety and its limits, and a complete wired-up program |
+| 10 | [Testing and performance](docs/10-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
+| 11 | [Limitations and exercises](docs/11-limitations-and-exercises.md) | What was fixed and how, known sharp edges, graded exercises, further reading |
 
 **Meet a word you don't know?** The [glossary](docs/glossary.md) explains every
 term the chapters use, from *bid* and *tick* to *memory ordering* and *torn
@@ -167,7 +168,7 @@ tests/
   model_check.rs differential test against a simple reference order book
   wal_replay.rs  replaying the WAL reproduces every event
   zero_alloc.rs  counting global allocator proves zero heap allocations
-  docs_sync.rs   chapter 8 must show examples/pipeline.rs verbatim
+  docs_sync.rs   chapter 9 must show examples/pipeline.rs verbatim
 examples/
   walkthrough.rs chapter 1's worked example, printing events and the book
   pipeline.rs    ring buffer -> WAL -> engine -> replay, in one program
@@ -189,7 +190,7 @@ docs/            the chapters listed above, plus glossary.md
 | Rust version | 1.88 or newer | `rust-version` in `Cargo.toml` |
 
 Details, consequences and workarounds are in
-[chapter 10](docs/10-limitations-and-exercises.md).
+[chapter 11](docs/11-limitations-and-exercises.md).
 
 ## Testing and benchmarking
 
@@ -198,16 +199,16 @@ cargo test                      # unit, integration and doc tests (this README i
 cargo test --test model_check   # the engine against a simple reference book
 cargo test --test zero_alloc    # verifies zero heap allocations on the hot path
 cargo run --example walkthrough # chapter 1's worked example, step by step
-cargo run --example pipeline    # the complete program from chapter 8
+cargo run --example pipeline    # the complete program from chapter 9
 cargo bench                     # criterion micro-benchmarks
 ```
 
 > **Windows note:** all tests pass on Windows 11 (the platform they were run on
 > here). Finalizing a `WalWriter` unmaps the log before truncating it, because
 > Windows refuses to shrink a file that still has a mapped view open. See
-> [chapter 8](docs/08-ringbuffer-and-wal.md#811-caveats-read-before-relying-on-the-wal).
+> [chapter 9](docs/09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal).
 
-[Chapter 9](docs/09-testing-and-performance.md) explains what each test proves and
+[Chapter 10](docs/10-testing-and-performance.md) explains what each test proves and
 how to interpret the benchmark output.
 
 ## License

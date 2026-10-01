@@ -91,7 +91,7 @@ below compare them.
 > tightly packed array many orders **straddle two cache lines** (if the array
 > starts on a line boundary, order 1 covers bytes 48 to 95, crossing the
 > boundary at 64). Two easy experiments are listed
-> in [chapter 10](10-limitations-and-exercises.md): reorder the fields (or drop
+> in [chapter 11](11-limitations-and-exercises.md): reorder the fields (or drop
 > `repr(C)` and let the compiler do it) to shrink the record to 40 bytes, or
 > align it to 64 bytes so each order owns exactly one cache line.
 
@@ -292,7 +292,7 @@ much later.
 > silently there. These checks cost one predictable branch each, on data that is
 > already in cache. The crate's release profile sets `panic = "abort"`, which
 > turns such a panic into a process abort in a binary built with that setting
-> (see [chapter 9](09-testing-and-performance.md#95-build-profiles) for the
+> (see [chapter 10](10-testing-and-performance.md#105-build-profiles) for the
 > caveat about libraries). That is the intent: for a financial system, stopping
 > loudly beats continuing with a corrupt book.
 
