@@ -85,6 +85,12 @@ pub struct Producer<T> { shared: Arc<Shared<T>>, tail: usize, cached_head: usize
 pub struct Consumer<T> { shared: Arc<Shared<T>>, head: usize, cached_tail: usize }
 ```
 
+Two small things in this code are explained properly later. `CachePadded<T>` is
+a wrapper that gives a value a whole cache line to itself (8.4 explains why that
+matters), and `.0` is how you reach the value inside it, as in
+`self.shared.head.0`. A **cache line** is the block of memory, usually 64 bytes,
+that a CPU core copies into its own cache in one go.
+
 Each handle keeps a private copy of **its own** cursor (only it ever advances
 that cursor, so its copy is always exact) and a **cached** copy of the other
 side's cursor (8.3 explains why).
