@@ -301,6 +301,27 @@ that. The test
 `open_append_resumes_after_the_last_valid_record` builds the same situation (a torn
 record with stale data after it) and checks that only the valid records survive.
 
+### What about the events?
+
+The log stores **requests**, not events. Replaying it makes the engine emit every
+event again: every trade, every fill, from the very first request. That is
+useful, and also a trap:
+
+- **Duplicates.** If downstream systems (market data, trade confirmations) already
+  received those events before the crash, sending them again would report each
+  trade twice. A replay must therefore *not* publish its events, or downstream
+  must recognise and ignore repeats.
+- **Gaps.** The matching loop logs a request, applies it, and *then* publishes its
+  events. A crash between those steps leaves a request that is in the log but
+  whose events never left the process.
+
+The usual fix uses the WAL `sequence` number from 9.2. Downstream remembers the
+sequence of the last request whose events it has fully processed, say 41. On
+restart, the replay throws away the events of requests 0 to 41 and publishes the
+events of requests 42 onwards. Because the engine is deterministic, those are
+exactly the events the crashed process would have published. This repository
+leaves that bookkeeping to you; the program in 9.7 does not publish events at all.
+
 On the very first start there is no log yet, so a service typically does this:
 
 ```rust
