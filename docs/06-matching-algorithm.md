@@ -43,7 +43,7 @@ type, so `emit` is inlined into the matching loop; `?Sized` also allows a
 ```mermaid
 flowchart TD
     A(["process_order(id, side, tick, qty, sink)"]) --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live?"}
-    B -- yes --> R(["emit OrderRejected<br/>return immediately"])
+    B -- yes --> R(["emit OrderRejected(reason)<br/>return immediately"])
     B -- no --> C["emit OrderAccepted"]
     C --> D["remaining = qty<br/>match_incoming against the opposite side"]
     D --> E{"remaining == 0?"}
@@ -53,10 +53,10 @@ flowchart TD
     G -- no --> I
     H --> I["allocate an arena slot for the remainder"]
     I --> J{"slot available?"}
-    J -- no --> K["emit OrderRejected"]
+    J -- no --> K["emit OrderRejected(BookFull)"]
     J -- yes --> L["id_map.insert<br/>push_back onto own price level"]
     L --> M{"push_back succeeded?<br/>(no quantity overflow)"}
-    M -- no --> N["undo: id_map.remove, free slot<br/>emit OrderRejected"]
+    M -- no --> N["undo: id_map.remove, free slot<br/>emit OrderRejected(LevelQuantityOverflow)"]
     M -- yes --> O["set own bitset bit"]
     K --> P(["sequence += 1<br/>return"])
     N --> P
@@ -73,26 +73,41 @@ In words:
 ### Phases 1 and 2: validation and acceptance
 
 ```rust
-if qty == 0
-    || order_id == crate::hashmap::RESERVED_KEY
-    || (price_tick as usize) >= MAX_TICKS
-    || self.id_map.get(order_id).is_some()
-{
-    sink.emit(Event::OrderRejected { order_id });
+fn validate(&self, order_id: u64, price_tick: u32, qty: u64) -> Result<(), RejectReason> {
+    if qty == 0 {
+        Err(RejectReason::ZeroQuantity)
+    } else if order_id == crate::hashmap::RESERVED_KEY {
+        Err(RejectReason::ReservedOrderId)
+    } else if (price_tick as usize) >= MAX_TICKS {
+        Err(RejectReason::PriceOutOfRange)
+    } else if self.id_map.get(order_id).is_some() {
+        Err(RejectReason::DuplicateOrderId)
+    } else {
+        Ok(())
+    }
+}
+
+// In process_order:
+if let Err(reason) = self.validate(order_id, price_tick, qty) {
+    sink.emit(Event::OrderRejected { order_id, reason });
     return;
 }
 sink.emit(Event::OrderAccepted { order_id });
 ```
 
-| Check | Why |
-|---|---|
-| `qty == 0` | An empty order is meaningless. Without the check it would sail through matching with nothing to fill and emit a spurious `OrderAccepted` + `OrderFilled` pair. |
-| `order_id == u64::MAX` | Reserved as the hash map's "empty" marker (chapter 5). |
-| `price_tick >= 4096` | The price ladder only has 4096 ticks; indexing beyond it would be out of bounds. |
-| `id_map.get(id).is_some()` | Duplicate id among **live** orders. (An id that has been fully filled or cancelled is gone from the map and may be reused.) |
+| Check | `RejectReason` | Why |
+|---|---|---|
+| `qty == 0` | `ZeroQuantity` | An empty order is meaningless. Without the check it would sail through matching with nothing to fill and emit a spurious `OrderAccepted` + `OrderFilled` pair. |
+| `order_id == u64::MAX` | `ReservedOrderId` | Reserved as the hash map's "empty" marker (chapter 5). |
+| `price_tick >= 4096` | `PriceOutOfRange` | The price ladder only has 4096 ticks; indexing beyond it would be out of bounds. |
+| `id_map.get(id).is_some()` | `DuplicateOrderId` | Duplicate id among **live** orders. (An id that has been fully filled or cancelled is gone from the map and may be reused.) |
 
 A validation failure yields **only** `OrderRejected`, with no `OrderAccepted`
-before it.
+before it. The checks run in the order of the table and stop at the first
+failure, so an order with two problems (say, zero quantity *and* a bad tick)
+always gets the same reason, `ZeroQuantity`. Returning a `Result` from a small
+function keeps that order easy to read, and lets the caller handle every
+rejection with one `if let`.
 
 ### Phase 3: `match_incoming`, choosing the side
 
@@ -245,20 +260,20 @@ match self.pool.allocate(order_id, side, price_tick, remaining, self.sequence) {
         if !rested {
             self.id_map.remove(order_id);   // roll back
             self.pool.free(idx);
-            sink.emit(Event::OrderRejected { order_id });
+            sink.emit(Event::OrderRejected { order_id, reason: RejectReason::LevelQuantityOverflow });
         }
     }
-    None => sink.emit(Event::OrderRejected { order_id }),   // arena full
+    None => sink.emit(Event::OrderRejected { order_id, reason: RejectReason::BookFull }),
 }
 ```
 
 Two things can prevent an order from resting, and both produce `OrderRejected`
 **after** `OrderAccepted`:
 
-| Cause | Why | Cleanup |
-|---|---|---|
-| Arena full (`allocate` returns `None`) | `order_capacity` resting orders already exist | nothing to undo |
-| Level quantity overflow (`push_back` returns `false`) | `total_qty` would exceed `u64::MAX` | remove the id from `id_map`, free the slot |
+| Cause | `RejectReason` | Why | Cleanup |
+|---|---|---|---|
+| Arena full (`allocate` returns `None`) | `BookFull` | `order_capacity` resting orders already exist | nothing to undo |
+| Level quantity overflow (`push_back` returns `false`) | `LevelQuantityOverflow` | `total_qty` would exceed `u64::MAX` | remove the id from `id_map`, free the slot |
 
 > [!IMPORTANT]
 > **In practice, a capacity rejection only happens to an order that did not trade.**
@@ -377,14 +392,14 @@ nothing. It is not an error. (Try cancelling order 4 twice in the worked example
 
 | Input | Events emitted | Book effect |
 |---|---|---|
-| `qty = 0` | `[OrderRejected]` | none |
-| `price_tick = 4096` (out of range) | `[OrderRejected]` | none |
+| `qty = 0` | `[OrderRejected(ZeroQuantity)]` | none |
+| `price_tick = 4096` (out of range) | `[OrderRejected(PriceOutOfRange)]` | none |
 | `price_tick = 4095` (last valid tick) | `[OrderAccepted]` (if nothing crosses) | rests normally |
-| `order_id = u64::MAX` | `[OrderRejected]` | none |
-| Duplicate id of a live order | `[OrderRejected]` | none |
+| `order_id = u64::MAX` | `[OrderRejected(ReservedOrderId)]` | none |
+| Duplicate id of a live order | `[OrderRejected(DuplicateOrderId)]` | none |
 | Re-using the id of a filled/cancelled order | handled like any new order | normal |
-| Order would rest but arena is full | `[OrderAccepted, OrderRejected]` (never preceded by trades, see 6.4) | nothing rests |
-| Order would rest but level quantity would overflow `u64` | `[OrderAccepted, OrderRejected]` | nothing rests; state unchanged |
+| Order would rest but arena is full | `[OrderAccepted, OrderRejected(BookFull)]` (never preceded by trades, see 6.4) | nothing rests |
+| Order would rest but level quantity would overflow `u64` | `[OrderAccepted, OrderRejected(LevelQuantityOverflow)]` | nothing rests; state unchanged |
 | Order fully matches while arena is full | normal fills | needs no slot, so it succeeds |
 | `cancel_order` of unknown id | none (returns `false`) | none |
 
