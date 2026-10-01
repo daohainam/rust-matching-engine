@@ -46,7 +46,9 @@ pub struct Engine {
     ask_bitset: TwoLevelBitset,
     bid_levels: Box<[PriceLevel]>,
     ask_levels: Box<[PriceLevel]>,
-    /// Metadata copied into each newly resting order; FIFO links enforce priority.
+    /// Counts accepted orders and is stamped into each resting order as
+    /// audit metadata. Matching never reads it: time priority comes from the
+    /// position in a level's FIFO queue, not from comparing this number.
     sequence: u64,
 }
 

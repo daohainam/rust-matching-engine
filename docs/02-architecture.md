@@ -71,7 +71,7 @@ pub struct Engine {
     ask_bitset: TwoLevelBitset,   // which ask ticks are non-empty
     bid_levels: Box<[PriceLevel]>,// bid_levels[tick] = FIFO queue of bids at that tick
     ask_levels: Box<[PriceLevel]>,// ask_levels[tick] = FIFO queue of asks at that tick
-    sequence: u64,                // arrival counter stamped into each resting order
+    sequence: u64,                // arrival counter; metadata only, never read by matching
 }
 ```
 
@@ -83,7 +83,7 @@ Each field has exactly one responsibility:
 | `id_map`      | "Which arena slot holds the order with id 12345?"               | expected O(1) hash lookup |
 | `*_levels`    | "What orders are waiting at price tick T?"                      | `levels[T]`: one array read |
 | `*_bitset`    | "What is the best non-empty price?"                             | two bit-scans |
-| `sequence`    | "In what order did orders arrive?"                              | one add |
+| `sequence`    | "How many orders has the engine accepted?" (audit metadata; FIFO order comes from the queue links, not from this number, see [6.10](06-matching-algorithm.md#610-design-notes-worth-noticing)) | one add |
 
 ### How the pieces point at each other
 

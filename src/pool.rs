@@ -31,7 +31,8 @@ pub struct Order {
     pub order_id: u64,
     /// Quantity not yet executed.
     pub remaining_qty: u64,
-    /// Engine-assigned arrival sequence retained as order metadata.
+    /// Engine-assigned arrival counter, kept as audit metadata only; the
+    /// engine never reads it (FIFO position decides time priority).
     pub sequence: u64,
     /// Dense integer price level used to index the book's arrays.
     pub price_tick: u32,
