@@ -35,12 +35,14 @@ Reading them is a good way to learn the behaviour each module promises.
 | `crosses_multiple_ask_price_levels_in_price_time_priority` | A buy sweeps asks from the cheapest level upward. |
 | `crosses_multiple_bid_price_levels_for_incoming_sell` | A sell sweeps bids from the highest level downward (the mirror case). |
 | `price_time_priority_within_a_level_is_fifo` | Within one price, the older order fills first. |
-| `rejects_duplicate_order_id_and_zero_qty` | Validation rejects a live duplicate id and `qty == 0`. |
+| `rejects_duplicate_order_id_and_zero_qty` | Validation rejects a live duplicate id (`DuplicateOrderId`) and `qty == 0` (`ZeroQuantity`). |
+| `rejects_out_of_range_price_tick` | A tick of 4096 is rejected with `PriceOutOfRange` and leaves the book empty. |
+| `input_checks_run_in_a_fixed_order` | An order with several problems gets the reason of the first check (`ZeroQuantity`). |
 | `depth_snapshot_orders_best_to_worst` | Snapshots are sorted best first. |
 | `depth_queries_accept_any_input_without_panicking` | `depth_at` with an out-of-range tick returns 0, and `depth_snapshot(side, usize::MAX)` returns every level on both sides. |
-| `arena_exhaustion_rejects_resting_order` | A full arena rejects the order that would need to rest (`Accepted`, `Rejected`). |
-| `rejects_reserved_order_id_sentinel` | `u64::MAX` is rejected, and cancelling it is safe. |
-| `rejects_resting_order_that_would_overflow_level_total_qty` | A `u64::MAX` quantity fills a level; the next order there is rejected and leaves no dangling slot. |
+| `arena_exhaustion_rejects_resting_order` | A full arena rejects the order that would need to rest (`Accepted`, `Rejected(BookFull)`). |
+| `rejects_reserved_order_id_sentinel` | `u64::MAX` is rejected with `ReservedOrderId`, and cancelling it is safe. |
+| `rejects_resting_order_that_would_overflow_level_total_qty` | A `u64::MAX` quantity fills a level; the next order there is rejected with `LevelQuantityOverflow` and leaves no dangling slot. |
 | `deep_sweep_reports_every_execution` | One taker sweeping 40 makers reports every trade and fill through a `Vec` sink: the regression test for the old 64-event cap. |
 | `bounded_batch_sink_reports_truncation` | The same sweep into an `EventBatch` keeps 64 events and counts the other 18 as dropped. |
 | `panicking_sink_leaves_the_book_consistent` | A sink that panics on a maker's fill (caught with `catch_unwind`) leaves no stale best price behind. |
