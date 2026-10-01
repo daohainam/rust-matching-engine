@@ -150,6 +150,17 @@ so you can seek straight to it.
 Constructors: `WalRecord::new_order(id, side, tick, qty, sequence)` and
 `WalRecord::cancel(id, sequence)` (the unused fields are zeroed).
 
+**What is `sequence` for?** The engine never looks at it; it is a number *you*
+choose, normally 0, 1, 2, ... in the order requests are logged (the program in 9.7
+does exactly that). It is not the engine's own `sequence` counter from chapter 6.
+Because it goes up by one per record, it lets you:
+
+- **detect gaps**: if record 41 is followed by record 43, something is missing
+  or damaged (exercise 23 in [chapter 11](11-limitations-and-exercises.md) builds
+  on this);
+- **name a request** outside the log, for example to remember "events have been
+  published up to request 41" (see *What about the events?* in 9.5).
+
 ## 9.3 Memory-mapped files in one minute
 
 Normally, writing to a file means a system call (`write`) per record. A
