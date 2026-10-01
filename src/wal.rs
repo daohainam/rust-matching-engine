@@ -40,8 +40,35 @@
 //! (unknown kind or side, or a checksum mismatch) as the end of the log. The
 //! checksum detects torn and zeroed records; it is not a cryptographic MAC.
 //! [`WalWriter::open_append`] resumes an existing log after that point.
-//! Appended records are durable once [`WalWriter::flush`] (or
-//! [`WalWriter::finalize`]) returns.
+//!
+//! # Durability and its limits
+//!
+//! Records appended before a successful [`WalWriter::flush`] (or
+//! [`WalWriter::finalize`]) have been handed to the storage device, so they
+//! survive a process crash and, normally, a power loss. To stay small, this
+//! module deliberately leaves these cases to the caller:
+//!
+//! - **A failed flush is final.** After `flush` returns an error, records may
+//!   be lost even if a later flush succeeds: the OS may already have dropped
+//!   the pages it could not write. Stop accepting requests and recover by
+//!   replaying the log.
+//! - **New files on Unix.** A new file's directory entry is durable only once
+//!   the parent directory is synced, which [`WalWriter::create`] does not do.
+//!   A power loss soon after creating a log can lose the whole file.
+//! - **A full disk on Linux.** `set_len` grows the file sparsely. If the disk
+//!   is full when a page is first written through the mapping, the kernel
+//!   stops the process with `SIGBUS` instead of `append` returning an error.
+//! - **`create` is not atomic.** A crash before the header reaches the disk
+//!   leaves a file whose header is all zeros. `open_append` and [`read_all`]
+//!   then report `InvalidData`; nothing was logged in it, so it can be
+//!   deleted.
+//! - **Damage in the middle of a log.** `open_append` treats everything after
+//!   the first invalid record as an unfinished tail and discards it. That is
+//!   right after a crash, but would also drop valid records that follow a
+//!   corrupted one.
+//! - **One writer per file.** `create` refuses an existing file, but nothing
+//!   stops a second `open_append` on a log that a live writer is using; on
+//!   Linux that truncates the file under the first writer's mapping.
 
 use memmap2::{MmapMut, MmapOptions};
 use std::fs::{File, OpenOptions};
@@ -275,6 +302,10 @@ impl WalWriter {
     /// so a restart can never erase the log it should replay. Continue an
     /// existing log with [`open_append`](Self::open_append), or delete the
     /// file deliberately before calling `create`.
+    ///
+    /// Creation is not atomic: a crash before the header is flushed leaves a
+    /// file with a zeroed header, and on Unix the new directory entry is not
+    /// synced. See the [module docs](self#durability-and-its-limits).
     pub fn create<P: AsRef<Path>>(path: P, capacity_records: usize) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
@@ -292,8 +323,11 @@ impl WalWriter {
     /// room for at least `spare_records` more before the file must grow.
     ///
     /// Any bytes after the last valid record (a torn write or stale data)
-    /// are discarded, so they can never be mistaken for records later. The
-    /// whole file is read once, with plain I/O, to find that record.
+    /// are discarded, so they can never be mistaken for records later. That
+    /// is right after a crash, but it would also discard valid records that
+    /// follow a corrupted one. The whole file is read once, with plain I/O,
+    /// to find that record. Use one writer per file: opening a log that a
+    /// live writer is still using corrupts it.
     pub fn open_append<P: AsRef<Path>>(path: P, spare_records: usize) -> io::Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut bytes = Vec::new();
@@ -371,6 +405,11 @@ impl WalWriter {
     /// Writes dirty mapped pages back to the file and waits until the
     /// storage device reports them durable (`msync` / `FlushViewOfFile` +
     /// `FlushFileBuffers`).
+    ///
+    /// If this returns an error, treat the log as damaged rather than
+    /// retrying and carrying on: the OS may already have discarded the pages
+    /// it failed to write, so a later successful flush does not prove they
+    /// reached the disk. See the [module docs](self#durability-and-its-limits).
     pub fn flush(&self) -> io::Result<()> {
         match &self.mmap {
             Some(mmap) => mmap.flush(),
