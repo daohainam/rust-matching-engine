@@ -127,6 +127,11 @@ pub fn push(&mut self, value: T) -> Result<(), T> {
         }
     }
     let slot = &self.shared.buffer[self.tail & self.shared.mask];
+    // SAFETY: `tail - head < capacity`, and the Acquire load that produced
+    // `cached_head` synchronized with the consumer's Release store, so the
+    // consumer has finished reading this slot (or it was never used). It
+    // will not read it again until the Release store below publishes it,
+    // and this unique producer is the only writer.
     unsafe { slot.get().write(MaybeUninit::new(value)) };        // write the slot
     self.tail = self.tail.wrapping_add(1);
     self.shared.tail.0.store(self.tail, Ordering::Release);      // publish it
@@ -142,6 +147,10 @@ pub fn pop(&mut self) -> Option<T> {
         }
     }
     let slot = &self.shared.buffer[self.head & self.shared.mask];
+    // SAFETY: `head < tail`, and the Acquire load that produced
+    // `cached_tail` synchronized with the producer's Release store that
+    // published this slot, so it holds an initialized value. The producer
+    // will not overwrite it until the Release store below frees it.
     let value = unsafe { slot.get().read().assume_init() };      // read the slot
     self.head = self.head.wrapping_add(1);
     self.shared.head.0.store(self.head, Ordering::Release);      // free it
@@ -151,6 +160,15 @@ pub fn pop(&mut self) -> Option<T> {
 
 `push` returns `Err(value)` when full, handing the value back so the caller can
 retry or drop it. Nothing ever blocks or allocates.
+
+**Reading the `unsafe` blocks.** Writing into a slot through a shared `Arc`, and
+reading a `MaybeUninit` as if it held a value, are things the compiler cannot
+check, so they need `unsafe`. That keyword does not switch the rules off; it
+means *the programmer* promises they hold. Rust convention is to write that
+promise down in a `// SAFETY:` comment right above the block, as here: each one
+says which facts (the cursor check, the Acquire/Release pairing below, the single
+producer) make the operation correct. If you change the code around an `unsafe`
+block, re-check its `SAFETY` comment first.
 
 **The cached cursors** are a big part of the speed. Reading the other side's
 cursor means touching a cache line that the other core keeps writing, which is
