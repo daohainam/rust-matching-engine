@@ -17,8 +17,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The WAL's memory-mapping behavior differs between platforms.
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-latest, windows-latest: the WAL's memory mapping behaves
+        #   differently on Linux and Windows.
+        # ubuntu-24.04-arm: ARM is weakly ordered, so the threaded ring buffer
+        #   test exercises its Release/Acquire pairs for real; x86 hides most
+        #   ordering bugs.
+        os: [ubuntu-latest, windows-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
       # Pinned so a new compiler or clippy release cannot turn `main` red
