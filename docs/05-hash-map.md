@@ -331,4 +331,20 @@ and `insert_rejects_reserved_sentinel_key_in_all_build_profiles` covers the map.
   clean up later.
 - Sized once, never resizes, never allocates after `with_capacity`.
 
+## 5.10 Try it yourself
+
+Run the hash map's unit tests:
+
+```sh
+cargo test hashmap::
+```
+
+Two are worth reading closely. `survives_many_collisions_and_deletions` stresses
+backward-shift deletion from 5.6, and `keys_crafted_for_one_seed_spread_out_under_another`
+builds the attack from 5.7 and shows the seed defeating it:
+
+```sh
+cargo test keys_crafted_for_one_seed_spread_out_under_another
+```
+
 **Next:** [6. The matching algorithm](06-matching-algorithm.md)
