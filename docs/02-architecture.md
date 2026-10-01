@@ -293,4 +293,23 @@ These things *do* allocate, and that is fine because they are not on the hot pat
 > zero-allocation test drives the engine through an `EventBatch` and a counting
 > closure, so it measures the engine alone (chapter 9).
 
+## 2.9 Try it yourself
+
+Open the API documentation, which is generated from the same doc comments
+quoted in these chapters:
+
+```sh
+cargo doc --open
+```
+
+Then open [`src/engine.rs`](../src/engine.rs) and find each `Engine` field from
+2.3 and the place where `new` allocates it. Every allocation that order
+processing needs happens in that one function (only inspection helpers such as
+`depth_snapshot` allocate later); [chapter 9](09-testing-and-performance.md) shows
+the test that proves it:
+
+```sh
+cargo test --test zero_alloc
+```
+
 **Next:** [3. The order pool](03-order-pool.md)
