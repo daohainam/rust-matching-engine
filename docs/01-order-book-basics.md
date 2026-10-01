@@ -179,6 +179,22 @@ dense, we can use **arrays indexed by tick** instead of trees or hash maps.
 | Price-time priority                                    | More than one instrument per `Engine` (use one each)   |
 | Depth queries (`depth_at`, `depth_snapshot`)           | Auctions, circuit breakers, fees                       |
 
+### What happens to a bad order?
+
+Some orders are refused before they can touch the book. The engine reports an
+`OrderRejected` event that says why, and nothing else changes:
+
+| The order has... | Reason reported |
+|---|---|
+| a quantity of 0 | `ZeroQuantity` |
+| the id `u64::MAX` (reserved for internal use, see [chapter 5](05-hash-map.md)) | `ReservedOrderId` |
+| a price tick of 4096 or more | `PriceOutOfRange` |
+| the same id as an order that is still resting | `DuplicateOrderId` |
+
+An order can also be accepted and trade normally, but then find **no room** to
+rest its remainder, because the book is full. It is rejected at that point with
+`BookFull` (chapter 6 explains when this can happen).
+
 Keeping the feature set small is deliberate: it keeps the code short enough to
 read in one sitting. [Chapter 11](11-limitations-and-exercises.md) lists
 extension ideas.
