@@ -177,7 +177,13 @@ The engine does not decide where events go. It hands each one, at the moment it
 happens, to the **sink** the caller passed in: a `Vec<Event>`, a closure, or a
 bounded `EventBatch` (chapter 7). Notice that a drained price is cleared from the
 bitset *before* the maker's fill is reported: the engine only calls the sink when
-every structure agrees, so the caller never observes a half-updated book.
+every structure agrees. A sink cannot look at the engine while it runs (the
+engine is mutably borrowed for the whole call, so the compiler forbids it), but
+a sink *can* panic. If that panic is caught, the caller gets the engine back at
+the point where the sink was called, and the rule guarantees the book is
+consistent there, even if the request was only partly applied. Chapter 6 explains
+this in [the note after the inner loop](06-matching-algorithm.md#after-the-inner-loop)
+and in [invariant 6](06-matching-algorithm.md#69-invariants-after-every-call).
 
 Cancelling is a much shorter trip:
 
