@@ -433,9 +433,16 @@ buys and sells, `match_incoming` takes the opposing side's storage plus a
 **Why `match_incoming` is an associated function, not a `&mut self` method.** It
 receives `&mut self.pool`, `&mut self.ask_levels`, `&mut self.ask_bitset` and
 `&mut self.id_map` as separate arguments. Rust lets you borrow *disjoint fields*
-of a struct mutably at the same time, but not the whole struct plus a field.
-Passing the fields individually proves to the borrow checker that they never
-alias. The `#[allow(clippy::too_many_arguments)]` is the price of that clarity.
+of a struct mutably at the same time, but not the whole struct plus a field: a
+method `fn match_incoming(&mut self, levels: &mut [PriceLevel], ...)` could not be
+called with `&mut self.ask_levels`, because `self` is already borrowed as a whole.
+
+A `&mut self` method *would* still be possible: it could start with
+`let (levels, bitset) = match direction { ... }` and pick the fields itself,
+because borrowing two different fields inside one function body is allowed. The
+associated function was chosen because it keeps that choice in the caller and
+makes every piece of state the loop touches visible in its signature. The
+`#[allow(clippy::too_many_arguments)]` is the price of that clarity.
 
 **The `sequence` counter.** It is incremented once for every order that passes
 validation and is copied into the `Order` record if the order rests. The engine
