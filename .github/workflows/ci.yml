@@ -29,6 +29,20 @@ jobs:
       - run: cargo test --release
       - run: cargo bench --no-run
 
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Must match `rust-version` in Cargo.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      # The promise covers the library that users depend on; dev-only
+      # dependencies such as criterion may need a newer compiler.
+      - run: cargo check --lib --locked
+
   miri:
     name: Miri
     runs-on: ubuntu-latest

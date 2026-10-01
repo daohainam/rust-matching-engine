@@ -2,6 +2,9 @@
 name = "matching_engine"
 version = "0.1.0"
 edition = "2021"
+# Oldest compiler that builds the library (`slice::as_chunks` is 1.88);
+# checked by the `msrv` CI job.
+rust-version = "1.88"
 description = "Ultra-low-latency, zero-allocation Central Limit Order Book (CLOB) matching engine"
 license = "MIT"
 
