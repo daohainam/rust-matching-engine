@@ -224,6 +224,25 @@ The rule for an entry sitting at `probe`, whose ideal slot is `ideal`:
 Moving it there is always safe: the new position is still on its own probe path,
 and closer to its ideal slot.
 
+"At or before" needs care, because the table is a **ring**: after the last slot
+comes slot 0 again. The precise version of the rule says when an entry must
+**stay**:
+
+> Walk forward around the ring from the hole (not included) to the entry's own
+> slot `probe` (included). If the entry's `ideal` slot is one of the slots on that
+> walk, the entry **stays**: a lookup for it starts *after* the hole and never
+> crosses it. Otherwise it **moves** into the hole.
+
+Two more details complete the algorithm:
+
+- An entry that stays does **not** end the scan. Later entries may still have
+  ideal slots before the hole, so the walk continues (`F` in the example below).
+- The scan ends at the first `EMPTY` slot: no probe chain continues past an empty
+  slot, so nothing beyond it can depend on the hole. (The source also stops if
+  `probe` comes all the way round to `hole`. That cannot happen while the table
+  keeps at least one empty slot, which 5.5 guarantees, but it makes the loop
+  obviously finite.)
+
 **Example:** remove `B` from `[_, _, A, B, C, D, F, _]`, where `F` sits in its own
 ideal slot 6.
 
@@ -260,7 +279,27 @@ let displaced = if probe >= hole {
 hole"**.)
 
 **Wrap-around example** (8 slots): `P` (ideal 6) at slot 6, `Q` (ideal 7) at slot
-7, `R` (ideal 6) wrapped to slot 0. Remove `P` (hole = 6):
+7, `R` (ideal 6) wrapped to slot 0. Remove `P` (hole = 6). Drawn as the ring it
+really is:
+
+```text
+                 slot 7: Q (ideal 7)
+                  ^              \
+                 /                v
+   slot 6: hole (P removed)     slot 0: R (ideal 6)
+                 ^                |
+                  \              v
+          slots 2 to 5  <--  slot 1: EMPTY
+
+   probing goes clockwise: 6 -> 7 -> 0 -> 1 -> ...
+```
+
+- Walk for `Q` (at 7): from the hole, not included, to 7 is just {7}. `Q`'s ideal
+  7 is on it, so `Q` **stays**.
+- Walk for `R` (at 0): {7, 0}. `R`'s ideal 6 is not on it (6 is the hole itself),
+  so `R` **moves** to slot 6.
+
+In code terms:
 
 - Probe 7: `Q`, ideal 7; `7 <= 6`? no, `7 > 7`? no → stays.
 - Probe 0 (wrapped, `probe < hole`): `R`, ideal 6; `6 <= 6 && 6 > 0` → **moves** to
