@@ -43,9 +43,9 @@ Using 8-bit numbers to keep it short:
 
 ```text
    value = 0b0010_1000
-                ^ ^
-                | +-- lowest set bit  = bit 3
-                +---- highest set bit = bit 5
+               ^  ^
+               |  +-- lowest set bit  = bit 3
+               +----- highest set bit = bit 5
 
    trailing_zeros(value) = 3            -> index of the LOWEST set bit
    leading_zeros(value)  = 2            -> index of the HIGHEST set bit = (8 - 1) - 2 = 5
