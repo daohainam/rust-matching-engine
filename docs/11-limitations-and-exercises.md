@@ -113,7 +113,11 @@ together, as `reduce_qty` does. Reducing to zero should behave like a cancel.*
 
 🔴 **11. Self-trade prevention.** Add an `account: u32` to `Order`. When a taker
 would trade with its own account's resting order, apply a policy (cancel oldest,
-cancel newest, or decrement both) and emit matching events.
+cancel newest, or decrement both) and emit matching events. *Hint: the check
+belongs in the inner loop of `match_incoming`, just before a `Trade` would be
+emitted. Pass the taker's account in, and remember that "cancel oldest" removes
+a maker, so it must keep the level, the bitset and the id map consistent exactly
+as a full fill does.*
 
 ### Engineering and verification
 
@@ -125,15 +129,28 @@ shrinks to the smallest request sequence that reproduces it.
 🔴 **13. Three-level bitset.** Generalise `TwoLevelBitset` to `N` levels of `u64`
 (3 levels = 262,144 ticks). Keep `lowest()` and `highest()` loop-free for a fixed
 depth. Make `MAX_TICKS` follow, and update the compile-time check on `TICKS`.
+*Hint: the top level is still one `u64`; each bit now summarises 64 words of
+the middle level. `lowest()` becomes three bit-scans: top word, then the middle
+word it points to, then the bottom word. `set` and `clear` update up to three
+words; `clear` may only clear a summary bit once the word below it is zero.*
 
 🔴 **14. Shard by symbol.** Run four `Engine`s on four threads, each fed by its own
 ring buffer, routing requests by a symbol id. Verify that the books are
-independent and throughput scales.
+independent and throughput scales. *Hint: start from
+[`examples/pipeline.rs`](../examples/pipeline.rs). Give the gateway one
+`Producer` per shard and pick it with `symbol % 4`; each matching thread keeps
+its own `Engine` and its own WAL file. For the independence check, replay each
+shard's log separately and compare with a single-threaded run per symbol.*
 
 🔴 **15. Model-check the ring buffer with [`loom`](https://docs.rs/loom).** Write
 loom tests for `push`/`pop` and for `is_disconnected`. Then weaken one `Acquire`
 to `Relaxed`, and watch loom find the bug that x86 hides and that even the ARM CI
-job may miss.
+job may miss. *Hint: loom needs its own versions of the concurrency types. Under
+`#[cfg(loom)]`, import `AtomicUsize`, `AtomicBool`, `Arc` and `UnsafeCell` from
+`loom` instead of `std`; loom's `UnsafeCell` is used through `with` and
+`with_mut` closures instead of `get()`. Wrap each test body in `loom::model(||
+...)`, and run with `RUSTFLAGS="--cfg loom" cargo test --release`. Keep the
+tests small (two or three pushes): loom tries every interleaving.*
 
 ### Making the WAL production-shaped
 
