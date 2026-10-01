@@ -403,10 +403,23 @@ cost:
 `decode` reverses `encode` and **validates** as it goes, returning a
 `WalDecodeError` for an unknown kind (`0` marks space that was never written), an
 unknown side, or a **checksum mismatch**. The checksum folds the four 8-byte words
-of the record through the SplitMix64 mixer from chapter 5: cheap, and sensitive to
-every bit (the unit test flips single bits all over a record and checks that each
-flip is caught). It detects torn and zeroed records; it is *not* a cryptographic
-MAC, so it does not stop deliberate tampering.
+of the record (bytes `0..32`) through the SplitMix64 mixer from chapter 5, then
+squeezes the 64-bit result into 32 bits. Some honest limits:
+
+- **It is very likely, not certain, to catch damage.** Two different records can
+  share a 32-bit checksum (about a 1 in 4 billion chance for random damage). The
+  unit test `decode_rejects_zeroed_and_corrupted_records` flips every single bit
+  of bytes `0..36` one at a time and checks that each flip is caught.
+- **Bytes `36..40` are not covered.** They are reserved, and `decode` does not
+  check that they are zero, so changing them goes unnoticed (the same test pins
+  this down).
+- **It is not a cryptographic MAC** (message authentication code: a checksum
+  that needs a secret key to compute), so anyone who can edit the file can also
+  recompute a matching checksum.
+
+Why not the CRC32 you may know from zip files or Ethernet? The standard library
+has none, and this crate keeps its dependencies to `memmap2`. A real system would
+likely use CRC32C, which many CPUs compute in hardware.
 
 Fixed-size records give two big wins: **appending needs no serialization buffer**
 (encode 40 bytes and copy them) and **record *i* starts at byte `32 + i × 40`**,

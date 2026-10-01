@@ -561,17 +561,24 @@ mod tests {
             Err(WalDecodeError::InvalidSide(7))
         );
 
-        // A flipped bit anywhere in the covered fields or in the checksum
-        // itself is detected.
-        for byte in [2, 4, 8, 15, 16, 24, 31, 32, 35] {
-            let mut torn = good;
-            torn[byte] ^= 0x01;
-            assert_eq!(
-                WalRecord::decode(&torn),
-                Err(WalDecodeError::ChecksumMismatch),
-                "flip in byte {byte} went undetected"
-            );
+        // Every single-bit flip in the covered fields or in the checksum
+        // itself is detected. A flip in byte 0 or 1 may be caught as an
+        // invalid kind or side instead of a checksum mismatch.
+        for byte in 0..36 {
+            for bit in 0..8 {
+                let mut torn = good;
+                torn[byte] ^= 1 << bit;
+                assert!(
+                    WalRecord::decode(&torn).is_err(),
+                    "flip of bit {bit} in byte {byte} went undetected"
+                );
+            }
         }
+        // Bytes 36..40 are reserved and not covered: changing them is not
+        // detected.
+        let mut reserved = good;
+        reserved[36] = 0xFF;
+        assert_eq!(WalRecord::decode(&reserved), Ok(sample(0)));
     }
 
     #[test]
