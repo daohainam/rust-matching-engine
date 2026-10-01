@@ -36,3 +36,9 @@ pub mod wal;
 pub use engine::Engine;
 pub use events::{Event, EventBatch, EventSink};
 pub use pool::Side;
+
+// Compiles and runs every Rust example in README.md as a doctest, so the
+// README cannot drift from the API without failing `cargo test`.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

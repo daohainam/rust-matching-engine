@@ -191,10 +191,24 @@ summary is now `{31}`, and `lowest()` returns 2000.
 ## 4.6 Why 4096 ticks?
 
 `4096 = 64 × 64`. One summary word has exactly 64 bits, one per word, so two
-levels cover 64 × 64 ticks. That is also the upper limit the source documents for
-`TICKS`: a multiple of 64, and at most 64 × 64 = 4096. Nothing enforces it at
-compile time: a larger `TICKS` would make the `1u64 << word_idx` shift in `set`
-overflow the summary word.
+levels cover 64 × 64 ticks. That is also the limit on `TICKS`: a multiple of 64,
+and at most 64 × 64 = 4096. A larger value would make the `1u64 << word_idx`
+shift in `set` overflow the summary word.
+
+The source does not just document this limit, it makes the compiler check it:
+
+```rust
+const _: () = assert!(
+    TICKS.is_multiple_of(64) && TICKS <= 64 * 64,
+    "TICKS must be a multiple of 64 and at most 4096"
+);
+```
+
+`const _` evaluates the expression while compiling, so an invalid `TICKS` never
+produces a program at all. Try it: set `TICKS` to 4160 and `cargo build` stops
+with `error[E0080]: evaluation panicked: TICKS must be a multiple of 64 and at
+most 4096`. Turning a comment into a compile-time check is cheap insurance for
+exactly the kind of change exercise 14 asks for.
 
 Need more ticks? Add another level: three levels of `u64` cover `64³ = 262,144`
 ticks, with `highest()` / `lowest()` still taking only 3 bit-scans. (That is one

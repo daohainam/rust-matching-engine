@@ -8,9 +8,17 @@
 
 /// Number of ticks tracked by a single [`TwoLevelBitset`]. Must be a
 /// multiple of 64 (word size) and, for the summary word to cover every
-/// group, at most 64 * 64 = 4096.
+/// group, at most 64 * 64 = 4096. Both limits are checked at compile time.
 pub const TICKS: usize = 4096;
 const WORDS: usize = TICKS / 64;
+
+// The summary word has one bit per 64-tick word, so it can describe at most
+// 64 words. A larger `TICKS` would make `1u64 << word_idx` overflow, so the
+// compiler rejects it instead of leaving it to a comment.
+const _: () = assert!(
+    TICKS.is_multiple_of(64) && TICKS <= 64 * 64,
+    "TICKS must be a multiple of 64 and at most 4096"
+);
 
 /// A fixed-size, allocation-free two-level bitset over `TICKS` price ticks.
 #[derive(Debug, Clone)]

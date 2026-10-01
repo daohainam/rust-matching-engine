@@ -12,26 +12,57 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # A hung test fails the job instead of running for six hours.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # The WAL's memory-mapping behavior differs between platforms.
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu-latest, windows-latest: the WAL's memory mapping behaves
+        #   differently on Linux and Windows.
+        # ubuntu-24.04-arm: ARM is weakly ordered, so the threaded ring buffer
+        #   test exercises its Release/Acquire pairs for real; x86 hides most
+        #   ordering bugs.
+        os: [ubuntu-latest, windows-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned so a new compiler or clippy release cannot turn `main` red
+      # without a code change. Bump it deliberately, in its own commit.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo test --release
-      - run: cargo bench --no-run
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      # The README sends learners to `cargo doc --open`: keep links unbroken.
+      - run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: cargo test --locked
+      - run: cargo test --release --locked
+      - run: cargo bench --no-run --locked
+      # The complete program from chapter 8, Part C.
+      - run: cargo run --release --locked --example pipeline
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      # Must match `rust-version` in Cargo.toml.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      # The promise covers the library that users depend on; dev-only
+      # dependencies such as criterion may need a newer compiler.
+      - run: cargo check --lib --locked
 
   miri:
     name: Miri
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -39,4 +70,4 @@ jobs:
           components: miri
       # Checks the unsafe ring buffer and the WAL encoding for undefined
       # behavior; tests that map files are ignored under Miri.
-      - run: cargo miri test --lib
+      - run: cargo miri test --lib --locked

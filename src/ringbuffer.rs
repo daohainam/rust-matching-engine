@@ -12,6 +12,12 @@
 //! The shared cursors live on separate cache lines, and each handle caches
 //! the other side's cursor so the fast path touches only its own line.
 //!
+//! Dropping a handle disconnects the other side.
+//! [`Consumer::is_disconnected`] tells "nothing yet" from "nothing ever
+//! again", and [`Producer::is_disconnected`] reports a consumer that is gone.
+//! So when the producer thread finishes, or dies with a panic, the consumer
+//! can stop instead of spinning forever.
+//!
 //! ```
 //! use matching_engine::ringbuffer::spsc_channel;
 //!
@@ -22,11 +28,14 @@
 //!             std::hint::spin_loop();
 //!         }
 //!     }
+//!     // `producer` is dropped here, which disconnects the consumer.
 //! });
 //! let mut received = Vec::new();
-//! while received.len() < 10 {
-//!     if let Some(value) = consumer.pop() {
-//!         received.push(value);
+//! loop {
+//!     match consumer.pop() {
+//!         Some(value) => received.push(value),
+//!         None if consumer.is_disconnected() => break, // nothing will ever arrive
+//!         None => std::hint::spin_loop(),
 //!     }
 //! }
 //! feeder.join().unwrap();
@@ -55,7 +64,7 @@
 
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Aligns a value to 128 bytes: x86 prefetchers pull cache lines in adjacent
@@ -73,6 +82,11 @@ struct Shared<T> {
     head: CachePadded<AtomicUsize>,
     /// Producer cursor: the number of values pushed so far.
     tail: CachePadded<AtomicUsize>,
+    /// Set (with `Release`) when the [`Producer`] is dropped. Written once and
+    /// read only by `is_disconnected`, so it needs no cache line of its own.
+    producer_dropped: AtomicBool,
+    /// Set (with `Release`) when the [`Consumer`] is dropped.
+    consumer_dropped: AtomicBool,
 }
 
 // SAFETY: slots are only accessed through the unique `Producer` (writes to
@@ -101,6 +115,8 @@ pub fn spsc_channel<T: Copy + Send>(capacity: usize) -> (Producer<T>, Consumer<T
         mask: capacity - 1,
         head: CachePadded(AtomicUsize::new(0)),
         tail: CachePadded(AtomicUsize::new(0)),
+        producer_dropped: AtomicBool::new(false),
+        consumer_dropped: AtomicBool::new(false),
     });
     let producer = Producer {
         shared: Arc::clone(&shared),
@@ -174,6 +190,20 @@ impl<T: Copy> Producer<T> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Returns `true` once the [`Consumer`] has been dropped: values pushed
+    /// from now on will never be read.
+    pub fn is_disconnected(&self) -> bool {
+        self.shared.consumer_dropped.load(Ordering::Acquire)
+    }
+}
+
+impl<T> Drop for Producer<T> {
+    fn drop(&mut self) {
+        // Release: every value pushed before this point is visible to a
+        // consumer that reads the flag with Acquire.
+        self.shared.producer_dropped.store(true, Ordering::Release);
+    }
 }
 
 /// The reading end of an SPSC ring buffer. There is exactly one per buffer.
@@ -235,6 +265,21 @@ impl<T: Copy> Consumer<T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Returns `true` once the [`Producer`] has been dropped **and** every
+    /// value it pushed has been popped: nothing will ever arrive again.
+    pub fn is_disconnected(&self) -> bool {
+        // Read the flag first. Its Acquire pairs with the Release in
+        // `Drop for Producer`, so the tail loaded next is the final one.
+        self.shared.producer_dropped.load(Ordering::Acquire)
+            && self.shared.tail.0.load(Ordering::Acquire) == self.head
+    }
+}
+
+impl<T> Drop for Consumer<T> {
+    fn drop(&mut self) {
+        self.shared.consumer_dropped.store(true, Ordering::Release);
     }
 }
 
@@ -299,10 +344,34 @@ mod tests {
                     assert_eq!(value, expected);
                     expected += 1;
                 }
-                None => std::hint::spin_loop(),
+                None => {
+                    // Fail fast instead of hanging if the producer died.
+                    assert!(!rx.is_disconnected(), "producer stopped at {expected}");
+                    std::hint::spin_loop();
+                }
             }
         }
         producer.join().unwrap();
         assert_eq!(rx.pop(), None);
+        assert!(rx.is_disconnected());
+    }
+
+    #[test]
+    fn consumer_reports_disconnect_only_after_draining() {
+        let (mut tx, mut rx) = spsc_channel::<u8>(4);
+        tx.push(1).unwrap();
+        assert!(!rx.is_disconnected());
+        drop(tx);
+        assert!(!rx.is_disconnected(), "a value is still queued");
+        assert_eq!(rx.pop(), Some(1));
+        assert!(rx.is_disconnected());
+    }
+
+    #[test]
+    fn producer_sees_a_dropped_consumer() {
+        let (tx, rx) = spsc_channel::<u8>(4);
+        assert!(!tx.is_disconnected());
+        drop(rx);
+        assert!(tx.is_disconnected());
     }
 }

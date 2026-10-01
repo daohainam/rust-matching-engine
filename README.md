@@ -19,8 +19,10 @@ microseconds, this repository shows one way to do it, step by step.
   hardware bit-scan, an **open-addressing hash map** with backward-shift
   deletion, and a **lock-free SPSC ring buffer**.
 - How to make a deterministic engine recoverable with a **memory-mapped
-  write-ahead log**.
-- How to *prove* a "zero allocation" claim with a counting allocator.
+  write-ahead log**, and what such a log can and cannot promise.
+- How to *prove* a "zero allocation" claim with a counting allocator, and how to
+  gain confidence in optimised code by comparing it with a deliberately simple
+  reference implementation (**differential testing**).
 
 ## Quick start
 
@@ -28,8 +30,11 @@ microseconds, this repository shows one way to do it, step by step.
 use matching_engine::{Engine, Event, Side};
 
 let mut engine = Engine::new(10_000); // pre-allocates all storage up front
-engine.process_order(1, Side::Sell, 100, 10); // resting ask: 10 @ tick 100
-let events = engine.process_order(2, Side::Buy, 100, 10); // crosses and fills
+let mut events: Vec<Event> = Vec::new(); // receives the execution reports
+
+engine.process_order(1, Side::Sell, 100, 10, &mut events); // resting ask: 10 @ tick 100
+events.clear();
+engine.process_order(2, Side::Buy, 100, 10, &mut events); // crosses and fills
 for event in &events {
     println!("{event:?}");
 }
@@ -44,18 +49,33 @@ OrderFilled { order_id: 1 }
 OrderFilled { order_id: 2 }
 ```
 
+The last argument of `process_order` and `cancel_order` is an **event sink**:
+anything that implements `EventSink`, such as a `Vec<Event>`, a closure, or the
+fixed-capacity `EventBatch`. The engine streams every report into it and never
+allocates by itself ([chapter 7](docs/07-events.md)).
+
 More of the API:
 
 ```rust
-engine.cancel_order(1);            // (found: bool, events)
-engine.best_bid();                 // Option<u32>   highest resting buy tick
-engine.best_ask();                 // Option<u32>   lowest resting sell tick
-engine.depth_at(Side::Buy, 100);   // u64           total quantity at one tick
-engine.depth_snapshot(Side::Sell, 5); // Vec<(tick, qty)>, best first
+use matching_engine::{Engine, Event, Side};
+
+let mut engine = Engine::new(10_000);
+let mut events: Vec<Event> = Vec::new();
+engine.process_order(1, Side::Buy, 100, 10, &mut events); // resting bid: 10 @ tick 100
+
+assert_eq!(engine.best_bid(), Some(100)); // highest resting buy tick
+assert_eq!(engine.best_ask(), None); // lowest resting sell tick
+assert_eq!(engine.depth_at(Side::Buy, 100), 10); // total quantity at one tick
+assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels first
+assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
+assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
 ```
 
 Prices are **integer ticks** in `0..4096`; converting to and from real prices is
 the caller's job (see [chapter 1](docs/01-order-book-basics.md#18-ticks-prices-as-small-integers)).
+
+Every Rust block in this README is compiled and run by `cargo test`, so these
+examples cannot silently fall out of date.
 
 ## The big picture
 
@@ -68,7 +88,7 @@ flowchart LR
         RB -->|pop| W["Write-ahead log<br/>memory-mapped file"]
         W --> E["Engine<br/>process_order / cancel_order"]
     end
-    E -->|returns| EV["EventBatch<br/>Trade, Filled, Cancelled..."]
+    E -->|emits into| EV["EventSink<br/>Trade, Filled, Cancelled..."]
     EV --> D["Downstream consumers<br/>market data, executions"]
 ```
 
@@ -87,11 +107,11 @@ flowchart TB
 | Store orders without `malloc` | Fixed **arena** + **free list** | O(1) alloc / free | [3](docs/03-order-pool.md) |
 | FIFO queue per price, cancel from the middle | **Intrusive doubly-linked list** (`u32` links) | O(1) push / pop / remove | [3](docs/03-order-pool.md) |
 | Best bid / best ask | **Two-level bitset** + `trailing_zeros` / `leading_zeros` | O(1), two bit-scans | [4](docs/04-price-ladder-bitset.md) |
-| Find an order by id | **Open-addressing hash map**, backward-shift delete | expected O(1) | [5](docs/05-hash-map.md) |
+| Find an order by id | **Open-addressing hash map** with a random seed, backward-shift delete | expected O(1) | [5](docs/05-hash-map.md) |
 | Match an incoming order | Walk levels best-first, FIFO within a level | O(1 + fills) | [6](docs/06-matching-algorithm.md) |
-| Report results with no `Vec` | Fixed-size **`EventBatch`** on the stack | O(1) | [7](docs/07-events.md) |
-| Feed the engine from another thread | **SPSC ring buffer** (Release/Acquire) | O(1), lock-free | [8](docs/08-ringbuffer-and-wal.md) |
-| Recover after a crash | **Memory-mapped WAL** + deterministic replay | amortised O(1) append | [8](docs/08-ringbuffer-and-wal.md) |
+| Report results without allocating | Stream events into a caller-supplied **`EventSink`** | O(1) per event | [7](docs/07-events.md) |
+| Feed the engine from another thread | **SPSC ring buffer** with separate `Producer` / `Consumer` handles (Release/Acquire) | O(1), lock-free | [8](docs/08-ringbuffer-and-wal.md) |
+| Recover after a crash | **Memory-mapped WAL** with per-record checksums + deterministic replay | amortised O(1) append | [8](docs/08-ringbuffer-and-wal.md) |
 
 ## Learning path
 
@@ -104,12 +124,12 @@ the next.
 | 2 | [Architecture overview](docs/02-architecture.md) | Design goals, module map, how the structures point at each other, memory footprint, threading model |
 | 3 | [The order pool](docs/03-order-pool.md) | Arena, free stack, intrusive doubly-linked FIFO, `PriceLevel`, invariants |
 | 4 | [The price ladder bitset](docs/04-price-ladder-bitset.md) | Two-level bitset, bit-scan instructions, worked bit-level example |
-| 5 | [The flat hash map](docs/05-hash-map.md) | Linear probing, SplitMix64, load factor, backward-shift deletion (with wrap-around) |
+| 5 | [The flat hash map](docs/05-hash-map.md) | Linear probing, SplitMix64, a secret seed against crafted ids, load factor, backward-shift deletion |
 | 6 | [The matching algorithm](docs/06-matching-algorithm.md) | `process_order` and `cancel_order` line by line, flowcharts, a full state trace, edge cases |
-| 7 | [Events](docs/07-events.md) | Event semantics and ordering, `EventBatch`, what happens when it overflows |
-| 8 | [Ring buffer and WAL](docs/08-ringbuffer-and-wal.md) | SPSC queue and memory ordering, record format, mmap, replay, a complete wired-up program |
-| 9 | [Testing and performance](docs/09-testing-and-performance.md) | What each test proves, the counting-allocator trick, reading the benchmarks |
-| 10 | [Limitations and exercises](docs/10-limitations-and-exercises.md) | Known sharp edges, 18 graded exercises, further reading |
+| 7 | [Events](docs/07-events.md) | Event semantics and ordering, the `EventSink` trait, choosing a sink, `EventBatch` truncation |
+| 8 | [Ring buffer and WAL](docs/08-ringbuffer-and-wal.md) | SPSC queue and memory ordering, disconnect detection, log format and crash safety, a complete wired-up program |
+| 9 | [Testing and performance](docs/09-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
+| 10 | [Limitations and exercises](docs/10-limitations-and-exercises.md) | What was fixed and how, known sharp edges, graded exercises, further reading |
 
 **In a hurry?** Read chapter 1 (concepts), skim chapter 2 (the map), then jump to
 chapter 6 (the algorithm); follow its links back to chapters 3 to 5 when a data
@@ -122,19 +142,26 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, Event, EventBatch, Side
+  lib.rs         crate root; re-exports Engine, Event, EventBatch, EventSink, Side
   engine.rs      matching core: process_order, cancel_order, depth queries
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
   bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
-  hashmap.rs     flat open-addressing hash map (order id -> arena slot)
-  events.rs      Event enum and fixed-capacity EventBatch
-  ringbuffer.rs  lock-free SPSC ring buffer (Disruptor style)
-  wal.rs         memory-mapped binary write-ahead log
+  hashmap.rs     seeded open-addressing hash map (order id -> arena slot)
+  events.rs      Event enum, EventSink trait, bounded EventBatch sink
+  ringbuffer.rs  lock-free SPSC ring buffer with Producer / Consumer handles
+  wal.rs         memory-mapped, checksummed write-ahead log
 tests/
+  common/        shared helpers: seeded PRNG, request generator, temp files
+  model_check.rs differential test against a simple reference order book
+  wal_replay.rs  replaying the WAL reproduces every event
   zero_alloc.rs  counting global allocator proves zero heap allocations
+  docs_sync.rs   chapter 8 must show examples/pipeline.rs verbatim
+examples/
+  pipeline.rs    ring buffer -> WAL -> engine -> replay, in one program
 benches/
   matching_engine_bench.rs   criterion micro-benchmarks
 docs/            the chapters listed above
+.github/workflows/ci.yml     CI: Linux (x64 and arm64), Windows, Miri, MSRV
 ```
 
 ## Key limits at a glance
@@ -143,9 +170,10 @@ docs/            the chapters listed above
 |---|---|---|
 | Price range | ticks `0..=4095` | bitset is `64 × 64` bits |
 | Resting orders | `order_capacity` passed to `Engine::new` | arena size |
-| Events per call | 64 (extra events are dropped) | `MAX_EVENTS_PER_CALL` |
+| Events per call | unlimited with a `Vec` or closure sink; an `EventBatch` keeps 64 and counts the rest | your choice of `EventSink` |
 | Reserved order id | `u64::MAX` | hash map's "empty slot" marker |
 | Order types | limit orders only | scope of the project |
+| Rust version | 1.88 or newer | `rust-version` in `Cargo.toml` |
 
 Details, consequences and workarounds are in
 [chapter 10](docs/10-limitations-and-exercises.md).
@@ -153,13 +181,15 @@ Details, consequences and workarounds are in
 ## Testing and benchmarking
 
 ```sh
-cargo test                     # unit + integration tests
-cargo test --test zero_alloc   # verifies zero heap allocations on the hot path
-cargo bench                    # criterion micro-benchmarks
+cargo test                      # unit, integration and doc tests (this README included)
+cargo test --test model_check   # the engine against a simple reference book
+cargo test --test zero_alloc    # verifies zero heap allocations on the hot path
+cargo run --example pipeline    # the complete program from chapter 8
+cargo bench                     # criterion micro-benchmarks
 ```
 
 > **Windows note:** all tests pass on Windows 11 (the platform they were run on
-> here). `WalWriter::finalize` unmaps the log before truncating it, because
+> here). Finalizing a `WalWriter` unmaps the log before truncating it, because
 > Windows refuses to shrink a file that still has a mapped view open. See
 > [chapter 8](docs/08-ringbuffer-and-wal.md#811-caveats-read-before-relying-on-the-wal).
 

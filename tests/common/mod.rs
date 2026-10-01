@@ -158,7 +158,11 @@ pub struct TempFile(pub PathBuf);
 
 impl TempFile {
     pub fn new(name: &str) -> Self {
-        Self(std::env::temp_dir().join(format!("{name}_{}.bin", std::process::id())))
+        let path = std::env::temp_dir().join(format!("{name}_{}.bin", std::process::id()));
+        // A file left behind by an aborted earlier run would make
+        // `WalWriter::create` fail, so start from a clean slate.
+        let _ = std::fs::remove_file(&path);
+        Self(path)
     }
 }
 

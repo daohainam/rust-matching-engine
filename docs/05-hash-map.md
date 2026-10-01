@@ -24,7 +24,8 @@ It is an excellent general-purpose map, but for this job:
 - It **allocates**, and **resizes** (allocate + rehash everything) when it grows.
   Both are latency spikes.
 - Its default hasher (SipHash) is designed to resist attackers who craft colliding
-  keys; that costs cycles we do not want to spend per order.
+  keys; that costs cycles we do not want to spend per order. (This module gets
+  most of that protection far more cheaply, with a secret seed: see 5.7.)
 - We know the maximum number of entries up front (the pool's capacity), so we
   can size the table **once** and never resize.
 
@@ -43,6 +44,7 @@ pub struct FlatHashMap {
     slots: Box<[Slot]>,    // the whole table
     mask: usize,           // slots.len() - 1
     len: usize,
+    seed: u64,             // secret, random per table (see 5.7)
 }
 ```
 
@@ -79,7 +81,7 @@ The code is a tight loop:
 
 ```rust
 pub fn get(&self, key: u64) -> Option<u32> {
-    let mut idx = Self::hash(key) & self.mask;
+    let mut idx = self.hash(key) & self.mask;
     loop {
         let slot = &self.slots[idx];
         if slot.key == EMPTY { return None; }          // reached a hole: miss
@@ -92,7 +94,9 @@ pub fn get(&self, key: u64) -> Option<u32> {
 > [!WARNING]
 > This loop only terminates if the table always contains **at least one
 > `EMPTY` slot**. A completely full table would make a lookup for a missing key
-> spin forever. The design guarantees this (see 5.5).
+> spin forever. The engine's sizing leaves plenty of empty slots (5.5), and
+> `insert` enforces the minimum for *any* user of the map: it panics rather than
+> fill the last empty slot. A loud panic is far easier to debug than a silent hang.
 
 ## 5.4 Two tricks: power-of-two size and a good hash
 
@@ -117,22 +121,21 @@ the best case for `id & mask`, but you cannot rely on that.) The function below 
 so that **every input bit affects every output bit** (an *avalanche*):
 
 ```rust
-fn hash(key: u64) -> usize {
-    let mut z = key.wrapping_add(0x9E3779B97F4A7C15);
+fn hash(&self, key: u64) -> usize {
+    let mut z = (key ^ self.seed).wrapping_add(0x9E3779B97F4A7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
     (z ^ (z >> 31)) as usize
 }
 ```
 
-This is the finalizer of **SplitMix64**: nine simple operations (one add, three
-shifts, three xors, two multiplies), no
-branches, excellent distribution. The low bits, which the mask keeps, are
-well mixed too.
+Apart from the first XOR with `self.seed`, this is the finalizer of
+**SplitMix64**: ten simple operations in total (four xors, one add, three shifts,
+two multiplies), no branches, excellent distribution. The low bits, which the
+mask keeps, are well mixed too.
 
-> It is *not* cryptographically secure and has no secret key. That is fine when
-> order ids come from a trusted gateway, but see 5.7 for what it means if they
-> do not.
+> It is *not* cryptographically secure. The secret seed is what stops an
+> attacker from predicting where an id lands; 5.7 shows why that matters.
 
 ## 5.5 Sizing: why the table is never full
 
@@ -155,6 +158,15 @@ book is only partly full):
 And the entry count can never exceed `order_capacity`, because the engine inserts
 into `id_map` only **after** `pool.allocate` succeeded, and the pool holds at most
 `order_capacity` orders. So the table always has plenty of empty slots.
+
+Two guards make the map safe to use on its own as well:
+
+- The size calculation uses checked arithmetic
+  (`checked_mul(2)`, then `checked_next_power_of_two()`). An absurd hint panics
+  with "hash map capacity overflows usize" instead of wrapping to a tiny table in
+  a release build, where overflow checks are off.
+- `insert` panics with "FlatHashMap is full" rather than fill the last empty
+  slot, so the probe loops from 5.3 always terminate.
 
 Why keep it so sparse? Linear probing degrades quickly as a table fills. The
 classic (Knuth) estimates for the average number of probes at load factor `α`:
@@ -263,14 +275,34 @@ hole"**.)
 For ordinary workloads this is "O(1)", and the doc comments are careful to say
 "expected O(1)".
 
-> [!WARNING]
-> The worst case is reachable by someone who can **choose order ids**. The hash is
-> fixed (no secret seed) and SplitMix64's finalizer is invertible, so an attacker
-> can compute ids that all land in the same region of the table and force long
-> probe chains. This is exactly what `std`'s randomly-keyed SipHash defends
-> against. The engine assumes ids come from a trusted gateway (or are assigned by
-> the exchange itself). If you expose it to untrusted ids, add a per-process
-> random seed to the hash or remap ids first.
+### Crafted ids, and the secret seed
+
+The worst case is reachable by anyone who can **choose order ids** and predict
+the hash. Without a seed, SplitMix64's finalizer is fully **invertible**: adding a
+constant, `z ^ (z >> k)` and multiplying by an odd constant can each be undone.
+So an attacker could compute thousands of ids that all hash to slot 0, and every
+lookup would then walk one long probe chain: a cheap denial-of-service attack on
+latency.
+
+The defence costs one instruction: XOR a **secret, random seed** into the key
+before mixing. `FlatHashMap::with_capacity` draws it from the standard library's
+`RandomState`, the same randomness that keys `std`'s SipHash. Without the seed an
+attacker cannot run the inversion, so they cannot aim ids at a slot.
+
+The test `keys_crafted_for_one_seed_spread_out_under_another` demonstrates both
+halves. Its `craft_key` function inverts the finalizer to build 1,000 ids that
+all target slot 0 under seed `0`, and checks that they really do. Under any other
+seed the same ids scatter like ordinary keys (the test requires the fullest
+bucket to hold fewer than 32 of them).
+
+> [!NOTE]
+> **Randomness without losing determinism.** The seed only changes *where*
+> entries are stored, never what `get`, `insert` or `remove` return. The engine
+> therefore stays deterministic: the same requests always produce the same events
+> and the same book, whatever the seed. `tests/wal_replay.rs` relies on exactly
+> this: it replays a log into a second engine, which draws a different seed, and
+> requires identical results. Tests that want a reproducible *layout* use
+> `FlatHashMap::with_capacity_and_seed`.
 
 ## 5.8 The reserved key
 
@@ -290,8 +322,10 @@ and `insert_rejects_reserved_sentinel_key_in_all_build_profiles` covers the map.
 
 ## 5.9 Recap
 
-- Flat array of `(key, value)` slots, power-of-two sized, at most 50% full.
-- Hash with SplitMix64's finalizer, pick the slot with `& mask`.
+- Flat array of `(key, value)` slots, power-of-two sized, at most 50% full, and
+  never completely full (`insert` refuses to fill the last empty slot).
+- Hash with SplitMix64's finalizer after XORing in a secret per-table seed, pick
+  the slot with `& mask`.
 - Collisions resolved by stepping to the next slot (linear probing).
 - Delete with **backward shift** instead of tombstones, so there is nothing to
   clean up later.

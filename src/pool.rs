@@ -41,7 +41,8 @@ pub struct Order {
     pub next_idx: u32,
     /// Arena index of the previous order in this price level's FIFO queue.
     pub prev_idx: u32,
-    /// Whether this arena slot currently contains a live order.
+    /// Whether this arena slot currently contains a live order;
+    /// [`OrderPool::free`] checks it to catch double frees.
     pub in_use: bool,
 }
 
@@ -133,9 +134,18 @@ impl OrderPool {
     }
 
     /// Releases a slot back to the free list. O(1) worst case.
+    ///
+    /// # Panics
+    /// Panics if the slot is not in use (a double free).
     #[inline]
     pub fn free(&mut self, idx: u32) {
-        debug_assert!(self.orders[idx as usize].in_use);
+        // A real check, not `debug_assert!`: in release builds a double free
+        // would push the slot twice, and two different orders could later be
+        // handed the same slot.
+        assert!(
+            self.orders[idx as usize].in_use,
+            "OrderPool::free: slot {idx} is not in use (double free)"
+        );
         self.orders[idx as usize].in_use = false;
         // Push the slot back so the next allocation can reuse it.
         self.free_stack[self.free_top] = idx;
@@ -246,11 +256,14 @@ impl PriceLevel {
         }
         pool.get_mut(idx).prev_idx = NIL;
         pool.get_mut(idx).next_idx = NIL;
-        self.count -= 1;
         // Using `checked_sub().expect(..)` rather than a bare `-=` turns a
         // broken bookkeeping invariant into a loud, deterministic panic in
         // every build profile instead of a silently wrapped (and much
-        // larger) `total_qty` in release builds.
+        // larger) counter in release builds.
+        self.count = self
+            .count
+            .checked_sub(1)
+            .expect("PriceLevel::count underflow: bookkeeping invariant violated");
         self.total_qty = self
             .total_qty
             .checked_sub(qty)
@@ -289,6 +302,26 @@ mod tests {
         let c = pool.allocate(3, Side::Buy, 10, 300, 2).unwrap();
         assert_eq!(pool.live_count(), 2);
         assert_ne!(b, c);
+    }
+
+    #[test]
+    #[should_panic(expected = "double free")]
+    fn double_free_is_detected() {
+        let mut pool = OrderPool::new(4);
+        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
+        pool.free(a);
+        pool.free(a);
+    }
+
+    #[test]
+    #[should_panic(expected = "count underflow")]
+    fn removing_from_an_empty_level_is_detected() {
+        // The order was allocated but never pushed onto this level, so the
+        // level has nothing to remove: a bookkeeping bug in the caller.
+        let mut pool = OrderPool::new(4);
+        let mut level = PriceLevel::empty();
+        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
+        level.remove(&mut pool, a);
     }
 
     #[test]

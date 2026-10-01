@@ -2,6 +2,11 @@
 //! allocate on the heap, by installing a counting global allocator for the
 //! whole test binary and asserting the allocation counter is unchanged
 //! across a sustained processing loop.
+//!
+//! The counter is process-wide: it sees allocations from *every* thread, not
+//! only the one under test. That is sound only while this is the binary's
+//! single test, because the test harness runs tests on parallel threads.
+//! Put any new test in a different file.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -10,6 +15,7 @@ use matching_engine::{Engine, Event, EventBatch, Side};
 
 struct CountingAllocator;
 
+/// Allocations made by any thread of this process (see the module docs).
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 unsafe impl GlobalAlloc for CountingAllocator {

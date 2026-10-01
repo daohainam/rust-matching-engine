@@ -1,6 +1,36 @@
 //! Execution report events emitted by the matching engine, the [`EventSink`]
 //! trait the engine streams them through, and [`EventBatch`], a bounded,
 //! heap-allocation-free sink.
+//!
+//! Three kinds of sink are built in:
+//!
+//! ```
+//! use matching_engine::{Engine, Event, EventBatch, Side};
+//!
+//! let mut engine = Engine::new(16);
+//!
+//! // 1. A `Vec<Event>` keeps everything. Reuse it (with `clear`) and it stops
+//! //    allocating once it has grown to fit the largest call.
+//! let mut events = Vec::new();
+//! engine.process_order(1, Side::Sell, 100, 5, &mut events);
+//! assert_eq!(events, [Event::OrderAccepted { order_id: 1 }]);
+//!
+//! // 2. A closure sees each event as it happens; this one counts trades.
+//! let mut trades = 0;
+//! engine.process_order(2, Side::Buy, 100, 2, &mut |event: Event| {
+//!     if matches!(event, Event::Trade { .. }) {
+//!         trades += 1;
+//!     }
+//! });
+//! assert_eq!(trades, 1);
+//!
+//! // 3. An `EventBatch` never allocates. It keeps the first 64 events of a
+//! //    call and only counts the rest, so check `is_truncated` afterwards.
+//! let mut batch = EventBatch::new();
+//! engine.process_order(3, Side::Buy, 100, 3, &mut batch);
+//! assert!(!batch.is_truncated());
+//! assert_eq!(batch.as_slice().last(), Some(&Event::OrderFilled { order_id: 3 }));
+//! ```
 
 /// Capacity of an [`EventBatch`].
 ///
@@ -44,6 +74,15 @@ pub enum Event {
 /// engine itself never allocates; a call is allocation-free as long as its
 /// sink is, as with a reused [`EventBatch`], a `Vec<Event>` with enough
 /// reserved capacity, or a closure that forwards into a preallocated queue.
+///
+/// The engine calls [`emit`](Self::emit) only between complete state
+/// changes, so the book is consistent whenever a sink runs. A sink should not
+/// panic. If one does and the panic is caught, the book is still consistent,
+/// but the request was only partly applied (some trades done, the remainder
+/// never rested), so the engine no longer matches a replay of its requests:
+/// drop it and rebuild it from the write-ahead log. With `panic = "abort"`
+/// (this crate's release profile) a panic ends the process instead, and
+/// recovery is a replay anyway.
 pub trait EventSink {
     /// Accepts the next event.
     fn emit(&mut self, event: Event);
