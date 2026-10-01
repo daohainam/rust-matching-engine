@@ -208,6 +208,32 @@ sequenceDiagram
 | Consumer reads `tail` (when the ring looks empty) | `Acquire` | Pairs with the producer's `Release`: makes the slot contents visible. |
 | Consumer writes `head` | `Release` | Hands the slot back only after the value was read out. |
 
+**What would go wrong with `Relaxed`?** `Relaxed` makes each atomic operation
+safe on its own, but promises nothing about the order in which *other* writes
+become visible. Suppose the producer stored `tail` with `Relaxed`:
+
+```text
+   producer (core 1)                       consumer (core 2)
+   -----------------                       -----------------
+   1. write order #7 into slot 4
+   2. tail = 5   (Relaxed store)
+                                           3. load tail -> sees 5
+                                           4. read slot 4
+```
+
+Nothing forces core 2 to see step 1 before step 2. The CPU (or the compiler) may
+make the new `tail` visible first, so in step 4 the consumer can read **slot 4's
+old bytes**: a previous order, or uninitialised memory. That is a data race, and
+undefined behaviour. With `Release` on step 2 and `Acquire` on step 3, seeing
+`tail = 5` *guarantees* seeing everything the producer wrote before it, including
+slot 4.
+
+On x86 this bug usually stays hidden: x86 CPUs never make two stores visible out
+of order, so only the compiler could reorder them, and it rarely does. The code
+would still be wrong, just lucky. On ARM (phones, Apple Silicon, many servers) the
+CPU itself reorders, so the bug really shows up, which is why CI runs the threaded
+ring-buffer test on an ARM machine too (chapter 10).
+
 ## 8.4 False sharing and `CachePadded`
 
 ```rust
