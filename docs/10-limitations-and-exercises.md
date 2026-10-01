@@ -97,8 +97,10 @@ and `deep_sweep_reports_every_execution`.*
 
 ### Understanding the internals
 
-🟡 **5. Shrink `Order`.** Reorder the fields (group the `u32`s, then the `u8`/`bool`s
-at the end) so `size_of::<Order>()` becomes 40. Add a test that pins the size.
+🟡 **5. Shrink `Order`.** Keeping `#[repr(C)]`, reorder the fields (group the
+`u32`s, then the `u8`/`bool`s at the end) so `size_of::<Order>()` becomes 40. Add a
+test that pins the size. Then remove `repr(C)` instead and check that the compiler
+reaches 40 bytes by itself (see [3.3](03-order-pool.md#33-the-order-record)).
 Then try `#[repr(C, align(64))]` instead and benchmark both against the original.
 *Which wins, and does it depend on the book size?*
 

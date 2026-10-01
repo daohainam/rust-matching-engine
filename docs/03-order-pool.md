@@ -64,6 +64,14 @@ pub struct Order {
 `#[repr(C)]` keeps fields in declaration order. The compiler inserts *padding*
 so every field is aligned. Measured with `offset_of!`:
 
+Why ask for `repr(C)` at all? Without it, Rust uses its default layout and is
+free to **reorder fields** to reduce padding; for this struct it picks a
+40-byte layout on its own. `repr(C)` gives up those 8 bytes in exchange for a
+layout that is fixed and predictable: the picture below is guaranteed, not a
+compiler detail that might change, which makes it something we can draw,
+measure and teach. Either choice is reasonable; the experiments in the note
+below compare them.
+
 ```text
  byte  0         8        16        24   28   32        36        40   41     48
        +---------+---------+---------+----+----+--------+--------+----+------+
@@ -80,9 +88,9 @@ so every field is aligned. Measured with `offset_of!`:
 > tightly packed array many orders **straddle two cache lines** (if the array
 > starts on a line boundary, order 1 covers bytes 48 to 95, crossing the
 > boundary at 64). Two easy experiments are listed
-> in [chapter 10](10-limitations-and-exercises.md): reorder the fields to
-> shrink the record to 40 bytes, or align it to 64 bytes so each order owns
-> exactly one cache line.
+> in [chapter 10](10-limitations-and-exercises.md): reorder the fields (or drop
+> `repr(C)` and let the compiler do it) to shrink the record to 40 bytes, or
+> align it to 64 bytes so each order owns exactly one cache line.
 
 ## 3.4 Idea 2: the free list (a stack of free slots)
 
