@@ -27,10 +27,10 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
-      - run: cargo test --release
-      - run: cargo bench --no-run
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo test --release --locked
+      - run: cargo bench --no-run --locked
 
   msrv:
     name: MSRV (1.88)
@@ -56,4 +56,4 @@ jobs:
           components: miri
       # Checks the unsafe ring buffer and the WAL encoding for undefined
       # behavior; tests that map files are ignored under Miri.
-      - run: cargo miri test --lib
+      - run: cargo miri test --lib --locked
