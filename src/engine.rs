@@ -8,7 +8,7 @@
 //! caller-supplied [`EventSink`] instead of being collected internally.
 
 use crate::bitset::{TwoLevelBitset, TICKS};
-use crate::events::{Event, EventSink};
+use crate::events::{Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side};
 
@@ -159,10 +159,28 @@ impl Engine {
         (tick + 1..MAX_TICKS).find(|&t| bitset.test(t))
     }
 
+    /// Checks an incoming order before it can touch the book, returning the
+    /// first problem found. The checks run in a fixed order, so an order with
+    /// several problems always gets the same reason.
+    fn validate(&self, order_id: u64, price_tick: u32, qty: u64) -> Result<(), RejectReason> {
+        if qty == 0 {
+            Err(RejectReason::ZeroQuantity)
+        } else if order_id == crate::hashmap::RESERVED_KEY {
+            Err(RejectReason::ReservedOrderId)
+        } else if (price_tick as usize) >= MAX_TICKS {
+            Err(RejectReason::PriceOutOfRange)
+        } else if self.id_map.get(order_id).is_some() {
+            Err(RejectReason::DuplicateOrderId)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Submits a new limit order.
     ///
-    /// The order is first checked for a nonzero quantity, a valid price tick,
-    /// an unused non-reserved ID, and then accepted. It trades at resting
+    /// The order is first checked for a nonzero quantity, a non-reserved ID,
+    /// a valid price tick and an unused ID, and then accepted. A failed check
+    /// emits only `OrderRejected`, with the [`RejectReason`]. It trades at resting
     /// maker prices, consuming the best eligible price first and preserving
     /// FIFO order among orders at that price. A buy may trade at asks no
     /// higher than `price_tick`; a sell may trade at bids no lower than it.
@@ -172,7 +190,9 @@ impl Engine {
     /// Every event is emitted to `sink` in order: acceptance, then each trade
     /// followed by the maker's fill update, then the taker's final fill or
     /// partial-fill state. If the remainder cannot rest, an `OrderRejected`
-    /// event is also emitted; trades already completed by this call are not
+    /// event (reason [`BookFull`](RejectReason::BookFull) or
+    /// [`LevelQuantityOverflow`](RejectReason::LevelQuantityOverflow)) is
+    /// also emitted; trades already completed by this call are not
     /// undone. The engine does not allocate, so the call is allocation-free
     /// whenever `sink` is.
     ///
@@ -187,12 +207,8 @@ impl Engine {
         sink: &mut S,
     ) {
         // Reject invalid input before emitting acceptance or changing book state.
-        if qty == 0
-            || order_id == crate::hashmap::RESERVED_KEY
-            || (price_tick as usize) >= MAX_TICKS
-            || self.id_map.get(order_id).is_some()
-        {
-            sink.emit(Event::OrderRejected { order_id });
+        if let Err(reason) = self.validate(order_id, price_tick, qty) {
+            sink.emit(Event::OrderRejected { order_id, reason });
             return;
         }
         sink.emit(Event::OrderAccepted { order_id });
@@ -273,11 +289,17 @@ impl Engine {
                     // level.
                     self.id_map.remove(order_id);
                     self.pool.free(idx);
-                    sink.emit(Event::OrderRejected { order_id });
+                    sink.emit(Event::OrderRejected {
+                        order_id,
+                        reason: RejectReason::LevelQuantityOverflow,
+                    });
                 }
             }
             None => {
-                sink.emit(Event::OrderRejected { order_id });
+                sink.emit(Event::OrderRejected {
+                    order_id,
+                    reason: RejectReason::BookFull,
+                });
             }
         }
         self.sequence = self.sequence.wrapping_add(1);
@@ -645,10 +667,50 @@ mod tests {
         let mut engine = Engine::new(16);
         place(&mut engine, 1, Side::Buy, 100, 10);
         let events = place(&mut engine, 1, Side::Buy, 100, 5);
-        assert_eq!(events.as_slice(), &[Event::OrderRejected { order_id: 1 }]);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderRejected {
+                order_id: 1,
+                reason: RejectReason::DuplicateOrderId
+            }]
+        );
 
         let events = place(&mut engine, 2, Side::Buy, 100, 0);
-        assert_eq!(events.as_slice(), &[Event::OrderRejected { order_id: 2 }]);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderRejected {
+                order_id: 2,
+                reason: RejectReason::ZeroQuantity
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_price_tick() {
+        let mut engine = Engine::new(16);
+        let events = place(&mut engine, 1, Side::Sell, MAX_TICKS as u32, 5);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderRejected {
+                order_id: 1,
+                reason: RejectReason::PriceOutOfRange
+            }]
+        );
+        assert_eq!(engine.best_ask(), None);
+    }
+
+    #[test]
+    fn input_checks_run_in_a_fixed_order() {
+        // Zero quantity, reserved id and bad tick at once: the first check wins.
+        let mut engine = Engine::new(16);
+        let events = place(&mut engine, u64::MAX, Side::Buy, u32::MAX, 0);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderRejected {
+                order_id: u64::MAX,
+                reason: RejectReason::ZeroQuantity
+            }]
+        );
     }
 
     #[test]
@@ -673,7 +735,10 @@ mod tests {
             events.as_slice(),
             &[
                 Event::OrderAccepted { order_id: 3 },
-                Event::OrderRejected { order_id: 3 }
+                Event::OrderRejected {
+                    order_id: 3,
+                    reason: RejectReason::BookFull
+                }
             ]
         );
         assert_eq!(engine.live_order_count(), 2);
@@ -690,7 +755,10 @@ mod tests {
         let events = place(&mut engine, u64::MAX, Side::Buy, 100, 10);
         assert_eq!(
             events.as_slice(),
-            &[Event::OrderRejected { order_id: u64::MAX }]
+            &[Event::OrderRejected {
+                order_id: u64::MAX,
+                reason: RejectReason::ReservedOrderId
+            }]
         );
         assert_eq!(engine.live_order_count(), 0);
         assert_eq!(engine.best_bid(), None);
@@ -718,7 +786,10 @@ mod tests {
             events.as_slice(),
             &[
                 Event::OrderAccepted { order_id: 2 },
-                Event::OrderRejected { order_id: 2 }
+                Event::OrderRejected {
+                    order_id: 2,
+                    reason: RejectReason::LevelQuantityOverflow
+                }
             ]
         );
         // The rejected order must not have left a dangling pool slot or

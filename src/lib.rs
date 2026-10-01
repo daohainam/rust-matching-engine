@@ -34,7 +34,7 @@ pub mod ringbuffer;
 pub mod wal;
 
 pub use engine::Engine;
-pub use events::{Event, EventBatch, EventSink};
+pub use events::{Event, EventBatch, EventSink, RejectReason};
 pub use pool::Side;
 
 // Compiles and runs every Rust example in README.md as a doctest, so the

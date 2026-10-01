@@ -62,9 +62,35 @@ pub enum Event {
     OrderFilled { order_id: u64 },
     /// An order was cancelled by explicit request.
     OrderCancelled { order_id: u64 },
-    /// An order was rejected (for example, invalid input, duplicate ID,
-    /// exhausted arena capacity, or price-level quantity overflow).
-    OrderRejected { order_id: u64 },
+    /// An order was rejected; `reason` says why. An input error is reported
+    /// alone (no `OrderAccepted`); a remainder that cannot rest comes after
+    /// `OrderAccepted`. See [`RejectReason`].
+    OrderRejected { order_id: u64, reason: RejectReason },
+}
+
+/// Why an order was rejected.
+///
+/// The first four reasons are **input errors**: they are checked before
+/// anything else, so the order is rejected on its own, without an
+/// `OrderAccepted` event, and the book is unchanged. The last two can only
+/// happen after `OrderAccepted`, when the unfilled remainder of an order
+/// cannot rest in the book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RejectReason {
+    /// The quantity was zero.
+    ZeroQuantity,
+    /// The order ID was `u64::MAX`, which the ID map reserves to mark an
+    /// empty slot (chapter 5).
+    ReservedOrderId,
+    /// The price tick was not below [`MAX_TICKS`](crate::engine::MAX_TICKS).
+    PriceOutOfRange,
+    /// A resting order already uses this order ID.
+    DuplicateOrderId,
+    /// The remainder could not rest: every order slot was in use.
+    BookFull,
+    /// The remainder could not rest: the total quantity at its price level
+    /// would no longer fit in a `u64`.
+    LevelQuantityOverflow,
 }
 
 /// Receives the events produced by one engine call, in the order they occur.

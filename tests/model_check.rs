@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
-use matching_engine::{Engine, Event, Side};
+use matching_engine::{Engine, Event, RejectReason, Side};
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
 type Queue = VecDeque<(u64, u64)>;
@@ -33,12 +33,19 @@ impl ReferenceBook {
     }
 
     fn place(&mut self, order_id: u64, side: Side, price_tick: u32, qty: u64) -> Vec<Event> {
-        if qty == 0
-            || order_id == u64::MAX
-            || price_tick as usize >= MAX_TICKS
-            || self.live.contains_key(&order_id)
-        {
-            return vec![Event::OrderRejected { order_id }];
+        let invalid = if qty == 0 {
+            Some(RejectReason::ZeroQuantity)
+        } else if order_id == u64::MAX {
+            Some(RejectReason::ReservedOrderId)
+        } else if price_tick as usize >= MAX_TICKS {
+            Some(RejectReason::PriceOutOfRange)
+        } else if self.live.contains_key(&order_id) {
+            Some(RejectReason::DuplicateOrderId)
+        } else {
+            None
+        };
+        if let Some(reason) = invalid {
+            return vec![Event::OrderRejected { order_id, reason }];
         }
         let mut events = vec![Event::OrderAccepted { order_id }];
 
@@ -110,8 +117,16 @@ impl ReferenceBook {
             .map_or(0, |queue| queue.iter().map(|&(_, q)| u128::from(q)).sum());
         let book_full = self.live.len() >= self.capacity;
         let level_overflows = level_total + u128::from(remaining) > u128::from(u64::MAX);
-        if book_full || level_overflows {
-            events.push(Event::OrderRejected { order_id });
+        if book_full {
+            events.push(Event::OrderRejected {
+                order_id,
+                reason: RejectReason::BookFull,
+            });
+        } else if level_overflows {
+            events.push(Event::OrderRejected {
+                order_id,
+                reason: RejectReason::LevelQuantityOverflow,
+            });
         } else {
             own.entry(price_tick)
                 .or_default()
