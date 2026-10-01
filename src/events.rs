@@ -1,6 +1,36 @@
 //! Execution report events emitted by the matching engine, the [`EventSink`]
 //! trait the engine streams them through, and [`EventBatch`], a bounded,
 //! heap-allocation-free sink.
+//!
+//! Three kinds of sink are built in:
+//!
+//! ```
+//! use matching_engine::{Engine, Event, EventBatch, Side};
+//!
+//! let mut engine = Engine::new(16);
+//!
+//! // 1. A `Vec<Event>` keeps everything. Reuse it (with `clear`) and it stops
+//! //    allocating once it has grown to fit the largest call.
+//! let mut events = Vec::new();
+//! engine.process_order(1, Side::Sell, 100, 5, &mut events);
+//! assert_eq!(events, [Event::OrderAccepted { order_id: 1 }]);
+//!
+//! // 2. A closure sees each event as it happens; this one counts trades.
+//! let mut trades = 0;
+//! engine.process_order(2, Side::Buy, 100, 2, &mut |event: Event| {
+//!     if matches!(event, Event::Trade { .. }) {
+//!         trades += 1;
+//!     }
+//! });
+//! assert_eq!(trades, 1);
+//!
+//! // 3. An `EventBatch` never allocates. It keeps the first 64 events of a
+//! //    call and only counts the rest, so check `is_truncated` afterwards.
+//! let mut batch = EventBatch::new();
+//! engine.process_order(3, Side::Buy, 100, 3, &mut batch);
+//! assert!(!batch.is_truncated());
+//! assert_eq!(batch.as_slice().last(), Some(&Event::OrderFilled { order_id: 3 }));
+//! ```
 
 /// Capacity of an [`EventBatch`].
 ///
