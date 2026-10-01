@@ -310,7 +310,7 @@ bucket to hold fewer than 32 of them).
 this:
 
 1. **`Engine::process_order`** rejects `order_id == RESERVED_KEY` up front,
-   emitting `OrderRejected`. (Without this check, a client submitting id
+   emitting `OrderRejected` with reason `ReservedOrderId`. (Without this check, a client submitting id
    `u64::MAX` would reach layer 2 below and abort the process: a denial of
    service. Without *both* layers, the entry would be silently unreachable.)
 2. **`FlatHashMap::insert`** has a hard `assert!` (not `debug_assert!`), so even a
