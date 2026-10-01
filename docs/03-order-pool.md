@@ -134,7 +134,7 @@ cache: a small free win.
 ### Allocation failure
 
 If `free_top == 0` the arena is full and `allocate` returns `None`. The engine
-turns that into an `OrderRejected` event (only for an order's resting
+turns that into an `OrderRejected` event with reason `BookFull` (only for an order's resting
 remainder; an order that fully matches needs no slot).
 
 ## 3.5 Idea 3: an intrusive doubly-linked list
@@ -266,7 +266,8 @@ The pool protects itself against three kinds of trouble, all visible in the code
 hostile or buggy client sends a quantity so large that the level's total would
 exceed `u64::MAX`, `push_back` returns `false` *without touching anything*. The
 method is `#[must_use]`, and the engine reacts by removing the order's `id_map`
-entry, freeing the slot and emitting `OrderRejected`.
+entry, freeing the slot and emitting `OrderRejected` with reason
+`LevelQuantityOverflow`.
 
 **Underflow on remove / reduce.** `remove` decreases both `count` and
 `total_qty`, and `reduce_qty` decreases `remaining_qty` and `total_qty`, all with
