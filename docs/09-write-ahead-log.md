@@ -62,6 +62,27 @@ Each record describes one request:
 | 32 | 4 | checksum of bytes `0..32` |
 | 36 | 4 | reserved, zero |
 
+Here are the 40 real bytes that `encode` produces for
+`WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, which is order `#6` from the
+worked example, logged as the sixth request (sequence 5). Each row is 8 bytes,
+written in hexadecimal:
+
+```text
+ offset  bytes                     meaning
+ ------  ------------------------  ---------------------------------------------
+   0     01 00 00 00 66 00 00 00   kind 1 (new order), side 0 (buy), 2 reserved,
+                                   price tick 0x66 = 102
+   8     06 00 00 00 00 00 00 00   order id 6
+  16     0e 00 00 00 00 00 00 00   quantity 0x0e = 14
+  24     05 00 00 00 00 00 00 00   sequence 5
+  32     16 08 01 21 00 00 00 00   checksum 0x21010816, then 4 reserved bytes
+```
+
+**Little-endian** means the *lowest* byte comes first. That is why the price 102
+(`0x00000066`) is stored as `66 00 00 00`, and why the checksum `16 08 01 21` is
+read backwards as `0x21010816`. Writing every field this way, instead of copying
+the struct's memory, is what makes the bytes identical on every machine.
+
 In memory a record is an ordinary Rust struct with typed fields; only `encode`
 and `decode` know the byte layout:
 
