@@ -283,14 +283,18 @@ pub struct WalWriter {
 }
 
 impl WalWriter {
-    /// Creates or truncates a WAL file, writes its header, and preallocates
-    /// room for at least `capacity_records` records.
+    /// Creates a new WAL file, writes its header, and preallocates room for
+    /// at least `capacity_records` records.
+    ///
+    /// Fails with [`io::ErrorKind::AlreadyExists`] if `path` already exists,
+    /// so a restart can never erase the log it should replay. Continue an
+    /// existing log with [`open_append`](Self::open_append), or delete the
+    /// file deliberately before calling `create`.
     pub fn create<P: AsRef<Path>>(path: P, capacity_records: usize) -> io::Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .open(path)?;
         let mut writer = Self::map(file, WAL_HEADER_SIZE, capacity_records)?;
         writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header());
@@ -451,7 +455,11 @@ mod tests {
 
     impl TempPath {
         fn new(name: &str) -> Self {
-            Self(std::env::temp_dir().join(format!("wal_{name}_{}.bin", std::process::id())))
+            let path = std::env::temp_dir().join(format!("wal_{name}_{}.bin", std::process::id()));
+            // A file left behind by an aborted earlier run would make
+            // `WalWriter::create` fail, so start from a clean slate.
+            let _ = std::fs::remove_file(&path);
+            Self(path)
         }
     }
 
@@ -480,6 +488,24 @@ mod tests {
 
     fn file_len(path: &TempPath) -> usize {
         std::fs::metadata(&path.0).unwrap().len() as usize
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn create_refuses_to_overwrite_an_existing_log() {
+        let path = TempPath::new("no_overwrite");
+        let original = image(&[sample(0).encode()]);
+        std::fs::write(&path.0, &original).unwrap();
+
+        let err = WalWriter::create(&path.0, 4)
+            .err()
+            .expect("create must not open an existing file");
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read(&path.0).unwrap(),
+            original,
+            "log was modified"
+        );
     }
 
     #[test]
