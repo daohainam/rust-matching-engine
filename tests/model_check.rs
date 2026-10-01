@@ -238,6 +238,13 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         match events.as_slice() {
             [Event::OrderRejected { .. }] => coverage.input_rejections += 1,
             [Event::OrderAccepted { .. }, .., Event::OrderRejected { .. }] => {
+                // Chapter 6.4: a remainder can only be rejected if the order
+                // did not trade, because every trade frees or empties room.
+                assert!(
+                    !events.iter().any(|e| matches!(e, Event::Trade { .. })),
+                    "{}: an order traded and then had its remainder rejected",
+                    context()
+                );
                 coverage.rest_rejections += 1
             }
             _ => {}

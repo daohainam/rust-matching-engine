@@ -273,9 +273,12 @@ Two things can prevent an order from resting, and both produce `OrderRejected`
 >   and its `total_qty` cannot overflow.
 >
 > So the reachable rejection sequence is just `[OrderAccepted, OrderRejected]`.
-> (Checked with 1.5 million random calls on tiny arenas: about 494,000 calls traded,
-> about 919,000 ended in a capacity rejection, and none did both.) If you change the
-> engine so both can happen, consumers must treat the trades as real.
+> The differential test in `tests/model_check.rs` checks this on every one of its
+> 160,000 random calls, many of them on a 64-order arena that is full most of the
+> time: a call that ends in `OrderRejected` after `OrderAccepted` must contain no
+> `Trade`. Run it with `cargo test --test model_check`. If you change the engine so
+> both can happen, that assertion fails, and consumers must then treat the trades
+> as real.
 
 ## 6.5 A complete trace
 
