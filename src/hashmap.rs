@@ -52,6 +52,9 @@ impl FlatHashMap {
     /// allocation happens once; map operations never resize or allocate.
     /// The hash seed is random, drawn from the standard library's
     /// [`RandomState`].
+    ///
+    /// # Panics
+    /// Panics if the slot count overflows `usize`.
     pub fn with_capacity(capacity_hint: usize) -> Self {
         Self::with_capacity_and_seed(capacity_hint, RandomState::new().hash_one(0u64))
     }
@@ -59,8 +62,17 @@ impl FlatHashMap {
     /// Like [`with_capacity`](Self::with_capacity), but with an explicit hash
     /// seed for reproducible layouts. A seed an adversary can guess gives up
     /// the protection against deliberately colliding keys.
+    ///
+    /// # Panics
+    /// Panics if the slot count overflows `usize`.
     pub fn with_capacity_and_seed(capacity_hint: usize, seed: u64) -> Self {
-        let capacity = (capacity_hint.max(16) * 2).next_power_of_two();
+        // Checked arithmetic: in release builds a plain `* 2` would wrap to
+        // a tiny table instead of failing.
+        let capacity = capacity_hint
+            .max(16)
+            .checked_mul(2)
+            .and_then(usize::checked_next_power_of_two)
+            .expect("hash map capacity overflows usize");
         let slots = vec![
             Slot {
                 key: EMPTY,
@@ -292,6 +304,12 @@ mod tests {
         for key in 0..32u64 {
             map.insert(key, 0);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity overflows usize")]
+    fn absurd_capacity_is_rejected_instead_of_wrapping() {
+        let _ = FlatHashMap::with_capacity(usize::MAX);
     }
 
     #[test]
