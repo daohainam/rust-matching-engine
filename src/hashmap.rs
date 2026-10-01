@@ -1,5 +1,6 @@
 //! A fixed-capacity, open-addressing flat hash map used to resolve
-//! `OrderId -> OrderIndex` without any heap allocation on the hot path.
+//! an order ID (`u64`) to its arena slot index (`u32`) without any heap
+//! allocation on the hot path.
 //!
 //! Capacity is always a power of two so that the modulo operation used to
 //! compute the initial probe slot can be replaced with a cheap bitwise AND.
@@ -30,7 +31,8 @@ struct Slot {
 }
 
 /// Fixed-capacity open-addressing hash map from `u64` order ID to `u32`
-/// order index. All storage is pre-allocated in `new()`; the table never
+/// arena slot index. All storage is pre-allocated in
+/// [`with_capacity`](Self::with_capacity); the table never
 /// resizes, so callers must choose a hint large enough for the maximum live
 /// entry count. [`insert`](Self::insert) always keeps at least one slot empty,
 /// which is what lets every probe loop terminate.

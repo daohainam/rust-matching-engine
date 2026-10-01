@@ -7,7 +7,7 @@
 //! - [`bitset`]: hierarchical 2-level bitset price ladder for O(1) best
 //!   bid/ask resolution via hardware bit-scan intrinsics.
 //! - [`hashmap`]: fixed-capacity, randomly seeded open-addressing flat hash
-//!   map for O(1) `OrderId -> OrderIndex` lookups (cancellation).
+//!   map from order ID (`u64`) to arena slot (`u32`), for O(1) cancellation.
 //! - [`engine`]: the single-threaded matching core tying the above
 //!   together (`process_order`, `cancel_order`).
 //! - [`events`]: execution report events, the [`EventSink`] trait the

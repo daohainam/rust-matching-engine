@@ -1,15 +1,19 @@
 //! Pre-allocated order arena with an intrusive doubly-linked FIFO list.
 //!
-//! Orders live in a flat, fixed-size array (`order_pool[MAX_ORDERS]`).
+//! Orders live in one flat array whose size is fixed when the pool is
+//! created ([`OrderPool::new`]).
 //! Free slots are tracked with a dense stack of indices (a "free list").
 //! Each price level's resting orders form an intrusive doubly-linked list
 //! via `next_idx` / `prev_idx` fields stored inline in the order record, so
 //! there is no separate allocation per queue node and no pointer chasing
 //! outside of the arena itself.
 
-/// Sentinel used in place of `Option<u32>` for arena links, avoiding the
-/// extra tag byte / padding that `Option<u32>` would otherwise not need but
-/// keeps the code branch-free and cache-friendly.
+/// Sentinel link value meaning "no order" (the end of a queue).
+///
+/// It is used instead of `Option<u32>`, which would need 8 bytes per link
+/// (4 for the value plus a tag, padded to 4) instead of 4. `u32::MAX` can
+/// never be a real slot index because [`OrderPool::new`] rejects that
+/// capacity.
 pub const NIL: u32 = u32::MAX;
 
 /// The side of the book on which an order rests.
