@@ -123,7 +123,8 @@ was dropped. *Solved in the same commit as exercise 7: `dropped()` and
 
 🟡 **9. IOC orders (immediate-or-cancel).** Add a time-in-force parameter. An IOC
 order matches what it can and never rests. What should the event stream be for
-the unfilled remainder: `OrderCancelled` or `OrderRejected`? Justify your choice.
+the unfilled remainder: `OrderCancelled`, or `OrderRejected` with a new
+`RejectReason`? Justify your choice.
 (Remember the rule from 6.9: the book must be consistent at every `emit`.)
 
 🟡 **10. Market orders.** A buy with `price_tick = 4095` crosses every ask, but its
