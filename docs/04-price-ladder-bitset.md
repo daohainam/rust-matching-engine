@@ -1,5 +1,8 @@
 # 4. The Price Ladder: A Two-Level Bitset
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Source: [`src/bitset.rs`](../src/bitset.rs)
 
 This module answers one question, over and over, in O(1):

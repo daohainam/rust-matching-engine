@@ -1,5 +1,8 @@
 # 5. The Flat Hash Map: `OrderId → Arena Slot`
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Source: [`src/hashmap.rs`](../src/hashmap.rs)
 
 ## 5.1 Why do we need it?

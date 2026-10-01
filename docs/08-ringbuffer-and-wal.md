@@ -1,5 +1,8 @@
 # 8. Around the Engine: Ring Buffer and Write-Ahead Log
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Sources: [`src/ringbuffer.rs`](../src/ringbuffer.rs), [`src/wal.rs`](../src/wal.rs)
 
 The `Engine` is deliberately just a data structure. A real system needs two more

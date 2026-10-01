@@ -1,5 +1,8 @@
 # 6. The Matching Algorithm
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Source: [`src/engine.rs`](../src/engine.rs)
 
 This is the chapter where everything comes together. Read chapters 1 to 5 first

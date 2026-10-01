@@ -1,5 +1,8 @@
 # 7. Events: How the Engine Reports What Happened
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Source: [`src/events.rs`](../src/events.rs)
 
 The engine does not print anything, does not write to a socket, and does not

@@ -1,5 +1,8 @@
 # 9. Testing and Performance
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Sources: the unit tests inside each `src/*.rs`, the integration tests in
 [`tests/`](../tests), the doctests, [`benches/matching_engine_bench.rs`](../benches/matching_engine_bench.rs)
 and [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)

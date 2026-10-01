@@ -1,5 +1,8 @@
 # 2. Architecture Overview
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 This chapter is the map. It explains the design goals, how the modules fit
 together, what lives in memory, and why each data structure was chosen. The
 later chapters zoom into each piece.

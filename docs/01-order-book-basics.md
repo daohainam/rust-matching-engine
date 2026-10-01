@@ -1,5 +1,8 @@
 # 1. Order Book Basics
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 > **Who this is for:** anyone who has never looked inside an exchange. No finance
 > background is assumed. If you already know what a "limit order book" is, skim
 > the worked example at the end and jump to [chapter 2](02-architecture.md).
@@ -275,6 +278,10 @@ Events are how the engine talks to the outside world; see
 | Price-time priority | Better price first, then earlier arrival                             |
 | Arena           | A big pre-allocated array that objects live in (chapter 3)               |
 | Hot path        | The code that runs for every order; the part that must be fastest        |
+
+This table covers the trading words used in this chapter. The full
+[glossary](glossary.md) also explains every data-structure, Rust, concurrency
+and storage term the later chapters use.
 
 ## 1.12 Try it yourself
 

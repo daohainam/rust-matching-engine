@@ -1,5 +1,8 @@
 # 10. Known Limitations, Sharp Edges and Exercises
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 This is a teaching project, and it is more useful to learn from its rough edges
 than to pretend it has none. Everything below was found by reading the code and
 (where noted) confirmed by running it.

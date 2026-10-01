@@ -1,5 +1,8 @@
 # 3. The Order Pool: Arena, Free List and FIFO Queues
 
+> **New word?** Every technical term in these chapters is explained in the
+> [glossary](glossary.md).
+
 Source: [`src/pool.rs`](../src/pool.rs)
 
 This module answers two questions:
