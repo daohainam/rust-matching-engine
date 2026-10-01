@@ -10,7 +10,7 @@ later chapters zoom into each piece.
 |----------------------|-------------------------------------------------------------------------------|-----------------------------------------------------------------------|
 | **Low latency**      | Do as little work as possible for each order.                                 | O(1) operations, flat arrays, few branches.                           |
 | **Predictable latency** | The *slowest* orders (the tail) should be nearly as fast as the average.   | No heap allocation, no locks, no resizing, no I/O inside the engine.  |
-| **Determinism**      | The same input sequence always produces the same book and the same events.    | Single thread, no clocks, no randomness, fixed hash function.         |
+| **Determinism**      | The same input sequence always produces the same book and the same events.    | Single thread, no clocks. The id hash map's random seed only decides *where* entries live, never a result (chapter 5). |
 | **Cache friendliness** | Keep hot data close together so the CPU cache works for us.                 | Arena array, `u32` indices instead of 64-bit pointers, small structs. |
 | **Readable**         | This is a teaching project.                                                   | Few modules, each with one job and its own tests.                     |
 
@@ -50,16 +50,16 @@ flowchart LR
 | `pool`       | [`src/pool.rs`](../src/pool.rs)           | Stores orders in a fixed array and links them into per-price FIFO queues. | [3](03-order-pool.md) |
 | `bitset`     | [`src/bitset.rs`](../src/bitset.rs)       | Finds the best bid / best ask in O(1). | [4](04-price-ladder-bitset.md) |
 | `hashmap`    | [`src/hashmap.rs`](../src/hashmap.rs)     | Maps `order_id` to the order's arena slot, for cancellation. | [5](05-hash-map.md) |
-| `events`     | [`src/events.rs`](../src/events.rs)       | The `Event` enum and a fixed-size `EventBatch` container. | [7](07-events.md) |
-| `ringbuffer` | [`src/ringbuffer.rs`](../src/ringbuffer.rs) | Lock-free queue to feed the engine from another thread. | [8](08-ringbuffer-and-wal.md) |
+| `events`     | [`src/events.rs`](../src/events.rs)       | The `Event` enum, the `EventSink` trait the engine reports through, and a bounded `EventBatch` sink. | [7](07-events.md) |
+| `ringbuffer` | [`src/ringbuffer.rs`](../src/ringbuffer.rs) | Lock-free queue, split into `Producer` and `Consumer` handles, to feed the engine from another thread. | [8](08-ringbuffer-and-wal.md) |
 | `wal`        | [`src/wal.rs`](../src/wal.rs)             | Append-only binary log of requests, for replay and recovery. | [8](08-ringbuffer-and-wal.md) |
 
 Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`,
 but **not** on `ringbuffer` or `wal`. Those two are independent building blocks
 that *you* wire around the engine (chapter 8 shows how).
 
-The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the four names most
-users need: `Engine`, `Event`, `EventBatch` and `Side`.
+The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the five names most
+users need: `Engine`, `Event`, `EventSink`, `EventBatch` and `Side`.
 
 ## 2.3 The `Engine` struct, field by field
 
@@ -138,44 +138,46 @@ sequenceDiagram
     participant L as opposite levels + bitset
     participant P as pool (arena)
 
-    C->>E: process_order(id, side, tick, qty)
+    C->>E: process_order(id, side, tick, qty, sink)
     E->>E: validate qty, tick range, reserved id
     E->>M: already have this id?
     M-->>E: no
-    E-->>C: (events) OrderAccepted
+    E-->>C: sink: OrderAccepted
     loop while qty remains and best opposite price is marketable
         E->>L: best opposite tick (bit-scan)
         L-->>E: tick
         E->>P: read head maker of that level's queue
-        E-->>C: (events) Trade
+        E-->>C: sink: Trade
         alt maker fully filled
             E->>L: unlink maker from its queue
             E->>P: free maker slot
             E->>M: remove maker id
-            E-->>C: (events) OrderFilled for the maker
+            opt level is now empty
+                E->>L: clear that tick's bitset bit
+            end
+            E-->>C: sink: OrderFilled for the maker
         else maker partly filled
             E->>L: reduce maker qty and level total
-            E-->>C: (events) OrderPartiallyFilled for the maker
-        end
-        opt level is now empty
-            E->>L: clear that tick's bitset bit
+            E-->>C: sink: OrderPartiallyFilled for the maker
         end
     end
-    E-->>C: (events) taker OrderFilled, or OrderPartiallyFilled if it traded but has quantity left
+    E-->>C: sink: taker OrderFilled, or OrderPartiallyFilled if it traded but has quantity left
     opt quantity left over
         E->>P: allocate slot for the remainder
         E->>M: insert id -> slot
         E->>L: push to own level queue, set own bitset bit
     end
     Note over E,C: If no slot is free (or the level total would overflow), OrderRejected is emitted instead
-    E-->>C: EventBatch returned by value
 ```
 
 (The diagram is simplified: the exact order and all failure branches are in
 [chapter 6](06-matching-algorithm.md).)
 
-The events are not sent anywhere while the engine runs. They are collected in a
-fixed-size buffer and **returned** to the caller (chapter 7).
+The engine does not decide where events go. It hands each one, at the moment it
+happens, to the **sink** the caller passed in: a `Vec<Event>`, a closure, or a
+bounded `EventBatch` (chapter 7). Notice that a drained price is cleared from the
+bitset *before* the maker's fill is reported: the engine only calls the sink when
+every structure agrees, so the caller never observes a half-updated book.
 
 Cancelling is a much shorter trip:
 
@@ -186,16 +188,16 @@ sequenceDiagram
     participant M as id_map
     participant P as pool (arena)
     participant L as own side levels + bitset
-    C->>E: cancel_order(id)
+    C->>E: cancel_order(id, sink)
     E->>M: remove(id)
-    M-->>E: arena slot (or not found)
+    M-->>E: arena slot (or not found: return false)
     E->>P: read order (side, tick)
     E->>L: unlink from the level queue
     opt queue became empty
         E->>L: clear bit for that tick
     end
     E->>P: free slot
-    E-->>C: (true, [OrderCancelled])
+    E-->>C: sink: OrderCancelled, then return true
 ```
 
 ## 2.5 Why these data structures?
@@ -208,15 +210,17 @@ replaced.
 | Keep prices sorted / find the best price | `BTreeMap<Price, Level>` | O(log n), pointer-chasing across nodes, allocates on insert | **Two-level bitset**: 2 bit-scans, O(1), 520 bytes |
 | Find the queue for a price | `HashMap<Price, Level>` | hashing cost, allocation, resizing | **Array indexed by tick**: `levels[tick]` |
 | FIFO queue of orders at a price | `VecDeque<Order>` or `LinkedList<Order>` | `VecDeque` removal from the middle is O(n); `LinkedList` allocates a node per order | **Intrusive doubly-linked list** in the arena: O(1) everything |
-| Find an order by id | `HashMap<u64, _>` (SipHash) | allocates, may resize, hash designed to resist attackers (slower) | **Flat open-addressing table** with a fast integer hash |
+| Find an order by id | `HashMap<u64, _>` (SipHash) | allocates, may resize, slower hash | **Flat open-addressing table** with a fast integer hash, plus a random seed against crafted ids |
 | Store the orders | `Box<Order>` per order | one `malloc` per order, orders scattered in memory | **Arena** (one big array), `u32` indices |
-| Report what happened | `Vec<Event>` | allocates on every call | **Fixed-size array on the stack** |
+| Report what happened | return a `Vec<Event>` | allocates on every call | **Stream each event into a caller-supplied `EventSink`**: the caller chooses the storage |
 
 The trade-off for all this speed is **fixed limits** decided up front:
 
 - at most `order_capacity` resting orders (you choose it in `Engine::new`),
-- exactly 4096 price ticks (a compile-time constant),
-- at most 64 events reported per call.
+- exactly 4096 price ticks (a compile-time constant).
+
+There is no limit on events: one call can report thousands of fills, and the
+sink decides whether to keep, forward or merely count them.
 
 ## 2.6 Memory footprint
 
@@ -228,11 +232,11 @@ Everything is allocated in `Engine::new(order_capacity)`. For capacity `N`:
 | Free-slot stack | `N × 4 B` | 40,000 B |
 | Hash table | `next_pow2(2 × max(N,16)) × 16 B` | 32,768 × 16 = 524,288 B |
 | Price levels (bid + ask) | `2 × 4096 × 24 B` | 196,608 B |
-| `Engine` struct itself | holds the two bitsets (`2 × 520 B`) plus the pointers and counters | 1,152 B |
-| **Total** | | **1,242,048 B ≈ 1.24 MB** |
+| `Engine` struct itself | holds the two bitsets (`2 × 520 B`) plus the pointers, counters and hash seed | 1,160 B |
+| **Total** | | **1,242,056 B ≈ 1.24 MB** |
 
-(Sizes of `Order` = 48 B, `PriceLevel` = 24 B and the 16 B hash slot were
-measured with `size_of`.)
+(Sizes of `Order` = 48 B, `PriceLevel` = 24 B, the 16 B hash slot and
+`Engine` = 1,160 B were measured with `size_of`.)
 
 That is small enough to live comfortably in a modern CPU's L2/L3 cache, which is
 part of why the design is fast.
@@ -248,9 +252,10 @@ part of why the design is fast.
 ```
 
 The mutating methods (`process_order` and `cancel_order`) take `&mut self`, so
-Rust itself guarantees that only one
-caller touches the book at a time. There are **no locks anywhere** in the
-engine. This follows the *single-writer principle* popularised by the LMAX
+Rust itself guarantees that only one caller touches the book at a time. There
+are **no locks anywhere** in the engine. The ring buffer applies the same idea
+to the queue: it hands out exactly one `Producer` and one `Consumer`, so "one
+writer, one reader" is enforced by the type system too (chapter 8). This follows the *single-writer principle* popularised by the LMAX
 Disruptor: instead of many threads fighting over shared data, funnel all
 requests through a queue into one thread that owns the data.
 
@@ -272,12 +277,14 @@ These things *do* allocate, and that is fine because they are not on the hot pat
 |---|---|
 | `Engine::new` | builds all the arrays (this is the whole point: do it once) |
 | `Engine::depth_snapshot` | returns a `Vec` (for inspection / reporting) |
-| `WalWriter::create`, `wal::read_all` | file and `Vec` setup |
-| `SpscRingBuffer::new` | builds the slot array |
+| `WalWriter::create`, `WalWriter::open_append`, `wal::read_all` | file and `Vec` setup |
+| `ringbuffer::spsc_channel` | builds the slot array |
 
 > [!TIP]
-> "Zero allocation" is not the same as "zero work". For example, every call
-> returns an `EventBatch` (about 2 KiB) by value. That costs no `malloc`, but it
-> is still memory traffic. Chapter 7 discusses this trade-off.
+> "Zero allocation" is a property of the **engine**, not of every sink. A
+> `Vec<Event>` sink allocates when it grows (reuse one and it stops growing after
+> warm-up), a closure can do anything, and an `EventBatch` never allocates. The
+> zero-allocation test drives the engine through an `EventBatch` and a counting
+> closure, so it measures the engine alone (chapter 9).
 
 **Next:** [3. The order pool](03-order-pool.md)
