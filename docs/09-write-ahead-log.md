@@ -535,6 +535,17 @@ What it demonstrates:
   ends in exactly the same state. That is what makes the WAL useful for recovery,
   testing, and audits.
 
+What it deliberately leaves out:
+
+- **It never calls `flush()`** while running; only `finalize` at the end syncs
+  the file. So its log survives a crash of the *process* (the operating system
+  still holds the written pages and saves them later), but not a power loss or an
+  operating-system crash, which can lose everything since the last sync. A real
+  service decides when to call `flush`, for example before confirming a request
+  to the client (9.6).
+- **It never actually crashes**, so the replay reads a cleanly finalized log.
+  The exercise in 9.8 makes it crash on purpose.
+
 ## 9.8 Try it yourself
 
 Run the WAL tests, the replay test, and the complete program from 9.7:
