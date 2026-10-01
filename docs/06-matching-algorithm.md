@@ -11,9 +11,10 @@ shown where the other mirrors it); the behaviour is identical to the source.
 
 ```rust
 let mut engine = Engine::new(order_capacity);          // allocate everything, once
+let mut events = Vec::new();                            // any EventSink (chapter 7)
 
-let events = engine.process_order(id, side, tick, qty); // submit a limit order
-let (found, events) = engine.cancel_order(id);          // cancel a resting order
+engine.process_order(id, side, tick, qty, &mut events); // submit a limit order
+let found = engine.cancel_order(id, &mut events);       // cancel a resting order: bool
 
 engine.best_bid();                 // Option<u32>
 engine.best_ask();                 // Option<u32>
@@ -22,10 +23,15 @@ engine.depth_snapshot(side, n);    // Vec<(tick, qty)>  best n levels, best firs
 engine.live_order_count();         // usize number of resting orders
 ```
 
+Both mutating methods take the sink as `sink: &mut S` with
+`S: EventSink + ?Sized`. Being generic, they are compiled separately for each sink
+type, so `emit` is inlined into the matching loop; `?Sized` also allows a
+`&mut dyn EventSink` when you prefer one compiled copy.
+
 | Method | Mutates? | Allocates? | Cost |
 |---|---|---|---|
 | `new(capacity)` | builds | **yes**, once | O(capacity) |
-| `process_order` | yes | no | expected O(1 + number of fills) |
+| `process_order` | yes | no (a `Vec` sink may, when it grows) | expected O(1 + number of fills) |
 | `cancel_order` | yes | no | O(1) expected |
 | `best_bid` / `best_ask` | no | no | O(1), two bit-scans |
 | `depth_at` | no | no | O(1) |
@@ -36,7 +42,7 @@ engine.live_order_count();         // usize number of resting orders
 
 ```mermaid
 flowchart TD
-    A(["process_order(id, side, tick, qty)"]) --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live?"}
+    A(["process_order(id, side, tick, qty, sink)"]) --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live?"}
     B -- yes --> R(["emit OrderRejected<br/>return immediately"])
     B -- no --> C["emit OrderAccepted"]
     C --> D["remaining = qty<br/>match_incoming against the opposite side"]
@@ -52,7 +58,7 @@ flowchart TD
     L --> M{"push_back succeeded?<br/>(no quantity overflow)"}
     M -- no --> N["undo: id_map.remove, free slot<br/>emit OrderRejected"]
     M -- yes --> O["set own bitset bit"]
-    K --> P(["sequence += 1<br/>return events"])
+    K --> P(["sequence += 1<br/>return"])
     N --> P
     O --> P
 ```
@@ -72,10 +78,10 @@ if qty == 0
     || (price_tick as usize) >= MAX_TICKS
     || self.id_map.get(order_id).is_some()
 {
-    events.push(Event::OrderRejected { order_id });
-    return events;
+    sink.emit(Event::OrderRejected { order_id });
+    return;
 }
-events.push(Event::OrderAccepted { order_id });
+sink.emit(Event::OrderAccepted { order_id });
 ```
 
 | Check | Why |
@@ -94,10 +100,10 @@ before it.
 match side {
     Side::Buy  => Self::match_incoming(&mut self.pool, &mut self.ask_levels,
                       &mut self.ask_bitset, &mut self.id_map, order_id, price_tick,
-                      &mut remaining, &mut events, Crossing::TakerBuy),
+                      &mut remaining, sink, Crossing::TakerBuy),
     Side::Sell => Self::match_incoming(&mut self.pool, &mut self.bid_levels,
                       &mut self.bid_bitset, &mut self.id_map, order_id, price_tick,
-                      &mut remaining, &mut events, Crossing::TakerSell),
+                      &mut remaining, sink, Crossing::TakerSell),
 }
 ```
 
@@ -124,14 +130,13 @@ flowchart TD
     D -- yes --> E["maker = head of levels[tick]<br/>(oldest order at that price)"]
     E --> F["trade_qty = min(remaining, maker.qty)<br/>emit Trade<br/>remaining -= trade_qty"]
     F --> G{"trade_qty == maker.qty?"}
-    G -- yes --> H["unlink maker, free its slot,<br/>id_map.remove(maker)<br/>emit OrderFilled(maker)"]
+    G -- yes --> H["unlink maker, free its slot,<br/>id_map.remove(maker)<br/>if the level is now empty: bitset.clear(tick)<br/>emit OrderFilled(maker)"]
     G -- no --> I["maker.qty -= trade_qty, level.total -= trade_qty<br/>emit OrderPartiallyFilled(maker)"]
     H --> J{"remaining > 0 and<br/>level still has orders?"}
     I --> J
     J -- yes --> E
-    J -- no --> K{"level empty?"}
-    K -- yes --> L["bitset.clear(tick)"]
-    L --> A
+    J -- no --> K{"level empty?<br/>(its bit is already clear)"}
+    K -- yes --> A
     K -- no --> Z
 ```
 
@@ -168,18 +173,21 @@ let maker_qty       = pool.get(maker_idx).remaining_qty;
 let maker_order_id  = pool.get(maker_idx).order_id;
 let trade_qty       = (*remaining).min(maker_qty);     // the smaller of the two
 
-events.push(Event::Trade { maker_order_id, taker_order_id,
-                           price_tick: tick as u32, qty: trade_qty });
+sink.emit(Event::Trade { maker_order_id, taker_order_id,
+                         price_tick: tick as u32, qty: trade_qty });
 *remaining -= trade_qty;
 
 if trade_qty == maker_qty {
     level.remove(pool, maker_idx);          // maker fully consumed
     pool.free(maker_idx);
     id_map.remove(maker_order_id);
-    events.push(Event::OrderFilled { order_id: maker_order_id });
+    if level.is_empty() {
+        bitset.clear(tick);                 // price gone: update the index first...
+    }
+    sink.emit(Event::OrderFilled { order_id: maker_order_id }); // ...then report
 } else {
     level.reduce_qty(pool, maker_idx, trade_qty);   // maker keeps its place
-    events.push(Event::OrderPartiallyFilled {
+    sink.emit(Event::OrderPartiallyFilled {
         order_id: maker_order_id,
         remaining_qty: maker_qty - trade_qty,
     });
@@ -200,16 +208,26 @@ is how price improvement (chapter 1) falls out for free.
 ### After the inner loop
 
 ```rust
-if levels[tick].is_empty() {
-    bitset.clear(tick);     // level drained: remove it from the index, then loop for the next
-} else {
+if !levels[tick].is_empty() {
     break;                  // the taker ran out first: nothing more can trade
 }
+// The level drained; its bit was cleared with its last maker. Loop for the next price.
 ```
 
-If the level was drained, control returns to the outer loop, which asks the bitset
-for the *next* best price. If the level still has orders, the taker must have been
-exhausted, so we stop.
+If the level still has orders, the taker must have been exhausted, so we stop. If
+the level was drained, control returns to the outer loop, which asks the bitset
+for the *next* best price.
+
+> [!NOTE]
+> **Why clear the bit inside the inner loop, before reporting the fill?** Clearing
+> it after the loop would be just as correct for matching. But the engine hands
+> the maker's `OrderFilled` to the caller's sink, which is code the engine does not
+> control. The rule is: **only call out to the sink when every structure
+> agrees** (invariant 6 in 6.9). With the bit still set, `best_ask()` would report
+> a price with nothing left at it. That only becomes visible if a sink panics and
+> the panic is caught, but rules like this are what keep "only visible if..."
+> bugs out of a codebase. The unit test `panicking_sink_leaves_the_book_consistent`
+> pins it down.
 
 ## 6.4 Phase 4: resting the remainder
 
@@ -227,10 +245,10 @@ match self.pool.allocate(order_id, side, price_tick, remaining, self.sequence) {
         if !rested {
             self.id_map.remove(order_id);   // roll back
             self.pool.free(idx);
-            events.push(Event::OrderRejected { order_id });
+            sink.emit(Event::OrderRejected { order_id });
         }
     }
-    None => events.push(Event::OrderRejected { order_id }),   // arena full
+    None => sink.emit(Event::OrderRejected { order_id }),   // arena full
 }
 ```
 
@@ -283,11 +301,11 @@ picture):
 | 2 | Head of `ask[101]` is slot 1 (`#2`, qty 3). `trade_qty = min(14,3) = 3`. | | `Trade{maker 2, taker 6, 101, 3}` | 11 |
 | 3 | 3 == 3, so `#2` is fully filled. | `ask[101]`: head → slot 2, count 1, total 4. `free(slot 1)`. `id_map.remove(2)`. | `OrderFilled{2}` | 11 |
 | 4 | Level 101 not empty. Head is slot 2 (`#3`, qty 4). `trade_qty = min(11,4) = 4`. | | `Trade{maker 3, taker 6, 101, 4}` | 7 |
-| 5 | 4 == 4, so `#3` is fully filled. | `ask[101]` empty (head = tail = NIL, count 0, total 0). `free(slot 2)`. `id_map.remove(3)`. | `OrderFilled{3}` | 7 |
-| 6 | Inner loop ends (level empty). | `ask_bitset.clear(101)`, now `{102}` | | 7 |
+| 5 | 4 == 4, so `#3` is fully filled. The level is now empty, so its bit is cleared before the event is emitted. | `ask[101]` empty (head = tail = NIL, count 0, total 0). `free(slot 2)`. `id_map.remove(3)`. `ask_bitset.clear(101)`, now `{102}`. | `OrderFilled{3}` | 7 |
+| 6 | Inner loop ends (level empty, bit already clear). | | | 7 |
 | 7 | Outer loop: `lowest()` = **102**. `102 <= 102` ✓. Head of `ask[102]` is slot 0 (`#1`, qty 5). `trade_qty = min(7,5) = 5`. | | `Trade{maker 1, taker 6, 102, 5}` | 2 |
-| 8 | 5 == 5, so `#1` is fully filled. | `ask[102]` empty. `free(slot 0)`. `id_map.remove(1)`. | `OrderFilled{1}` | 2 |
-| 9 | Level empty. | `ask_bitset.clear(102)`, now empty | | 2 |
+| 8 | 5 == 5, so `#1` is fully filled; its level empties too. | `ask[102]` empty. `free(slot 0)`. `id_map.remove(1)`. `ask_bitset.clear(102)`, now empty. | `OrderFilled{1}` | 2 |
+| 9 | Inner loop ends (level empty, bit already clear). | | | 2 |
 | 10 | Outer loop: `lowest()` = `None` → stop. | | | 2 |
 | 11 | `filled = 14 − 2 = 12 > 0`, `remaining = 2 ≠ 0`. | | `OrderPartiallyFilled{6, remaining 2}` | 2 |
 | 12 | Rest the remainder: `allocate` pops the most recently freed slot, **slot 0**. | `id_map.insert(6, 0)`. `bid[102]`: head = tail = slot 0, count 1, total 2. `bid_bitset.set(102)`. `sequence = 6`. | | 2 |
@@ -323,9 +341,8 @@ two asks of 5 at tick 100 (`#1` then `#2`) and a buy of 6. `#1` trades first
 ## 6.6 `cancel_order`
 
 ```rust
-pub fn cancel_order(&mut self, order_id: u64) -> (bool, EventBatch) {
-    let mut events = EventBatch::new();
-    let Some(idx) = self.id_map.remove(order_id) else { return (false, events); };
+pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
+    let Some(idx) = self.id_map.remove(order_id) else { return false; };
     let order = *self.pool.get(idx);                     // copy it out (Order is Copy)
     match order.side {
         Side::Buy => {
@@ -336,8 +353,8 @@ pub fn cancel_order(&mut self, order_id: u64) -> (bool, EventBatch) {
         Side::Sell => { /* same on the ask side */ }
     }
     self.pool.free(idx);
-    events.push(Event::OrderCancelled { order_id });
-    (true, events)
+    sink.emit(Event::OrderCancelled { order_id });       // every structure agrees by now
+    true
 }
 ```
 
@@ -349,13 +366,13 @@ pub fn cancel_order(&mut self, order_id: u64) -> (bool, EventBatch) {
 | Drop the price from the index if now empty | `bitset.clear` | O(1) |
 | Recycle the slot | `pool.free` | O(1) |
 
-Cancelling an **unknown** or **already filled** id returns `(false, <empty batch>)`.
-It is not an error. (Try cancelling order 4 twice in the worked example: `true`,
-then `false` with no events.)
+Cancelling an **unknown** or **already filled** id returns `false` and emits
+nothing. It is not an error. (Try cancelling order 4 twice in the worked example:
+`true` with `OrderCancelled`, then `false` with no events.)
 
 ## 6.7 Edge cases, verified
 
-| Input | Events returned | Book effect |
+| Input | Events emitted | Book effect |
 |---|---|---|
 | `qty = 0` | `[OrderRejected]` | none |
 | `price_tick = 4096` (out of range) | `[OrderRejected]` | none |
@@ -366,7 +383,7 @@ then `false` with no events.)
 | Order would rest but arena is full | `[OrderAccepted, OrderRejected]` (never preceded by trades, see 6.4) | nothing rests |
 | Order would rest but level quantity would overflow `u64` | `[OrderAccepted, OrderRejected]` | nothing rests; state unchanged |
 | Order fully matches while arena is full | normal fills | needs no slot, so it succeeds |
-| `cancel_order` of unknown id | `(false, [])` | none |
+| `cancel_order` of unknown id | none (returns `false`) | none |
 
 ## 6.8 Complexity
 
@@ -384,7 +401,9 @@ no-match order, regardless of how many orders are in the book.
 
 ## 6.9 Invariants after every call
 
-These always hold between calls (the unit tests check many of them indirectly):
+These always hold between calls, and the last one even during a call. The
+differential test in chapter 9 (`tests/model_check.rs`) checks the observable ones
+(best prices, depths, live count, exact events) after every request:
 
 1. **The book is never crossed:** `best_bid < best_ask` whenever both exist.
    *Why:* an incoming buy at `p` consumes every ask `≤ p` before resting, so any
@@ -395,6 +414,12 @@ These always hold between calls (the unit tests check many of them indirectly):
 4. **`level.total_qty` equals the sum of `remaining_qty` of the orders in it.**
 5. **Within a queue, arrival order is preserved:** new orders join at the tail, and
    a partially filled maker keeps the head.
+6. **The book is consistent whenever the sink runs**, not just between calls.
+   Every `emit` happens between complete state changes, which is why a drained
+   price leaves the bitset before the last maker's fill is reported (6.3). A sink
+   therefore never observes a half-updated book. If a sink panics and the panic is
+   caught, the book is still consistent, but that request was only partly applied
+   (chapter 7 explains what to do then).
 
 ## 6.10 Design notes worth noticing
 
