@@ -168,8 +168,8 @@ trả về ô `0`, lần kế tiếp trả về ô `1`, và cứ thế. (Thuần
 thích trong mã nguồn đã nói.)
 
 Vì đây là một *ngăn xếp* (vào sau, ra trước, LIFO), ô được giải phóng gần nhất sẽ
-được dùng lại đầu tiên. Vùng nhớ của ô đó vừa mới được đụng tới, nên nhiều khả
-năng nó vẫn còn trong cache: một lợi thế nhỏ ta có được.
+được dùng lại đầu tiên. Vùng nhớ ở ô đó vừa được truy cập, nên nhiều khả năng
+nó vẫn còn trong cache: một lợi thế nhỏ mà không tốn thêm gì.
 
 `live_count()` đơn giản là `capacity - free_top`.
 

@@ -19,7 +19,7 @@ Nếu process bị crash, sổ lệnh nằm trong bộ nhớ sẽ mất sạch. 
 Có một mẹo hay: engine là **tất định** (deterministic). Nó không có đồng hồ,
 nguồn ngẫu nhiên duy nhất của nó (seed của hàm băm, chương 5) không bao giờ ảnh
 hưởng tới kết quả, và trạng thái của nó là một hàm thuần túy của các yêu cầu
-(request) nó đã nhận **và của capacity (sức chứa) lúc nó được tạo ra**. Vì vậy
+(request) đã nhận và sức chứa (capacity) của engine lúc được tạo. Vì vậy
 **cùng một chuỗi yêu cầu, nạp vào một engine cùng capacity, luôn cho ra đúng cùng
 một sổ lệnh**. Do đó ta không cần lưu sổ lệnh; chỉ cần lưu các **yêu cầu**, theo
 đúng thứ tự, rồi phát lại (replay) chúng vào một engine mới. Cách này gọi là
@@ -114,9 +114,8 @@ pub fn encode(&self) -> [u8; WAL_RECORD_SIZE] {
 }
 ```
 
-Vì sao phải viết từng byte một thay vì chép nguyên vùng nhớ của struct? Phiên bản
-đầu tiên đã chép thẳng struct `#[repr(C)]` thô, và cái giá phải trả đáng để ta
-biết:
+Tại sao phải viết từng byte thay vì chép nguyên struct từ bộ nhớ? Phiên bản đầu
+tiên chép thẳng struct `#[repr(C)]`; cách làm đó có những nhược điểm đáng lưu ý:
 
 - **Không mang sang máy khác được.** Các byte phụ thuộc thứ tự byte
   (endianness) và quy tắc căn lề (alignment) của máy, nên một log ghi trên kiến
@@ -235,8 +234,8 @@ flowchart TD
 - **Mở rộng** là nhân đôi tệp rồi ánh xạ lại. Đây là đường chậm, tốn rất nhiều
   syscall, và gây ra một đợt tăng độ trễ (latency spike), nên hãy chọn
   `capacity_records` đủ lớn cho lượng yêu cầu của bạn.
-- **`flush()` là một rào chắn độ bền vững (durability) có tính blocking**, không
-  phải một lời gợi ý. `memmap2` gọi `msync(MS_SYNC)` trên Unix, và
+- **`flush()` là thao tác đồng bộ hóa có tính chặn (blocking) để bảo đảm độ bền
+  vững (durability)**, không phải một lời gợi ý. `memmap2` gọi `msync(MS_SYNC)` trên Unix, và
   `FlushViewOfFile` rồi `FlushFileBuffers` trên Windows, và chỉ trả về khi hệ
   điều hành báo dữ liệu đã được ghi. Gọi nó sau mỗi bản ghi thì chậm quá mức;
   gọi bao lâu một lần (mỗi batch, mỗi giây...) chính là chính sách độ bền vững

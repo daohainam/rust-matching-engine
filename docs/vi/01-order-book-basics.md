@@ -50,7 +50,7 @@ Giá là một **giới hạn**, nghĩa là:
 để giao dịch. Sổ có hai phía:
 
 - **Bid**: các lệnh mua đang chờ. Bid tốt nhất (*best bid*) là bid **cao nhất**:
-  đó là mức giá có lợi nhất mà người bán có thể giao dịch ở thời điểm hiện tại.
+  đó là mức giá cao nhất mà người bán có thể giao dịch ngay.
 - **Ask** (còn gọi là offer): các lệnh bán đang chờ. Ask tốt nhất (*best ask*) là
   ask **thấp nhất**: đó là mức giá rẻ nhất mà một người mua có thể mua được.
 

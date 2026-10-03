@@ -65,7 +65,7 @@ Hãy nhìn các mũi tên: engine phụ thuộc vào `pool`, `bitset`, `hashmap`
 những khối xây dựng độc lập, do *bạn* nối quanh engine (chương 8 và 9 chỉ cách
 làm).
 
-Crate tái xuất năm tên cần thiết cho hầu hết trường hợp sử dụng qua
+Crate tái xuất năm tên mà hầu hết trường hợp sử dụng cần đến trong
 [`src/lib.rs`](../../src/lib.rs): `Engine`, `Event`, `EventSink`, `EventBatch` và
 `Side`.
 
@@ -279,8 +279,8 @@ tranh nhau dữ liệu dùng chung, ta dồn mọi yêu cầu qua một hàng đ
 duy nhất sở hữu dữ liệu.
 
 Lưu ý rằng trong luồng xử lý này, việc ghi thêm vào WAL cũng chạy trên luồng
-khớp lệnh. Thông thường, thao tác này chỉ ghi vào bộ nhớ, nhưng thỉnh thoảng WAL phải nới
-rộng và ánh xạ lại (re-map) tệp, làm độ trễ tăng vọt (chương 9).
+khớp lệnh. Thông thường, thao tác này chỉ ghi vào bộ nhớ, nhưng thỉnh thoảng WAL
+phải nới rộng và ánh xạ lại (re-map) tệp, làm độ trễ tăng vọt (chương 9).
 
 Để mở rộng vượt quá một luồng, hãy chạy **mỗi mã giao dịch (instrument) một
 engine** (hoặc mỗi nhóm mã một engine), mỗi engine trên một lõi riêng.

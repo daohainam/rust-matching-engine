@@ -47,9 +47,9 @@ tắt là SPSC), theo phong cách của LMAX Disruptor.
 - **Một producer**: đúng một thread gọi `push`.
 - **Một consumer**: đúng một thread gọi `pop`.
 
-Việc tự giới hạn ở đúng một producer và một consumer là điều cho phép thiết kế đơn
-giản đến vậy, không có vòng lặp compare-and-swap, cũng không có sự cạnh tranh giữa
-các thread (contention). Như mục 8.5 sẽ cho thấy, API được thiết kế để bạn không
+Thiết kế đơn giản như vậy là nhờ chỉ có một producer và một consumer: không cần
+vòng lặp compare-and-swap hay xử lý tranh chấp giữa các thread (contention). Như
+mục 8.5 sẽ cho thấy, API được thiết kế để bạn không
 thể vô tình phá vỡ giới hạn đó.
 
 ## 8.2 Cấu trúc dữ liệu
@@ -92,7 +92,7 @@ pub struct Producer<T> { shared: Arc<Shared<T>>, tail: usize, cached_head: usize
 pub struct Consumer<T> { shared: Arc<Shared<T>>, head: usize, cached_tail: usize }
 ```
 
-Trong đoạn code này có hai thứ nhỏ sẽ được giải thích kỹ ở phần sau.
+Trong đoạn code này có hai chi tiết nhỏ sẽ được giải thích kỹ ở phần sau.
 `CachePadded<T>` là một wrapper cho giá trị bên trong một cache line riêng cho
 chính nó (mục 8.4 giải thích vì sao điều đó quan trọng), và `.0` là cách bạn lấy
 giá trị nằm trong nó, như trong `self.shared.head.0`. Một **cache line** là khối
@@ -183,7 +183,7 @@ bên kia nghĩa là chạm vào một cache line mà nhân CPU kia liên tục g
 đó rất đắt. Một producer có `cached_head` vẫn cho thấy còn chỗ trống thì không cần
 nhìn vào `head` chút nào; nó chỉ đọc lại `head` khi vòng *trông có vẻ* đầy. Tương
 tự, consumer chỉ đọc lại `tail` khi vòng trông có vẻ rỗng. Trong trường hợp thường
-gặp, mỗi bên chỉ chạm vào cache line của riêng mình.
+gặp, mỗi bên chỉ truy cập vào cache line của chính mình.
 
 ### Tại sao lại dùng những thứ tự bộ nhớ (memory ordering) này? (bản giải thích dễ hiểu)
 
