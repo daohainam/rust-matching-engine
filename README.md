@@ -1,5 +1,7 @@
 # rust-matching-engine
 
+> *Tiếng Việt: [README.vi.md](README.vi.md)*
+
 An ultra-low-latency, zero-allocation **Central Limit Order Book (CLOB) matching
 engine** written in Rust, built as a **teaching project**: small enough to read in
 an afternoon, and documented in enough depth that you can see *why* every data
@@ -175,6 +177,7 @@ examples/
 benches/
   matching_engine_bench.rs   criterion micro-benchmarks
 docs/            the chapters listed above, plus glossary.md
+docs/vi/         the same chapters in Vietnamese (README.vi.md is the Vietnamese README)
 .github/workflows/ci.yml     CI: Linux (x64 and arm64), Windows, Miri, MSRV
 ```
 
