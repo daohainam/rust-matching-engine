@@ -11,10 +11,10 @@ chọn. Các chương sau sẽ phóng to vào từng phần.
 
 ## 2.1 Mục tiêu thiết kế
 
-| Mục tiêu             | Ý nghĩa                                                                       | Code đạt được bằng cách nào                                           |
+| Mục tiêu             | Ý nghĩa                                                                       | Cách thực hiện trong code                                             |
 |----------------------|-------------------------------------------------------------------------------|-----------------------------------------------------------------------|
-| **Độ trễ thấp** (low latency) | Mỗi lệnh chỉ làm càng ít việc càng tốt.                              | Thao tác O(1), mảng phẳng, ít nhánh rẽ.                               |
-| **Độ trễ ổn định** (predictable latency) | Những lệnh *chậm nhất* (phần "đuôi") phải nhanh gần bằng mức trung bình. | Không cấp phát trên heap, không khóa, không đổi kích thước, không I/O bên trong engine. |
+| **Độ trễ thấp** (low latency) | Mỗi lệnh chỉ cần thực hiện ít thao tác nhất có thể.                   | Thao tác O(1), mảng phẳng, ít nhánh rẽ.                               |
+| **Độ trễ ổn định** (predictable latency) | Các lệnh *chậm nhất* (phần "đuôi" của phân phối) phải có độ trễ gần mức trung bình. | Không cấp phát trên heap, không khóa, không đổi kích thước, không I/O bên trong engine. |
 | **Tính tất định** (determinism) | Cùng một chuỗi đầu vào thì luôn ra cùng một sổ lệnh và cùng các sự kiện. | Chạy một luồng, không đọc đồng hồ. Seed ngẫu nhiên của bảng băm id chỉ quyết định các mục nằm *ở đâu*, không bao giờ ảnh hưởng đến kết quả (chương 5). |
 | **Thân thiện với cache** | Giữ dữ liệu hay dùng nằm sát nhau để cache của CPU phát huy tác dụng. | Mảng arena, chỉ số `u32` thay cho con trỏ 64 bit, struct nhỏ.          |
 | **Dễ đọc**           | Đây là một dự án để học.                                                      | Ít module, mỗi module một việc và có test riêng.                      |
@@ -65,8 +65,8 @@ Hãy nhìn các mũi tên: engine phụ thuộc vào `pool`, `bitset`, `hashmap`
 những khối xây dựng độc lập, do *bạn* nối quanh engine (chương 8 và 9 chỉ cách
 làm).
 
-Gốc của crate ([`src/lib.rs`](../../src/lib.rs)) re-export năm cái tên mà phần
-lớn trường hợp sử dụng đều cần: `Engine`, `Event`, `EventSink`, `EventBatch` và
+Crate tái xuất năm tên mà hầu hết trường hợp sử dụng cần đến trong
+[`src/lib.rs`](../../src/lib.rs): `Engine`, `Event`, `EventSink`, `EventBatch` và
 `Side`.
 
 ## 2.3 Struct `Engine`, từng trường một
@@ -218,7 +218,7 @@ sequenceDiagram
 
 ## 2.5 Vì sao chọn những cấu trúc dữ liệu này?
 
-Với mỗi bài toán con đều có một lời giải "trong sách giáo khoa". Đây là lý do
+Mỗi bài toán con đều có một lời giải "trong sách giáo khoa". Đây là lý do
 từng lời giải đó bị thay thế.
 
 | Bài toán con | Lời giải trong sách giáo khoa | Vì sao chưa lý tưởng ở đây | Engine này làm gì |
@@ -279,9 +279,8 @@ tranh nhau dữ liệu dùng chung, ta dồn mọi yêu cầu qua một hàng đ
 duy nhất sở hữu dữ liệu.
 
 Lưu ý rằng trong luồng xử lý này, việc ghi thêm vào WAL cũng chạy trên luồng
-khớp lệnh. Hầu như lần nào nó cũng chỉ là một phép sao chép bộ nhớ thông
-thường, nhưng thỉnh thoảng nó phải nới rộng và ánh xạ lại (re-map) tệp, và đó là
-một cú vọt độ trễ (chương 9).
+khớp lệnh. Thông thường, thao tác này chỉ ghi vào bộ nhớ, nhưng thỉnh thoảng WAL
+phải nới rộng và ánh xạ lại (re-map) tệp, làm độ trễ tăng vọt (chương 9).
 
 Để mở rộng vượt quá một luồng, hãy chạy **mỗi mã giao dịch (instrument) một
 engine** (hoặc mỗi nhóm mã một engine), mỗi engine trên một lõi riêng.

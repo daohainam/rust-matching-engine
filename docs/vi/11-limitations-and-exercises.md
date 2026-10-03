@@ -5,9 +5,9 @@
 > **Gặp từ lạ?** Mọi thuật ngữ trong các chương đều được giải thích trong
 > [bảng thuật ngữ](glossary.md).
 
-Đây là một dự án để học, và học từ những chỗ còn thô ráp của nó có ích hơn nhiều
-so với việc giả vờ rằng nó không có chỗ nào như vậy. Mọi điều dưới đây đều được
-tìm ra bằng cách đọc code và (ở chỗ có ghi chú) được xác nhận bằng cách chạy nó.
+Đây là dự án học tập; nhìn thẳng vào những điểm còn hạn chế sẽ hữu ích hơn việc
+giả vờ rằng mọi thứ đều hoàn hảo. Các điểm dưới đây được xác định qua việc đọc
+code; những điểm có ghi chú đã được kiểm chứng bằng cách chạy chương trình.
 
 Chương này có ba phần. **11.1** liệt kê những gì còn thô ráp. **11.2** là một bộ
 bài tập xếp theo độ khó để bạn tự thử sức. **11.3** lần lại những lỗi mà các phiên

@@ -7,7 +7,7 @@
 
 Nguồn: [`src/bitset.rs`](../../src/bitset.rs)
 
-Module này trả lời đi trả lời lại một câu hỏi, và lần nào cũng chỉ mất O(1):
+Module này liên tục trả lời một câu hỏi, và mỗi lần đều chỉ tốn O(1):
 
 > **"Hiện giờ, mức giá tốt nhất có ít nhất một lệnh là mức nào?"**
 
@@ -218,7 +218,7 @@ const _: () = assert!(
 ```
 
 `const _` được tính ngay lúc biên dịch, nên một giá trị `TICKS` không hợp lệ sẽ
-không bao giờ tạo ra được chương trình. Bạn thử xem: đặt `TICKS` thành 4160 thì
+không bao giờ tạo được chương trình. Bạn thử xem: đặt `TICKS` thành 4160 thì
 `cargo build` dừng lại với
 `error[E0080]: evaluation panicked: TICKS must be a multiple of 64 and at most 4096`.
 Biến một dòng chú thích thành phép kiểm tra lúc biên dịch gần như không tốn gì,

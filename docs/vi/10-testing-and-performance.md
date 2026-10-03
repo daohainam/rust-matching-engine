@@ -20,8 +20,8 @@ cargo bench                     # criterion micro-benchmarks
 ```
 
 > [!NOTE]
-> Mặc định, `cargo test` dừng ở **binary** test đầu tiên bị lỗi, nên một test
-> của thư viện mà fail sẽ che mất các integration test. Hãy dùng
+> Mặc định, `cargo test` dừng khi **binary kiểm thử** đầu tiên gặp lỗi, nên lỗi
+> ở test thư viện có thể khiến các integration test không được chạy. Hãy dùng
 > `--no-fail-fast`, hoặc chỉ đích danh một binary test như ở trên, khi bạn muốn
 > xem mọi kết quả.
 
@@ -88,7 +88,7 @@ Doctest `compile_fail` là cách để kiểm thử một đảm bảo *ở mứ
 
 Test viết tay chỉ bao phủ những trường hợp mà tác giả nghĩ ra được; bug thì ẩn
 trong các tổ hợp. Vì vậy, test mạnh nhất của repo này so sánh engine với một sổ
-lệnh thứ hai, **cố tình làm cho ngây thơ**, trên những luồng yêu cầu ngẫu nhiên
+lệnh thứ hai, **được cố tình giữ đơn giản**, trên những luồng yêu cầu ngẫu nhiên
 rất dài, và đòi hai bên phải khớp nhau ở mọi thứ quan sát được.
 
 Sổ lệnh tham chiếu được viết sao cho dễ thấy là đúng, chứ không phải cho nhanh:
@@ -195,8 +195,8 @@ Những chi tiết đáng bắt chước khi bạn tự viết test kiểu này:
 - **Chạy qua mọi đường đi** mà bạn muốn chứng minh là không cấp phát: nằm chờ,
   khớp lệnh, hủy lệnh, và một cú quét sâu hơn xa mọi bộ đệm cố định đều chạy
   những đoạn code khác nhau.
-- **Chọn các sink không cấp phát.** Phép đo là về engine, nên bài test dùng lại
-  một `EventBatch` (gọi `clear` trước mỗi lời gọi) và dùng một closure chỉ đếm.
+- **Chọn các sink không cấp phát.** Vì mục tiêu là đo riêng engine, bài test tái
+  sử dụng một `EventBatch` (gọi `clear` trước mỗi lần) cùng một closure chỉ đếm.
 - **`std::hint::black_box`** bọc quanh kết quả để trình tối ưu không xóa mất
   những lời gọi có kết quả không được dùng.
 - **`realloc` cũng được phủ:** `GlobalAlloc::realloc` mặc định gọi `alloc` của
@@ -204,9 +204,10 @@ Những chi tiết đáng bắt chước khi bạn tự viết test kiểu này:
 
 Những gì nó **không** chứng minh:
 
-- Nó đếm số lần cấp phát **trong toàn bộ tiến trình**, từ mọi luồng. Cách này
-  chỉ đúng khi đó là test duy nhất trong binary của nó (tệp có ghi chú điều
-  này), vì test harness chạy các test trên nhiều luồng song song.
+- Bộ đếm ghi nhận mọi lần cấp phát **trong toàn bộ tiến trình**, từ tất cả các
+  luồng. Vì vậy, phép đo chỉ chính xác khi đây là test duy nhất trong binary đó
+  (tệp có ghi chú điều này), vì test harness chạy các test song song trên nhiều
+  luồng.
 - Nó chỉ chạy các đường đi nêu trên, chứ không phải mọi đầu vào có thể (ví dụ
   các đường từ chối lệnh).
 - `depth_snapshot` *có* cấp phát và cố tình bị loại ra.
@@ -234,9 +235,9 @@ opt-level = 3
 lto = true
 ```
 
-- **`panic = "abort"`** thể hiện triết lý của dự án này: một vi phạm bất biến
-  (một `expect` trong `PriceLevel`, các `assert!` trong `FlatHashMap::insert` và
-  `OrderPool::free`) nên giết tiến trình ngay lập tức thay vì unwind (tháo ngăn
+- **`panic = "abort"`** thể hiện triết lý của dự án này: khi một bất biến bị vi
+  phạm (một `expect` trong `PriceLevel`, các `assert!` trong `FlatHashMap::insert`
+  và `OrderPool::free`), tiến trình nên dừng ngay thay vì unwind (tháo ngăn
   xếp), đúng với nguyên tắc "thà dừng lại và báo lỗi rõ ràng còn hơn chạy tiếp
   với một sổ lệnh đã hỏng". Khi đó, việc khôi phục là phát lại WAL (chương 9).
 

@@ -39,7 +39,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | Matching engine (engine khớp lệnh) | Thành phần ghép lệnh mua với lệnh bán và quyết định giá giao dịch. Chính là toàn bộ repo này. | [1](01-order-book-basics.md) |
 | Price level (mức giá) | Tất cả các lệnh đang chờ ở một mức giá trên một phía của sổ, được giữ thành một hàng đợi FIFO. | [1](01-order-book-basics.md) |
 | Price-time priority (ưu tiên giá-thời gian) | Quy tắc khớp lệnh: giá tốt hơn được khớp trước; cùng giá thì lệnh đến sớm hơn được khớp trước. | [1](01-order-book-basics.md) |
-| Resting order (lệnh đang chờ) | Lệnh đang nằm chờ trong sổ vì lúc đến nó không thể giao dịch (hết). | [1](01-order-book-basics.md) |
+| Resting order (lệnh đang chờ) | Lệnh nằm trong sổ vì khi đến, nó không thể giao dịch ngay. | [1](01-order-book-basics.md) |
 | Self-trade prevention (chống tự giao dịch) | Quy tắc ngăn lệnh mua của một nhà giao dịch khớp với chính lệnh bán của họ. Chưa được cài đặt ở đây. | [1](01-order-book-basics.md) |
 | Spread | Ask tốt nhất trừ bid tốt nhất. | [1](01-order-book-basics.md) |
 | Sweep (quét qua nhiều mức giá) | Một taker giao dịch xuyên qua nhiều mức giá liên tiếp. | [6](06-matching-algorithm.md) |
@@ -94,7 +94,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | Associated function (hàm liên kết) | Hàm nằm trong khối `impl` nhưng không nhận `self`, được gọi dưới dạng `Type::function(...)`. | [6](06-matching-algorithm.md) |
 | Borrow checker | Phần của trình biên dịch thực thi quy tắc của Rust: tại một thời điểm, một giá trị chỉ có thể có hoặc một tham chiếu `&mut`, hoặc một số bất kỳ tham chiếu `&`. | [3](03-order-pool.md) |
 | `dyn Trait` | Một giá trị được dùng thông qua một trait ngay lúc chạy, khi trình biên dịch không biết kiểu cụ thể của nó. Mỗi lời gọi đi qua một bảng nhỏ chứa các con trỏ hàm. | [6](06-matching-algorithm.md) |
-| Generics / monomorphisation (kiểu tổng quát / đơn hình hóa) | `fn f<S: EventSink>(...)` dùng được cho mọi `S`. Trình biên dịch *đơn hình hóa* (monomorphize) nó: tạo ra một bản sao của `f` cho mỗi kiểu cụ thể, nên các lời gọi là gọi trực tiếp và có thể được inline. | [6](06-matching-algorithm.md) |
+| Generics / monomorphisation (kiểu tổng quát / đơn hình hóa) | `fn f<S: EventSink>(...)` dùng được cho mọi `S`. Trình biên dịch *đơn hình hóa* nó (monomorphize), tức tạo ra một bản sao của `f` cho từng kiểu cụ thể, nên các lời gọi là gọi trực tiếp và có thể được inline. | [6](06-matching-algorithm.md) |
 | `#[inline]` | Gợi ý để chép thân của hàm vào các nơi gọi nó, bỏ đi chi phí của lời gọi hàm. | [6](06-matching-algorithm.md) |
 | `MaybeUninit<T>` | Vùng nhớ có thể chưa chứa một `T` hợp lệ. Đọc nó như một `T` trước khi ghi là hành vi không xác định. | [8](08-ring-buffer.md) |
 | Panic / `panic = "abort"` | Một panic dừng luồng hiện tại vì có bug (ví dụ một `assert!` thất bại). Với `panic = "abort"` trong profile của binary cuối cùng, nó kết thúc cả tiến trình. | [3](03-order-pool.md), [10](10-testing-and-performance.md) |
@@ -149,7 +149,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | CI | *Continuous integration* (tích hợp liên tục): một máy chủ tự động build và kiểm thử mọi thay đổi. Ở đây: GitHub Actions, xem `.github/workflows/ci.yml`. | [10](10-testing-and-performance.md) |
 | Counting allocator (bộ cấp phát có đếm) | Một global allocator đếm mọi lần cấp phát, dùng trong một test để chứng minh hot path không cấp phát gì. | [10](10-testing-and-performance.md) |
 | Criterion | Thư viện benchmark của Rust mà `cargo bench` dùng. | [10](10-testing-and-performance.md) |
-| Differential testing (kiểm thử đối chiếu) | Chạy cùng các đầu vào ngẫu nhiên qua code thật và qua một *bản cài đặt tham chiếu* đơn giản, rồi yêu cầu hai bên cho kết quả giống hệt nhau. | [10](10-testing-and-performance.md) |
+| Differential testing (kiểm thử đối chiếu) | Chạy cùng các đầu vào ngẫu nhiên trên code thật và trên một *bản cài đặt tham chiếu* đơn giản, rồi yêu cầu kết quả của hai bên phải giống hệt nhau. | [10](10-testing-and-performance.md) |
 | Doctest | Ví dụ code nằm trong tài liệu mà `cargo test` biên dịch và chạy, nên nó không thể lỗi thời. | [10](10-testing-and-performance.md) |
 | Global allocator | Bộ cấp phát bộ nhớ mà chương trình Rust dùng cho mọi bộ nhớ heap. Chương trình có thể thay nó bằng `#[global_allocator]`. | [10](10-testing-and-performance.md) |
 | Integration test | Test nằm trong `tests/`, chỉ dùng crate qua API công khai của nó, giống một người dùng thật. | [10](10-testing-and-performance.md) |
