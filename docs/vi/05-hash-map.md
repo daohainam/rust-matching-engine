@@ -34,7 +34,7 @@ engine hỏi `id_map.get(order_id).is_some()` và từ chối id đã được d
 - Ta biết trước số phần tử tối đa (sức chứa của pool), nên có thể định cỡ bảng
   **một lần** và không bao giờ phải đổi kích thước.
 
-Vì vậy module này tự cài đặt một bảng nhỏ gọn nhất có thể, vừa đủ cho nhu cầu
+Vì vậy module này triển khai một bảng băm gọn nhất có thể, vừa đủ đáp ứng nhu cầu
 của ta.
 
 ## 5.3 Địa chỉ mở với dò tuyến tính
@@ -280,7 +280,7 @@ let displaced = if probe >= hole {
 };
 ```
 
-(Biến này tên là `displaced`, nhưng hãy đọc nó là **"có thể được chuyển lùi vào
+(Biến có tên `displaced`; hãy hiểu nó là **"có thể được chuyển lùi vào
 lỗ trống"**.)
 
 **Ví dụ quấn vòng** (8 ô): `P` (ô lý tưởng 6) ở ô 6, `Q` (ô lý tưởng 7) ở ô 7,

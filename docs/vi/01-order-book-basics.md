@@ -30,7 +30,7 @@ lệnh: **lệnh giới hạn** (limit order). Một lệnh giới hạn gồm b
 |------------|----------------------------------------------------------------|-----------------------------|
 | `side`     | Nhà giao dịch muốn **mua** hay **bán**?                        | `Side::Buy` / `Side::Sell`  |
 | `price`    | Mức giá *tệ nhất* mà nhà giao dịch chấp nhận.                  | `price_tick: u32`           |
-| `qty`      | Số lượng bao nhiêu đơn vị (cổ phiếu, lô, hợp đồng...).         | `qty: u64`                  |
+| `qty`      | Số lượng đơn vị (cổ phiếu, lô, hợp đồng...).                   | `qty: u64`                  |
 | `order_id` | Một nhãn duy nhất để gọi tên lệnh (ví dụ khi cần hủy).         | `order_id: u64`             |
 
 "Duy nhất" ở đây nghĩa là *duy nhất trong số các lệnh còn nằm trong sổ*. Engine
@@ -50,7 +50,7 @@ Giá là một **giới hạn**, nghĩa là:
 để giao dịch. Sổ có hai phía:
 
 - **Bid**: các lệnh mua đang chờ. Bid tốt nhất (*best bid*) là bid **cao nhất**:
-  đó là mức giá hào phóng nhất mà một người bán có thể giao dịch cùng.
+  đó là mức giá có lợi nhất mà người bán có thể giao dịch ở thời điểm hiện tại.
 - **Ask** (còn gọi là offer): các lệnh bán đang chờ. Ask tốt nhất (*best ask*) là
   ask **thấp nhất**: đó là mức giá rẻ nhất mà một người mua có thể mua được.
 
@@ -68,7 +68,7 @@ Giá là một **giới hạn**, nghĩa là:
 ```
 
 Khoảng cách giữa bid tốt nhất và ask tốt nhất gọi là **spread**. Trong một sổ lệnh
-bình thường, bid tốt nhất luôn **thấp hơn hẳn** ask tốt nhất. Nếu hai giá này mà
+bình thường, bid tốt nhất luôn **thấp hơn** ask tốt nhất. Nếu hai giá này mà
 chạm nhau thì một giao dịch xảy ra ngay lập tức. Đó chính là việc của engine khớp
 lệnh.
 
@@ -153,7 +153,7 @@ việc này trong O(1) là một trong những thách thức thiết kế chính
 
 ## 1.8 Tick: giá là những số nguyên nhỏ
 
-Giá thật trông như `101.25`. Số thực dấu phẩy động không biểu diễn chính xác được
+Giá thật trông như `101.25`. Số dấu phẩy động không biểu diễn chính xác được
 hầu hết các phân số thập phân và cho kết quả đáng ngạc nhiên (`0.1 + 0.2 != 0.3`),
 điều không thể chấp nhận khi có tiền đổi chủ. Vì vậy các sàn dùng **tick là số
 nguyên**. Một *tick* là bước giá nhỏ nhất được phép.
@@ -199,10 +199,10 @@ Một số lệnh bị từ chối trước khi chạm được vào sổ. Engin
 | cùng id với một lệnh vẫn đang chờ                                                 | `DuplicateOrderId`   |
 
 Một lệnh cũng có thể được chấp nhận và giao dịch bình thường, nhưng rồi **không
-còn chỗ** để cho phần dư nằm chờ vì sổ đã đầy. Lúc đó nó bị từ chối với lý do
+còn chỗ trong sổ** để phần dư nằm chờ. Lúc đó nó bị từ chối với lý do
 `BookFull` (chương 6 giải thích khi nào điều này xảy ra).
 
-Giữ bộ tính năng nhỏ là có chủ ý: nhờ vậy code đủ ngắn để đọc trong một lần ngồi.
+Giới hạn phạm vi tính năng là có chủ ý: nhờ vậy code đủ ngắn để đọc trong một lần ngồi.
 [Chương 11](11-limitations-and-exercises.md) liệt kê các ý tưởng mở rộng.
 
 ## 1.10 Một ví dụ hoàn chỉnh

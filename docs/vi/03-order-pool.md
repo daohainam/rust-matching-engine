@@ -169,7 +169,7 @@ thích trong mã nguồn đã nói.)
 
 Vì đây là một *ngăn xếp* (vào sau, ra trước, LIFO), ô được giải phóng gần nhất sẽ
 được dùng lại đầu tiên. Vùng nhớ của ô đó vừa mới được đụng tới, nên nhiều khả
-năng nó vẫn còn trong cache: một cái lợi nhỏ có được miễn phí.
+năng nó vẫn còn trong cache: một lợi thế nhỏ ta có được.
 
 `live_count()` đơn giản là `capacity - free_top`.
 
@@ -295,7 +295,7 @@ vỡ, sổ lệnh đã bị hỏng.
 | # | Bất biến | Được duy trì bởi |
 |---|---|---|
 | 1 | `level.head == NIL` ⇔ `level.tail == NIL` ⇔ `level.count == 0` ⇔ `level.total_qty == 0` | `push_back`, `remove` |
-| 2 | `level.total_qty` = tổng `remaining_qty` của mọi lệnh trong hàng đợi. (Vế "`total_qty == 0` ⇔ rỗng" của bất biến 1 còn dựa vào việc engine không bao giờ cho một lệnh có số lượng bằng 0 nằm chờ trong sổ: `process_order` từ chối `qty == 0`; bản thân `PriceLevel` không kiểm tra.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
+| 2 | `level.total_qty` = tổng `remaining_qty` của mọi lệnh trong hàng đợi. (Vế "`total_qty == 0` ⇔ rỗng" của bất biến 1 còn dựa vào việc engine không bao giờ để lệnh có số lượng bằng 0 nằm chờ trong sổ: `process_order` từ chối `qty == 0`; bản thân `PriceLevel` không kiểm tra.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
 | 3 | Đi theo `head -> next_idx -> ...` sẽ thăm đúng `count` lệnh và kết thúc ở `tail` | `push_back`, `remove` |
 | 4 | `a.next_idx == b` ⇔ `b.prev_idx == a` | `push_back`, `remove` |
 | 5 | Một ô nằm trong free stack ⇔ `in_use == false` | `allocate`, `free` |
