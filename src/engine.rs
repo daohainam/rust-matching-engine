@@ -967,7 +967,8 @@ impl Engine {
     ///
     /// The engine keeps no list of orders per account, so this walks the
     /// whole book: O(ticks between the best and worst price + resting
-    /// orders), at most 4096 ticks. It does not allocate.
+    /// orders), at most [`tick_count`](Self::tick_count) ticks. It does not
+    /// allocate.
     pub fn cancel_account<S: EventSink + ?Sized>(&mut self, account: u32, sink: &mut S) -> u64 {
         self.mass_cancel(Some(account), sink)
     }
