@@ -134,6 +134,7 @@ impl OpGenerator {
         }
         let order_type = match self.rng.below(100) {
             0..=9 => OrderType::ImmediateOrCancel,
+            10..=12 => OrderType::Market,
             _ => OrderType::Limit,
         };
         Op::Place {

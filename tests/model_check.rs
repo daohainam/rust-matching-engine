@@ -42,6 +42,11 @@ impl ReferenceBook {
         price_tick: u32,
         qty: u64,
     ) -> Vec<Event> {
+        let price_tick = match (order_type, side) {
+            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
+            (OrderType::Market, Side::Sell) => 0,
+            _ => price_tick,
+        };
         let invalid = if qty == 0 {
             Some(RejectReason::ZeroQuantity)
         } else if order_id == u64::MAX {
@@ -126,7 +131,7 @@ impl ReferenceBook {
                 remaining_qty: remaining,
             });
         }
-        if order_type == OrderType::ImmediateOrCancel {
+        if matches!(order_type, OrderType::ImmediateOrCancel | OrderType::Market) {
             events.push(Event::OrderExpired {
                 order_id,
                 expired_qty: remaining,

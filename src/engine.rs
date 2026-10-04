@@ -54,6 +54,10 @@ pub enum OrderType {
     /// Immediate-or-cancel: trades at `price_tick` or better; the remainder
     /// expires instead of resting.
     ImmediateOrCancel,
+    /// Trades at any price; the remainder expires. The `price_tick` passed
+    /// in is ignored: a market buy gets the highest tick as its limit and a
+    /// market sell tick 0, and `OrderAccepted` reports that limit.
+    Market,
 }
 
 impl OrderType {
@@ -260,7 +264,8 @@ impl Engine {
     /// The unfilled quantity of a [`Limit`](OrderType::Limit) order is added
     /// to the book if an order slot is available and the price-level
     /// quantity can be represented; that of an
-    /// [`ImmediateOrCancel`](OrderType::ImmediateOrCancel) order expires.
+    /// [`ImmediateOrCancel`](OrderType::ImmediateOrCancel) or
+    /// [`Market`](OrderType::Market) order expires.
     ///
     /// Every event is emitted to `sink` in order: acceptance, then each trade
     /// followed by the maker's fill update, then the taker's final fill or
@@ -283,6 +288,13 @@ impl Engine {
         qty: u64,
         sink: &mut S,
     ) {
+        // A market order may trade at any price: give it the worst limit
+        // its side allows, and every later step treats it as usual.
+        let price_tick = match (order_type, side) {
+            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
+            (OrderType::Market, Side::Sell) => 0,
+            _ => price_tick,
+        };
         // Reject invalid input before emitting acceptance or changing book state.
         if let Err(reason) = self.validate(order_id, price_tick, qty) {
             sink.emit(Event::OrderRejected { order_id, reason });
@@ -704,6 +716,68 @@ mod tests {
         );
         assert_eq!(engine.depth_at(Side::Sell, 100), 4);
         assert_eq!(engine.live_order_count(), 1);
+    }
+
+    #[test]
+    fn market_buy_sweeps_asks_at_every_price_and_never_rests() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 0, 1);
+        place(&mut engine, 2, Side::Sell, 2_000, 2);
+        place(&mut engine, 3, Side::Sell, MAX_TICKS as u32 - 1, 3);
+        // The tick passed in is ignored, even an out-of-range one.
+        let events = submit(&mut engine, 4, Side::Buy, OrderType::Market, u32::MAX, 10);
+        assert_eq!(
+            events.first(),
+            Some(&Event::OrderAccepted {
+                order_id: 4,
+                side: Side::Buy,
+                order_type: OrderType::Market,
+                price_tick: MAX_TICKS as u32 - 1,
+                qty: 10
+            })
+        );
+        let traded: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Trade {
+                    price_tick, qty, ..
+                } => Some((*price_tick, *qty)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(traded, [(0, 1), (2_000, 2), (MAX_TICKS as u32 - 1, 3)]);
+        assert_eq!(
+            events.last(),
+            Some(&Event::OrderExpired {
+                order_id: 4,
+                expired_qty: 4
+            })
+        );
+        assert_eq!(engine.best_ask(), None);
+        assert_eq!(engine.best_bid(), None);
+    }
+
+    #[test]
+    fn market_order_on_an_empty_side_only_expires() {
+        let mut engine = Engine::new(16);
+        let events = submit(&mut engine, 1, Side::Sell, OrderType::Market, 500, 7);
+        assert_eq!(
+            events,
+            vec![
+                Event::OrderAccepted {
+                    order_id: 1,
+                    side: Side::Sell,
+                    order_type: OrderType::Market,
+                    price_tick: 0,
+                    qty: 7
+                },
+                Event::OrderExpired {
+                    order_id: 1,
+                    expired_qty: 7
+                },
+            ]
+        );
+        assert_eq!(engine.live_order_count(), 0);
     }
 
     #[test]
