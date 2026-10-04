@@ -67,10 +67,11 @@ Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`
 engine (chapters 8 and 9 show how); `wal` knows the engine, so it can replay a log
 into one.
 
-The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the fourteen names most
+The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the sixteen names most
 users need: `Engine`, `NewOrder`, `OrderType`, `SelfTradePrevention`,
-`RestingOrder`, `Event`, `EventSink`, `EventBatch`, `RejectReason`,
-`CancelRejectReason`, `Side`, `Snapshot`, `SnapshotError` and `Checkpoint`.
+`RiskLimits`, `RestingOrder`, `Event`, `EventSink`, `EventBatch`, `RejectReason`,
+`CancelRejectReason`, `Side`, `Snapshot`, `SnapshotError`, `Checkpoint`, and the
+constant `DEFAULT_TICKS`.
 
 ## 2.3 The `Engine` struct, field by field
 
@@ -78,12 +79,13 @@ users need: `Engine`, `NewOrder`, `OrderType`, `SelfTradePrevention`,
 pub struct Engine {
     pool: OrderPool,              // every order lives here
     id_map: FlatHashMap,          // order_id -> index into pool
-    bid_bitset: TwoLevelBitset,   // which bid ticks are non-empty
-    ask_bitset: TwoLevelBitset,   // which ask ticks are non-empty
+    bid_bitset: TickBitset,       // which bid ticks are non-empty
+    ask_bitset: TickBitset,       // which ask ticks are non-empty
     bid_levels: Box<[PriceLevel]>,// bid_levels[tick] = FIFO queue of bids at that tick
     ask_levels: Box<[PriceLevel]>,// ask_levels[tick] = FIFO queue of asks at that tick
     sequence: u64,                // arrival counter; metadata only, never read by matching
     trades: u64,                  // trades so far; the last trade's trade_id
+    limits: RiskLimits,           // pre-trade checks every new order must pass
 }
 ```
 
@@ -94,9 +96,13 @@ Each field has exactly one responsibility:
 | `pool`        | "Where is order X stored, and who is next to it in its queue?" | index into an array |
 | `id_map`      | "Which arena slot holds the order with id 12345?"               | expected O(1) hash lookup |
 | `*_levels`    | "What orders are waiting at price tick T?"                      | `levels[T]`: one array read |
-| `*_bitset`    | "What is the best non-empty price?"                             | two bit-scans |
+| `*_bitset`    | "What is the best non-empty price?"                             | one bit-scan per level: two for the default 4096 ticks |
 | `sequence`    | "How many orders has the engine accepted?" (audit metadata; FIFO order comes from the queue links, not from this number, see [6.10](06-matching-algorithm.md#610-design-notes-worth-noticing)) | one add |
 | `trades`      | "How many trades has the engine executed?" It numbers each `Trade` event (`trade_id`), identically on every replay. | one add per trade |
+| `limits`      | "May this order trade at all?" The maximum quantity and the price band (chapter 6). | two comparisons |
+
+The number of price ticks is not a field of its own: it is the length of the
+level arrays, chosen in `Engine::with_ticks` (4096 with `Engine::new`).
 
 ### How the pieces point at each other
 
@@ -246,19 +252,26 @@ sink decides whether to keep, forward or merely count them.
 
 ## 2.6 Memory footprint
 
-Everything is allocated in `Engine::new(order_capacity)`. For capacity `N`:
+Everything is allocated in `Engine::with_ticks(order_capacity, ticks)`
+(`Engine::new` is the same with 4096 ticks). For capacity `N` and the default
+4096 ticks:
 
 | Component | Formula | `N = 10,000` |
 |---|---|---|
 | Order arena | `N × 48 B` | 480,000 B |
 | Free-slot stack | `N × 4 B` | 40,000 B |
 | Hash table | `next_pow2(2 × max(N,16)) × 16 B` | 32,768 × 16 = 524,288 B |
-| Price levels (bid + ask) | `2 × 4096 × 24 B` | 196,608 B |
-| `Engine` struct itself | holds the two bitsets (`2 × 520 B`) plus the pointers, counters and hash seed | 1,168 B |
-| **Total** | | **1,242,064 B ≈ 1.24 MB** |
+| Price levels (bid + ask) | `2 × ticks × 24 B` | 2 × 4096 × 24 = 196,608 B |
+| Bitsets (bid + ask) | `2 × 8 B` per word, all levels (65 words for 4096 ticks) | 2 × 520 = 1,040 B |
+| `Engine` struct itself | pointers, lengths, counters, limits and hash seed | 272 B |
+| **Total** | | **1,242,208 B ≈ 1.24 MB** |
 
 (Sizes of `Order` = 48 B, `PriceLevel` = 24 B, the 16 B hash slot and
-`Engine` = 1,168 B were measured with `size_of`.)
+`Engine` = 272 B were measured with `size_of`.)
+
+The tick count changes one line a lot: with 262,144 ticks the price levels alone
+take 12.6 MB, ten times the rest. That is why the tick count is chosen per
+instrument instead of being one large fixed number.
 
 That is small enough to live comfortably in a modern CPU's L2/L3 cache, which is
 part of why the design is fast.
