@@ -23,7 +23,7 @@ save the book; we only need to save the **requests**, in order, and replay them
 into a fresh engine. This is called *event sourcing* (here, *input* sourcing).
 
 ```text
-   requests:   new(1) new(2) cancel(1) new(3) ...      ---> append to disk, in order
+   requests:   new(1) new(2) cancel(1) reduce(2) ...   ---> append to disk, in order
                                                               |
    crash! book lost                                           v
    restart:    Engine::new(capacity)  <-------  read the log, feed each request back in
@@ -44,7 +44,7 @@ The header identifies the file and its format:
 | Offset | Size | Field |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
-| 8 | 4 | format version (`1`) |
+| 8 | 4 | format version (`2`; version `1` is still read) |
 | 12 | 4 | record size in bytes (`40`) |
 | 16 | 16 | reserved, zero |
 
@@ -52,15 +52,24 @@ Each record describes one request:
 
 | Offset | Size | Field |
 |-------:|-----:|---|
-| 0 | 1 | kind: `1` = new order, `2` = cancel (`0` is never valid) |
-| 1 | 1 | side: `0` = buy, `1` = sell (`0` for cancels) |
-| 2 | 2 | reserved, zero |
-| 4 | 4 | price tick (`0` for cancels) |
+| 0 | 1 | kind: `1` = new order, `2` = cancel, `3` = reduce (`0` is never valid) |
+| 1 | 1 | side: `0` = buy, `1` = sell (`0` for cancels and reduces) |
+| 2 | 1 | order type: `0` = limit, `1` = immediate-or-cancel, `2` = market, `3` = post-only (`0` for cancels and reduces) |
+| 3 | 1 | reserved, zero |
+| 4 | 4 | price tick (`0` for cancels and reduces) |
 | 8 | 8 | order id |
-| 16 | 8 | quantity (`0` for cancels) |
+| 16 | 8 | quantity; for a reduce, how much to remove (`0` for cancels) |
 | 24 | 8 | caller-provided sequence number |
 | 32 | 4 | checksum of bytes `0..32` |
 | 36 | 4 | reserved, zero |
+
+**Two versions.** Version 1 had no order type and no reduce records: byte 2 was
+reserved, and always zero. Zero means "limit", so a version 1 log is also a valid
+version 2 log, and both are read. The reverse is not true: an old reader would
+ignore byte 2 and replay an immediate-or-cancel order as a limit order, leaving
+a different book. That is why the version number exists: `open_append` rewrites
+a version 1 header to version 2 (and flushes it) before it appends anything, and
+an old reader then refuses the file instead of misreading it.
 
 Here are the 40 real bytes that `encode` produces for
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, which is order `#6` from the
@@ -70,8 +79,8 @@ written in hexadecimal:
 ```text
  offset  bytes                     meaning
  ------  ------------------------  ---------------------------------------------
-   0     01 00 00 00 66 00 00 00   kind 1 (new order), side 0 (buy), 2 reserved,
-                                   price tick 0x66 = 102
+   0     01 00 00 00 66 00 00 00   kind 1 (new order), side 0 (buy), type 0 (limit),
+                                   1 reserved, price tick 0x66 = 102
    8     06 00 00 00 00 00 00 00   order id 6
   16     0e 00 00 00 00 00 00 00   quantity 0x0e = 14
   24     05 00 00 00 00 00 00 00   sequence 5
@@ -88,11 +97,12 @@ and `decode` know the byte layout:
 
 ```rust
 pub struct WalRecord {
-    pub kind: WalRecordKind,   // NewOrder or Cancel
-    pub side: Side,            // Buy for cancels
+    pub kind: WalRecordKind,   // NewOrder, Cancel or Reduce
+    pub side: Side,            // Buy for cancels and reduces
+    pub order_type: OrderType, // Limit for cancels and reduces
     pub order_id: u64,
-    pub price_tick: u32,       // 0 for cancels
-    pub qty: u64,              // 0 for cancels
+    pub price_tick: u32,       // 0 for cancels and reduces
+    pub qty: u64,              // the reduction for Reduce; 0 for cancels
     pub sequence: u64,         // caller-supplied
 }
 
@@ -100,6 +110,10 @@ pub fn encode(&self) -> [u8; WAL_RECORD_SIZE] {
     let mut out = [0u8; WAL_RECORD_SIZE];
     out[0] = self.kind as u8;
     out[1] = match self.side { Side::Buy => 0, Side::Sell => 1 };
+    out[2] = match self.order_type {
+        OrderType::Limit => 0, OrderType::ImmediateOrCancel => 1,
+        OrderType::Market => 2, OrderType::PostOnly => 3,
+    };
     out[4..8].copy_from_slice(&self.price_tick.to_le_bytes());
     out[8..16].copy_from_slice(&self.order_id.to_le_bytes());
     out[16..24].copy_from_slice(&self.qty.to_le_bytes());
@@ -124,7 +138,7 @@ cost:
 
 `decode` reverses `encode` and **validates** as it goes, returning a
 `WalDecodeError` for an unknown kind (`0` marks space that was never written), an
-unknown side, or a **checksum mismatch**. The checksum folds the four 8-byte words
+unknown side or order type, or a **checksum mismatch**. The checksum folds the four 8-byte words
 of the record (bytes `0..32`) through the SplitMix64 mixer from chapter 5, then
 squeezes the 64-bit result into 32 bits. Some honest limits:
 
@@ -147,8 +161,10 @@ Fixed-size records give two big wins: **appending needs no serialization buffer*
 (encode 40 bytes and copy them) and **record *i* starts at byte `32 + i × 40`**,
 so you can seek straight to it.
 
-Constructors: `WalRecord::new_order(id, side, tick, qty, sequence)` and
-`WalRecord::cancel(id, sequence)` (the unused fields are zeroed).
+Constructors: `WalRecord::new_order(id, side, tick, qty, sequence)` for a limit
+order, `WalRecord::new_order_with_type(id, side, order_type, tick, qty, sequence)`
+for any type, `WalRecord::cancel(id, sequence)` and
+`WalRecord::reduce(id, reduce_by, sequence)` (the unused fields are zeroed).
 
 **What is `sequence` for?** The engine never looks at it; it is a number *you*
 choose, normally 0, 1, 2, ... in the order requests are logged (the program in 9.7
@@ -252,11 +268,15 @@ replay loop is a plain `match`; there is nothing left to check:
 for record in read_all(&path)? {
     events.clear();
     match record.kind {
-        WalRecordKind::NewOrder => engine.process_order(
-            record.order_id, record.side, record.price_tick, record.qty, &mut events,
+        WalRecordKind::NewOrder => engine.submit_order(
+            record.order_id, record.side, record.order_type, record.price_tick,
+            record.qty, &mut events,
         ),
         WalRecordKind::Cancel => {
             engine.cancel_order(record.order_id, &mut events);
+        }
+        WalRecordKind::Reduce => {
+            engine.reduce_order(record.order_id, record.qty, &mut events);
         }
     }
 }
