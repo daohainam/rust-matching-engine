@@ -13,6 +13,7 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 
 | Term | Meaning | Ch. |
 |---|---|---|
+| Aggressor / aggressor side | The taker of a trade, and its side. A trade is *buyer-initiated* when a buyer crossed the spread. `Trade` reports it as `taker_side`. | [1](01-order-book-basics.md) |
 | Ask / offer | A resting order to **sell**. The best ask is the lowest one. | [1](01-order-book-basics.md) |
 | Bid | A resting order to **buy**. The best bid is the highest one. | [1](01-order-book-basics.md) |
 | Book (order book) | The list of all resting orders, split into bids and asks and sorted by price. | [1](01-order-book-basics.md) |
