@@ -18,8 +18,8 @@ good exercises in their own right.
 
 | Where | Issue | How bad | Chapter |
 |---|---|---|---|
-| `wal.rs` | The durability limits: a failed flush is final, a new file's directory entry is not synced on Unix, a full disk becomes `SIGBUS` on Linux, `create` is not atomic, damage in the middle of a log is treated like a torn tail, and one writer per file is not enforced. | Medium for a real deployment; fine for learning, as long as you know them. | [9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal) |
-| `wal.rs` + `engine.rs` | Replay is deterministic only with the **same `Engine` capacity**, and the log does not record it. | Medium: get it wrong and the replica silently differs. | [9.1](09-write-ahead-log.md#91-why-log-at-all) |
+| `wal.rs` | The durability limits: a failed flush is final, a new file's directory entry is not synced on Unix, a full disk becomes `SIGBUS` on Linux, `create` is not atomic, damage in the middle of a log is treated like a torn tail, and the writer lock stops only other `WalWriter`s, not other programs. | Medium for a real deployment; fine for learning, as long as you know them. | [9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal) |
+| `wal.rs` | A log written before format version 4 does not record its engine capacity until `open_append` continues it; replaying it by hand with the wrong capacity still gives a different book. | Low: `replay` refuses such a log instead of guessing. | [9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal) |
 | `events.rs` | An `EventBatch` keeps only 64 events per call. It counts the rest, so this is no longer silent, but you must check `is_truncated()`. | Low: check it, or use an unbounded sink. | [7.4](07-events.md#74-what-happens-when-there-are-too-many-events) |
 | `engine.rs` | A sink that panics (with the panic caught) leaves a consistent book but a **partly applied** request. | Low: rebuild from the WAL; a binary built with `panic = "abort"` stops instead (your own profile decides, [10.5](10-testing-and-performance.md#105-build-profiles)). | [7.5](07-events.md#75-when-a-sink-panics) |
 | `ringbuffer.rs` | Its memory ordering is checked on ARM hardware and by Miri, but only for the interleavings that happen to occur. | Low | [10.8](10-testing-and-performance.md#108-what-the-tests-do-not-cover) |
@@ -34,8 +34,9 @@ good exercises in their own right.
 | **Four order types** | Limit, immediate-or-cancel, market and post-only. No fill-or-kill, stop, iceberg or day orders. Quantity can be reduced in place, but raising it or changing the price means cancel + new, which loses priority. Market orders have no price protection. |
 | **Accounts are labels** | Every order has an account, used for self-trade prevention and mass cancels. There are no per-account limits (open orders, position, credit), and the engine keeps no list of an account's orders, so `cancel_account` walks the book. |
 | **One instrument per `Engine`** | Run several engines for several symbols. |
-| **Engine is not wired to the WAL or ring buffer** | The caller does it; [`examples/pipeline.rs`](../examples/pipeline.rs) shows how. The WAL's `sequence` is caller-supplied and independent of the engine's own counter. |
-| **WAL format is small** | Version 3 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
+| **Engine is not wired to the WAL or ring buffer** | The caller does it; [`examples/pipeline.rs`](../examples/pipeline.rs) shows how, and `WalRecord::apply_to`, `wal::replay` and `wal::replay_from` do the replaying. The WAL's `sequence` is caller-supplied and independent of the engine's own counter. |
+| **WAL format is small** | Version 4 has a header with the engine capacity, explicit little-endian fields, per-record checksums and a writer lock, but no fsync policy of its own and no log rotation ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
+| **Snapshots pause matching** | `Engine::snapshot` walks the whole book on the matching thread, so a checkpoint delays the requests behind it. Take them between requests, not too often (exercise 17). |
 | **Failing loudly** | `assert!`/`expect` on invariants panic on a bookkeeping bug, in every build profile. With `panic = "abort"` (set in this repo's release profile, and needed in *your* binary's profile because Cargo ignores a dependency's) that aborts the process. Intentional for a financial component. |
 | **`depth_snapshot` is slow-ish** | It allocates a `Vec` and scans ticks linearly (documented in the source). Reporting only. |
 
@@ -225,27 +226,36 @@ failure once one `Acquire` is weakened to `Relaxed`.
 
 ### Making the WAL production-shaped
 
-🟡 **16. Record the capacity.** Replay is only deterministic with the same `Engine`
-capacity (9.1). Store it in the header's reserved bytes (format version 4), and
-make replay refuse a log written for a different capacity. Keep the older versions
-readable. *Hint: 9.2 explains how versions 2 and 3 were added; follow the same
-steps, including the upgrade in `open_append`. An upgraded log does not know its
-capacity: decide what replay should do then.*
+🟡 **16. A new log at each checkpoint.** After a checkpoint, the log's older
+records are dead weight: recovery skips them (9.8). Start a new log file at each
+checkpoint, so old files can be archived or deleted. *Hint: name each log after
+the first sequence number it holds, for example `wal-00000000000000005001.log`;
+when a checkpoint is written with `next_sequence` N, finalize the current log and
+`create` `wal-N`. Recovery reads the newest checkpoint and replays the logs from
+there on with `replay_from`. Delete a log only once downstream has every event it
+produced (9.5).*
 
-**Done when:** replaying a version 4 log into an engine of a different capacity
-returns a clear error, and the version 1 to 3 logs written by the existing tests
-still read correctly.
+**Done when:** a test that writes three checkpoints, crashes (drops everything)
+and recovers reaches the live book while reading only the newest checkpoint and
+the logs after it.
 
-🟡 **17. One writer per file.** Take an exclusive lock with `File::try_lock` in
-`create` and `open_append` (stable since Rust 1.89, so raise `rust-version`), and
-test that a second writer gets a clear error instead of corrupting the log.
+🔴 **17. Checkpoints without pausing matching.** `Engine::snapshot` runs on the
+matching thread and walks the whole book. Take snapshots on another thread
+instead, from a **shadow** engine that receives the same requests (the pipeline
+and replay tests show that such a replica stays identical). *Hint: give the
+matching thread a second ring buffer (chapter 8) to the shadow thread and push
+each logged `WalRecord` into it; the shadow applies them with `apply_to` and, now
+and then, writes a checkpoint with the sequence it has reached.*
 
-**Done when:** a test shows that opening a second writer on a log that is in use
-fails with an error, and that the first writer keeps working.
+**Done when:** a benchmark shows the matching thread's latency unchanged while
+the shadow writes checkpoints, and recovery from the shadow's checkpoint reaches
+the primary's book.
 
 🔴 **18. Atomic `create`.** Write the header to `path.tmp`, sync it, rename it to
 `path`, then sync the parent directory (on Unix). For each step, explain what a
-crash right before it would leave behind, and why the step is needed.
+crash right before it would leave behind, and why the step is needed. *Hint:
+`write_checkpoint` in `src/snapshot.rs` follows exactly these steps for
+checkpoint files.*
 
 **Done when:** you can explain each step's purpose in one sentence, and a test
 shows that a leftover `path.tmp` from an interrupted `create` does not stop the
@@ -291,7 +301,7 @@ git switch main                                      # come back (stash or commi
 ```
 
 `a192ebc` has the **old API**, so the chapters, which describe the current code,
-will not match it exactly; use them for the ideas. R7 to R10 were solved much
+will not match it exactly; use them for the ideas. R7 to R12 were solved much
 later: start those from the commit just before the named one
 (`git switch --detach <hash>~1`).
 
@@ -320,7 +330,7 @@ Exercise 12 is the next step.*
 🔴 **R6. Harden the WAL.** A header with a magic number and version, a checksum
 per record, portable little-endian fields, and an open-for-append constructor.
 *Solved by `fix(wal)!: sound, portable, crash-safe log format`. The remaining
-limits are exercises 16 to 20.*
+limits became R11 and R12 and exercises 18 to 20.*
 
 🟡 **R7. Immediate-or-cancel orders.** An IOC order matches what it can and never
 rests. What should the event stream be for the unfilled remainder:
@@ -348,6 +358,21 @@ inner loop of `match_incoming`, and how the cancelled maker leaves the book by
 exactly the steps of a full fill. Mass cancels, which also needed accounts, came
 next in `feat(engine): cancel every order of an account, or the whole book`;
 exercise 11 makes them faster.*
+
+🟡 **R11. Record the capacity.** Replay is only deterministic with the same
+`Engine` capacity (9.1). Store it in the log header, and make replay refuse a log
+written for a different capacity, while keeping older logs readable. *Solved by
+`feat(wal)!: record the engine capacity in the log (format version 4)`;
+`feat(wal): replay a log into a new engine` then builds the replica from it, so
+recovery can no longer pick the wrong capacity.*
+
+🟡 **R12. One writer per file.** Take an exclusive lock with `File::try_lock`, and
+test that a second writer gets a clear error instead of corrupting the log.
+*Solved by `feat(wal): refuse a second writer with a lock file`. It locks a
+companion file, not the log: its commit message explains what Windows would do
+otherwise. Checkpoints, the other half of the recovery story, came right after,
+in `feat(engine): snapshot and restore the book` and the two commits that follow
+it; exercises 16 and 17 build on them.*
 
 ### Every fix, with its commit
 
