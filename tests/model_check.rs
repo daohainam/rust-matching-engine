@@ -47,7 +47,12 @@ impl ReferenceBook {
         if let Some(reason) = invalid {
             return vec![Event::OrderRejected { order_id, reason }];
         }
-        let mut events = vec![Event::OrderAccepted { order_id }];
+        let mut events = vec![Event::OrderAccepted {
+            order_id,
+            side,
+            price_tick,
+            qty,
+        }];
 
         let mut remaining = qty;
         let opposite = match side {

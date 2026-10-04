@@ -13,7 +13,10 @@
 //! //    allocating once it has grown to fit the largest call.
 //! let mut events = Vec::new();
 //! engine.process_order(1, Side::Sell, 100, 5, &mut events);
-//! assert_eq!(events, [Event::OrderAccepted { order_id: 1 }]);
+//! assert_eq!(
+//!     events,
+//!     [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+//! );
 //!
 //! // 2. A closure sees each event as it happens; this one counts trades.
 //! let mut trades = 0;
@@ -32,6 +35,8 @@
 //! assert_eq!(batch.as_slice().last(), Some(&Event::OrderFilled { order_id: 3 }));
 //! ```
 
+use crate::pool::Side;
+
 /// Capacity of an [`EventBatch`].
 ///
 /// A batch is a bounded convenience sink: events pushed after this limit are
@@ -46,7 +51,14 @@ pub const MAX_EVENTS_PER_CALL: usize = 64;
 pub enum Event {
     /// A new order passed validation and processing began; it may trade
     /// immediately, rest, or later have an un-rested remainder rejected.
-    OrderAccepted { order_id: u64 },
+    /// It repeats the order's terms, so a consumer of the event stream
+    /// alone knows the side, price and size of every order it sees.
+    OrderAccepted {
+        order_id: u64,
+        side: Side,
+        price_tick: u32,
+        qty: u64,
+    },
     /// A trade occurred: `maker_order_id` rests in the book, `taker_order_id`
     /// is the incoming order. `price_tick` / `qty` describe the fill.
     Trade {
@@ -158,7 +170,7 @@ impl EventBatch {
     #[inline(always)]
     pub const fn new() -> Self {
         Self {
-            events: [Event::OrderAccepted { order_id: 0 }; MAX_EVENTS_PER_CALL],
+            events: [Event::OrderFilled { order_id: 0 }; MAX_EVENTS_PER_CALL],
             len: 0,
             dropped: 0,
         }
@@ -233,14 +245,14 @@ mod tests {
     fn full_batch_counts_dropped_events_until_cleared() {
         let mut batch = EventBatch::new();
         for order_id in 0..(MAX_EVENTS_PER_CALL as u64 + 6) {
-            batch.emit(Event::OrderAccepted { order_id });
+            batch.emit(Event::OrderFilled { order_id });
         }
         assert_eq!(batch.len(), MAX_EVENTS_PER_CALL);
         assert_eq!(batch.dropped(), 6);
         assert!(batch.is_truncated());
         assert_eq!(
             batch.as_slice().last(),
-            Some(&Event::OrderAccepted {
+            Some(&Event::OrderFilled {
                 order_id: MAX_EVENTS_PER_CALL as u64 - 1
             })
         );

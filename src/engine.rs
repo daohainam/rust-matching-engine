@@ -211,7 +211,12 @@ impl Engine {
             sink.emit(Event::OrderRejected { order_id, reason });
             return;
         }
-        sink.emit(Event::OrderAccepted { order_id });
+        sink.emit(Event::OrderAccepted {
+            order_id,
+            side,
+            price_tick,
+            qty,
+        });
 
         // Matching spends down the incoming quantity; only the remainder can
         // become a new resting order.
@@ -470,6 +475,16 @@ mod tests {
         events
     }
 
+    /// The acceptance event for an order with these terms.
+    fn accepted(order_id: u64, side: Side, price_tick: u32, qty: u64) -> Event {
+        Event::OrderAccepted {
+            order_id,
+            side,
+            price_tick,
+            qty,
+        }
+    }
+
     /// Cancels an order and returns whether it was found plus its events.
     fn cancel(engine: &mut Engine, order_id: u64) -> (bool, Vec<Event>) {
         let mut events = Vec::new();
@@ -481,10 +496,21 @@ mod tests {
     fn resting_order_with_no_match() {
         let mut engine = Engine::new(16);
         let events = place(&mut engine, 1, Side::Buy, 100, 10);
-        assert_eq!(events, vec![Event::OrderAccepted { order_id: 1 }]);
+        assert_eq!(events, vec![accepted(1, Side::Buy, 100, 10)]);
         assert_eq!(engine.best_bid(), Some(100));
         assert_eq!(engine.best_ask(), None);
         assert_eq!(engine.depth_at(Side::Buy, 100), 10);
+    }
+
+    #[test]
+    fn acceptance_repeats_the_order_terms_even_when_it_fills_at_once() {
+        // The event stream alone must say what was ordered: a consumer that
+        // never sees the request still learns side, limit and size.
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 3);
+        let events = place(&mut engine, 2, Side::Sell, 99, 3);
+        assert_eq!(events.first(), Some(&accepted(2, Side::Sell, 99, 3)));
+        assert_eq!(events.last(), Some(&Event::OrderFilled { order_id: 2 }));
     }
 
     #[test]
@@ -495,7 +521,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 10),
                 Event::Trade {
                     maker_order_id: 1,
                     taker_order_id: 2,
@@ -519,7 +545,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 4),
                 Event::Trade {
                     maker_order_id: 1,
                     taker_order_id: 2,
@@ -545,7 +571,7 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 10),
                 Event::Trade {
                     maker_order_id: 1,
                     taker_order_id: 2,
@@ -734,7 +760,7 @@ mod tests {
         assert_eq!(
             events.as_slice(),
             &[
-                Event::OrderAccepted { order_id: 3 },
+                accepted(3, Side::Buy, 99, 1),
                 Event::OrderRejected {
                     order_id: 3,
                     reason: RejectReason::BookFull
@@ -777,7 +803,7 @@ mod tests {
         // level's bookkeeping.
         let mut engine = Engine::new(16);
         let events = place(&mut engine, 1, Side::Buy, 100, u64::MAX);
-        assert_eq!(events.as_slice(), &[Event::OrderAccepted { order_id: 1 }]);
+        assert_eq!(events.as_slice(), &[accepted(1, Side::Buy, 100, u64::MAX)]);
         assert_eq!(engine.depth_at(Side::Buy, 100), u64::MAX);
         assert_eq!(engine.live_order_count(), 1);
 
@@ -785,7 +811,7 @@ mod tests {
         assert_eq!(
             events.as_slice(),
             &[
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 1),
                 Event::OrderRejected {
                     order_id: 2,
                     reason: RejectReason::LevelQuantityOverflow
@@ -821,10 +847,7 @@ mod tests {
             .count();
         assert_eq!(trades, 40);
         assert_eq!(maker_fills, 40);
-        assert_eq!(
-            events.first(),
-            Some(&Event::OrderAccepted { order_id: 1_000 })
-        );
+        assert_eq!(events.first(), Some(&accepted(1_000, Side::Buy, 100, 40)));
         assert_eq!(events.last(), Some(&Event::OrderFilled { order_id: 1_000 }));
         assert_eq!(engine.live_order_count(), 0);
     }
