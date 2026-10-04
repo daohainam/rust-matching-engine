@@ -20,8 +20,9 @@ exists to answer that question **fast** and **predictably**.
 
 ## 1.2 Orders
 
-An **order** is an instruction from a trader. This engine understands one kind:
-the **limit order**. A limit order has four pieces of information:
+An **order** is an instruction from a trader. The basic kind is the **limit
+order**; the other kinds this engine understands are variations on it (1.9). A
+limit order has four pieces of information:
 
 | Field      | Meaning                                                        | In this code                |
 |------------|----------------------------------------------------------------|-----------------------------|
@@ -147,6 +148,12 @@ middle of its queue, and, if it was the last order at that price, remove the
 price from the book. Making this O(1) is one of the main design challenges
 (see [chapters 3 to 5](03-order-pool.md)).
 
+A trader can also **reduce** a resting order's quantity. The order keeps its
+place in the queue: a smaller order never gets ahead of anyone, so letting it
+stay is fair. Raising the quantity, or changing the price, would be unfair to
+the orders queued behind it, so for that the trader cancels and sends a new
+order, which joins the back of the queue.
+
 ## 1.8 Ticks: prices as small integers
 
 Real prices look like `101.25`. Floating-point numbers cannot represent most
@@ -174,12 +181,32 @@ dense, we can use **arrays indexed by tick** instead of trees or hash maps.
 
 | Supported                                              | Not supported (yet)                                    |
 |--------------------------------------------------------|--------------------------------------------------------|
-| Limit orders, buy and sell                             | Market orders, stop orders                             |
-| Partial and full fills                                 | Time-in-force variants (IOC, FOK, day orders)          |
-| Resting the unfilled remainder                         | Modify / replace an order (cancel + new works)         |
-| Cancel by `order_id`                                   | Self-trade prevention, per-account limits              |
+| Limit, immediate-or-cancel, market and post-only orders | Stop orders, fill-or-kill, day orders                 |
+| Partial and full fills                                 | Iceberg orders (hidden quantity)                       |
+| Resting the unfilled remainder                         | Raising quantity or changing price in place (cancel + new works) |
+| Cancel by `order_id`; reduce quantity, keeping priority | Self-trade prevention, per-account limits             |
 | Price-time priority                                    | More than one instrument per `Engine` (use one each)   |
-| Depth queries (`depth_at`, `depth_snapshot`)           | Auctions, circuit breakers, fees                       |
+| Depth queries and order lookup                         | Auctions, circuit breakers, fees                       |
+
+### Order types
+
+Every type trades the same way, best price first and oldest order first. They
+differ in what may trade at all, and in what happens to the quantity that could
+not trade at once:
+
+| Type | Trades on arrival | Quantity left over | In the code |
+|---|---|---|---|
+| **Limit** | at its price or better | rests in the book | `OrderType::Limit` |
+| **Immediate-or-cancel** (IOC) | at its price or better | expires, never rests | `OrderType::ImmediateOrCancel` |
+| **Market** | at any price | expires, never rests | `OrderType::Market` |
+| **Post-only** | never: refused if it would | rests in the book | `OrderType::PostOnly` |
+
+A **market** order says "buy 10 now, whatever it costs". It has no price of its
+own, so it may sweep through many levels; that is why real exchanges protect it
+with price bands, which this engine leaves to the caller. A **post-only** order
+is for market makers, who want to be sure they only ever *add* orders to the
+book (and often pay lower fees for it): if it would trade on arrival, it is
+refused instead.
 
 ### What happens to a bad order?
 
@@ -192,6 +219,7 @@ Some orders are refused before they can touch the book. The engine reports an
 | the id `u64::MAX` (reserved for internal use, see [chapter 5](05-hash-map.md)) | `ReservedOrderId` |
 | a price tick of 4096 or more | `PriceOutOfRange` |
 | the same id as an order that is still resting | `DuplicateOrderId` |
+| post-only, and a price that would trade at once | `PostOnlyWouldTrade` |
 
 An order can also be accepted and trade normally, but then find **no room** to
 rest its remainder, because the book is full. It is rejected at that point with
@@ -293,6 +321,9 @@ Events are how the engine talks to the outside world; see
 | Best bid / ask  | Highest bid / lowest ask, the most attractive prices on each side        |
 | Spread          | Best ask minus best bid                                                  |
 | Limit order     | "Trade at this price or better"                                          |
+| Market order    | "Trade now, at any price"; what cannot trade at once expires              |
+| IOC             | Immediate-or-cancel: a limit order whose remainder expires instead of resting |
+| Post-only       | A limit order that is refused if it would trade on arrival               |
 | Marketable      | Able to trade immediately against the opposite side                      |
 | Maker           | The resting order in a trade                                             |
 | Taker           | The incoming order in a trade                                            |
