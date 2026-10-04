@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use matching_engine::engine::MAX_TICKS;
-use matching_engine::Side;
+use matching_engine::{OrderType, Side};
 
 /// xorshift64*: tiny, deterministic, and plenty for driving test inputs.
 pub struct Rng(u64);
@@ -46,6 +46,7 @@ pub enum Op {
     Place {
         order_id: u64,
         side: Side,
+        order_type: OrderType,
         price_tick: u32,
         qty: u64,
     },
@@ -69,8 +70,8 @@ pub fn watched_ticks() -> impl Iterator<Item = u32> {
 /// How many recently issued IDs cancels and reuse attempts choose from.
 const RECENT_WINDOW: usize = 256;
 
-/// Produces a reproducible request stream: mostly placements in [`BAND`],
-/// some cancels, and occasional edge inputs (zero quantity, out-of-range
+/// Produces a reproducible request stream: mostly limit orders in [`BAND`],
+/// some other order types, some cancels, and occasional edge inputs (zero quantity, out-of-range
 /// ticks, the reserved ID, reused IDs, deep sweeps, oversized quantities).
 pub struct OpGenerator {
     rng: Rng,
@@ -131,9 +132,14 @@ impl OpGenerator {
             }
             _ => {}
         }
+        let order_type = match self.rng.below(100) {
+            0..=9 => OrderType::ImmediateOrCancel,
+            _ => OrderType::Limit,
+        };
         Op::Place {
             order_id,
             side,
+            order_type,
             price_tick,
             qty,
         }

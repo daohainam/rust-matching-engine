@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
-use matching_engine::{Engine, Event, RejectReason, RestingOrder, Side};
+use matching_engine::{Engine, Event, OrderType, RejectReason, RestingOrder, Side};
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
 type Queue = VecDeque<(u64, u64)>;
@@ -34,7 +34,14 @@ impl ReferenceBook {
         }
     }
 
-    fn place(&mut self, order_id: u64, side: Side, price_tick: u32, qty: u64) -> Vec<Event> {
+    fn place(
+        &mut self,
+        order_id: u64,
+        side: Side,
+        order_type: OrderType,
+        price_tick: u32,
+        qty: u64,
+    ) -> Vec<Event> {
         let invalid = if qty == 0 {
             Some(RejectReason::ZeroQuantity)
         } else if order_id == u64::MAX {
@@ -52,6 +59,7 @@ impl ReferenceBook {
         let mut events = vec![Event::OrderAccepted {
             order_id,
             side,
+            order_type,
             price_tick,
             qty,
         }];
@@ -117,6 +125,13 @@ impl ReferenceBook {
                 order_id,
                 remaining_qty: remaining,
             });
+        }
+        if order_type == OrderType::ImmediateOrCancel {
+            events.push(Event::OrderExpired {
+                order_id,
+                expired_qty: remaining,
+            });
+            return events;
         }
         let own = match side {
             Side::Buy => &mut self.bids,
@@ -225,6 +240,7 @@ struct Coverage {
     maker_partial_fills: usize,
     cancels_found: usize,
     calls_beyond_batch_capacity: usize,
+    expired_remainders: usize,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
@@ -241,11 +257,12 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
             Op::Place {
                 order_id,
                 side,
+                order_type,
                 price_tick,
                 qty,
             } => {
-                engine.process_order(order_id, side, price_tick, qty, &mut events);
-                model.place(order_id, side, price_tick, qty)
+                engine.submit_order(order_id, side, order_type, price_tick, qty, &mut events);
+                model.place(order_id, side, order_type, price_tick, qty)
             }
             Op::Cancel { order_id } => {
                 let found = engine.cancel_order(order_id, &mut events);
@@ -316,6 +333,8 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
             .filter(|e| matches!(e, Event::OrderPartiallyFilled { order_id, .. } if *order_id != taker_id))
             .count();
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
+        coverage.expired_remainders +=
+            usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
     }
 }
 
@@ -328,6 +347,7 @@ fn assert_all_paths_hit(coverage: &Coverage) {
         coverage.calls_beyond_batch_capacity > 0,
         "no call produced more than {MAX_EVENTS_PER_CALL} events"
     );
+    assert!(coverage.expired_remainders > 0, "no expired remainders");
 }
 
 #[test]

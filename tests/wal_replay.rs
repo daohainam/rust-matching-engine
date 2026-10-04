@@ -36,11 +36,14 @@ fn replaying_the_wal_reproduces_every_event() {
     let mut generator = OpGenerator::new(42);
     for sequence in 0..OPS {
         let record = match generator.next_op() {
+            // The log format has no order type yet: every order is logged,
+            // and therefore applied, as a limit order.
             Op::Place {
                 order_id,
                 side,
                 price_tick,
                 qty,
+                ..
             } => WalRecord::new_order(order_id, side, price_tick, qty, sequence),
             Op::Cancel { order_id } => WalRecord::cancel(order_id, sequence),
         };

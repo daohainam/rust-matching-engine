@@ -5,7 +5,7 @@
 //! Three kinds of sink are built in:
 //!
 //! ```
-//! use matching_engine::{Engine, Event, EventBatch, Side};
+//! use matching_engine::{Engine, Event, EventBatch, OrderType, Side};
 //!
 //! let mut engine = Engine::new(16);
 //!
@@ -15,7 +15,13 @@
 //! engine.process_order(1, Side::Sell, 100, 5, &mut events);
 //! assert_eq!(
 //!     events,
-//!     [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+//!     [Event::OrderAccepted {
+//!         order_id: 1,
+//!         side: Side::Sell,
+//!         order_type: OrderType::Limit,
+//!         price_tick: 100,
+//!         qty: 5,
+//!     }]
 //! );
 //!
 //! // 2. A closure sees each event as it happens; this one counts trades.
@@ -35,6 +41,7 @@
 //! assert_eq!(batch.as_slice().last(), Some(&Event::OrderFilled { order_id: 3 }));
 //! ```
 
+use crate::engine::OrderType;
 use crate::pool::Side;
 
 /// Capacity of an [`EventBatch`].
@@ -56,6 +63,7 @@ pub enum Event {
     OrderAccepted {
         order_id: u64,
         side: Side,
+        order_type: OrderType,
         price_tick: u32,
         qty: u64,
     },
@@ -79,6 +87,10 @@ pub enum Event {
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     /// An order has no remaining quantity; a resting maker is removed.
     OrderFilled { order_id: u64 },
+    /// The unfilled quantity of an order whose [`OrderType`] does not let it
+    /// rest was dropped. It is the order's last event, after any trades,
+    /// and `expired_qty` never entered the book.
+    OrderExpired { order_id: u64, expired_qty: u64 },
     /// An order was cancelled by explicit request. `side` and `price_tick`
     /// say where it rested and `cancelled_qty` how much quantity left the
     /// book, so a consumer can update its depth from this event alone.

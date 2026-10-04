@@ -41,6 +41,29 @@ pub struct RestingOrder {
     pub remaining_qty: u64,
 }
 
+/// What an order does with quantity it cannot trade on arrival.
+///
+/// Every type trades the same way: against the best resting prices first,
+/// at the maker's price, oldest maker first at each price. The types differ
+/// only in what happens to the remainder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderType {
+    /// Trades at `price_tick` or better; the remainder rests in the book
+    /// (good-till-cancelled).
+    Limit,
+    /// Immediate-or-cancel: trades at `price_tick` or better; the remainder
+    /// expires instead of resting.
+    ImmediateOrCancel,
+}
+
+impl OrderType {
+    /// Whether unfilled quantity may rest in the book.
+    #[inline(always)]
+    fn rests(self) -> bool {
+        matches!(self, OrderType::Limit)
+    }
+}
+
 /// A single-threaded, price-time-priority limit order book.
 ///
 /// Orders are stored in a preallocated arena. Each price tick has a FIFO
@@ -211,7 +234,22 @@ impl Engine {
         }
     }
 
-    /// Submits a new limit order.
+    /// Submits a new limit order: the same as
+    /// [`submit_order`](Self::submit_order) with [`OrderType::Limit`], which
+    /// describes the checks, the matching and the events in full.
+    #[inline]
+    pub fn process_order<S: EventSink + ?Sized>(
+        &mut self,
+        order_id: u64,
+        side: Side,
+        price_tick: u32,
+        qty: u64,
+        sink: &mut S,
+    ) {
+        self.submit_order(order_id, side, OrderType::Limit, price_tick, qty, sink);
+    }
+
+    /// Submits a new order of any [`OrderType`].
     ///
     /// The order is first checked for a nonzero quantity, a non-reserved ID,
     /// a valid price tick and an unused ID, and then accepted. A failed check
@@ -219,12 +257,15 @@ impl Engine {
     /// maker prices, consuming the best eligible price first and preserving
     /// FIFO order among orders at that price. A buy may trade at asks no
     /// higher than `price_tick`; a sell may trade at bids no lower than it.
-    /// Any unfilled quantity is added to the book if an order slot is
-    /// available and the price-level quantity can be represented.
+    /// The unfilled quantity of a [`Limit`](OrderType::Limit) order is added
+    /// to the book if an order slot is available and the price-level
+    /// quantity can be represented; that of an
+    /// [`ImmediateOrCancel`](OrderType::ImmediateOrCancel) order expires.
     ///
     /// Every event is emitted to `sink` in order: acceptance, then each trade
     /// followed by the maker's fill update, then the taker's final fill or
-    /// partial-fill state. If the remainder cannot rest, an `OrderRejected`
+    /// partial-fill state. A remainder that may not rest is then reported
+    /// with `OrderExpired`. If a remainder cannot rest, an `OrderRejected`
     /// event (reason [`BookFull`](RejectReason::BookFull) or
     /// [`LevelQuantityOverflow`](RejectReason::LevelQuantityOverflow)) is
     /// also emitted; trades already completed by this call are not
@@ -233,10 +274,11 @@ impl Engine {
     ///
     /// O(1) amortized to place; each matched maker node is processed in
     /// O(1), so total cost is O(1) + O(fills).
-    pub fn process_order<S: EventSink + ?Sized>(
+    pub fn submit_order<S: EventSink + ?Sized>(
         &mut self,
         order_id: u64,
         side: Side,
+        order_type: OrderType,
         price_tick: u32,
         qty: u64,
         sink: &mut S,
@@ -249,6 +291,7 @@ impl Engine {
         sink.emit(Event::OrderAccepted {
             order_id,
             side,
+            order_type,
             price_tick,
             qty,
         });
@@ -297,6 +340,16 @@ impl Engine {
                 order_id,
                 remaining_qty: remaining,
             });
+        }
+
+        if !order_type.rests() {
+            // The remainder never enters the book, so it needs no slot.
+            sink.emit(Event::OrderExpired {
+                order_id,
+                expired_qty: remaining,
+            });
+            self.sequence = self.sequence.wrapping_add(1);
+            return;
         }
 
         // Rest the remainder in the book.
@@ -528,11 +581,26 @@ mod tests {
         events
     }
 
-    /// The acceptance event for an order with these terms.
+    /// Submits an order of any type and returns every event it produced.
+    fn submit(
+        engine: &mut Engine,
+        order_id: u64,
+        side: Side,
+        order_type: OrderType,
+        price_tick: u32,
+        qty: u64,
+    ) -> Vec<Event> {
+        let mut events = Vec::new();
+        engine.submit_order(order_id, side, order_type, price_tick, qty, &mut events);
+        events
+    }
+
+    /// The acceptance event for a limit order with these terms.
     fn accepted(order_id: u64, side: Side, price_tick: u32, qty: u64) -> Event {
         Event::OrderAccepted {
             order_id,
             side,
+            order_type: OrderType::Limit,
             price_tick,
             qty,
         }
@@ -564,6 +632,78 @@ mod tests {
         let events = place(&mut engine, 2, Side::Sell, 99, 3);
         assert_eq!(events.first(), Some(&accepted(2, Side::Sell, 99, 3)));
         assert_eq!(events.last(), Some(&Event::OrderFilled { order_id: 2 }));
+    }
+
+    #[test]
+    fn immediate_or_cancel_trades_what_it_can_and_expires_the_rest() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 4);
+        let events = submit(
+            &mut engine,
+            2,
+            Side::Buy,
+            OrderType::ImmediateOrCancel,
+            101,
+            10,
+        );
+        assert_eq!(
+            events,
+            vec![
+                Event::OrderAccepted {
+                    order_id: 2,
+                    side: Side::Buy,
+                    order_type: OrderType::ImmediateOrCancel,
+                    price_tick: 101,
+                    qty: 10
+                },
+                Event::Trade {
+                    trade_id: 1,
+                    maker_order_id: 1,
+                    taker_order_id: 2,
+                    taker_side: Side::Buy,
+                    price_tick: 100,
+                    qty: 4
+                },
+                Event::OrderFilled { order_id: 1 },
+                Event::OrderPartiallyFilled {
+                    order_id: 2,
+                    remaining_qty: 6
+                },
+                Event::OrderExpired {
+                    order_id: 2,
+                    expired_qty: 6
+                },
+            ]
+        );
+        assert_eq!(engine.best_bid(), None);
+        assert_eq!(engine.resting_order(2), None);
+        assert_eq!(engine.live_order_count(), 0);
+    }
+
+    #[test]
+    fn immediate_or_cancel_that_cannot_trade_expires_without_a_slot() {
+        // The only slot is taken, which would reject a limit order's
+        // remainder with BookFull. An IOC remainder never needs one.
+        let mut engine = Engine::new(1);
+        place(&mut engine, 1, Side::Sell, 100, 4);
+        let events = submit(
+            &mut engine,
+            2,
+            Side::Buy,
+            OrderType::ImmediateOrCancel,
+            99,
+            5,
+        );
+        assert_eq!(events.len(), 2, "accepted and expired, no trade");
+        assert_eq!(
+            events.last(),
+            Some(&Event::OrderExpired {
+                order_id: 2,
+                expired_qty: 5
+            })
+        );
+        assert_eq!(engine.depth_at(Side::Sell, 100), 4);
+        assert_eq!(engine.live_order_count(), 1);
     }
 
     #[test]
