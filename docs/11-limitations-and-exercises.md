@@ -31,10 +31,11 @@ good exercises in their own right.
 |---|---|
 | **4096 price ticks** | Fixed by the two-level bitset (`64 × 64`), checked at compile time. No tick-size or price offset logic; callers convert. |
 | **Fixed order capacity** | Chosen in `Engine::new`. A full arena rejects orders that would need to rest (orders that fully match still succeed). |
-| **Four order types** | Limit, immediate-or-cancel, market and post-only. No fill-or-kill, stop, iceberg or day orders. Quantity can be reduced in place, but raising it or changing the price means cancel + new, which loses priority. Market orders have no price protection. No self-trade prevention; no accounts. |
+| **Four order types** | Limit, immediate-or-cancel, market and post-only. No fill-or-kill, stop, iceberg or day orders. Quantity can be reduced in place, but raising it or changing the price means cancel + new, which loses priority. Market orders have no price protection. |
+| **Accounts are labels** | Every order has an account, used for self-trade prevention and mass cancels. There are no per-account limits (open orders, position, credit), and the engine keeps no list of an account's orders, so `cancel_account` walks the book. |
 | **One instrument per `Engine`** | Run several engines for several symbols. |
 | **Engine is not wired to the WAL or ring buffer** | The caller does it; [`examples/pipeline.rs`](../examples/pipeline.rs) shows how. The WAL's `sequence` is caller-supplied and independent of the engine's own counter. |
-| **WAL format is small** | Version 2 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
+| **WAL format is small** | Version 3 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
 | **Failing loudly** | `assert!`/`expect` on invariants panic on a bookkeeping bug, in every build profile. With `panic = "abort"` (set in this repo's release profile, and needed in *your* binary's profile because Cargo ignores a dependency's) that aborts the process. Intentional for a financial component. |
 | **`depth_snapshot` is slow-ish** | It allocates a `Vec` and scans ticks linearly (documented in the source). Reporting only. |
 
@@ -91,15 +92,16 @@ and `deep_sweep_reports_every_execution`.*
 
 ### Understanding the internals
 
-🟡 **5. Shrink `Order`.** Keeping `#[repr(C)]`, reorder the fields (group the
-`u32`s, then the `u8`/`bool`s at the end) so `size_of::<Order>()` becomes 40. Add a
-test that pins the size. Then remove `repr(C)` instead and check that the compiler
-reaches 40 bytes by itself (see [3.3](03-order-pool.md#33-the-order-record)).
-Then try `#[repr(C, align(64))]` instead and benchmark both against the original.
-*Which wins, and does it depend on the book size?*
+🟡 **5. Shrink `Order`.** `Order` is 48 bytes, and its fields add up to 42, so no
+reordering helps: 48 is the next multiple of 8 (see
+[3.3](03-order-pool.md#33-the-order-record)). Something has to go. The obvious
+candidate is `sequence`, which nothing reads: remove it (and the engine counter
+that only feeds it), and update the size test in `pool.rs` to 40. Then try
+`#[repr(C, align(64))]` on the original instead, and benchmark both against the
+original. *Which wins, and does it depend on the book size?*
 
-**Done when:** a test pins `size_of::<Order>()` at 40, every other test still
-passes, and you have benchmark numbers for all three layouts.
+**Done when:** the size test pins `size_of::<Order>()` at 40, every other test
+still passes, and you have benchmark numbers for all three layouts.
 
 🟡 **6. Fast `next_set`.** Replace the linear `next_lower_active` /
 `next_higher_active` in `depth_snapshot` with bitset methods `prev_set(tick)` /
@@ -159,16 +161,20 @@ new record kind.*
 loses priority, and moving the price across the spread trades; `model_check`
 sends amends too.
 
-🔴 **11. Self-trade prevention.** Add an `account: u32` to `Order`. When a taker
-would trade with its own account's resting order, apply a policy (cancel oldest,
-cancel newest, or decrement both) and emit matching events. *Hint: the check
-belongs in the inner loop of `match_incoming`, just before a `Trade` would be
-emitted. Pass the taker's account in, and remember that "cancel oldest" removes
-a maker, so it must keep the level, the bitset and the id map consistent exactly
-as a full fill does.*
+🔴 **11. Per-account order lists.** `cancel_account` walks the whole book, so
+cancelling one trader's two orders can mean scanning thousands of ticks. Give each
+account its own intrusive doubly-linked list through the arena, exactly like a
+price level's queue, so `cancel_account` touches only that account's orders.
+*Hint: each `Order` needs two more `u32` links (watch what that does to its size,
+chapter 3), and the engine needs a fixed-size table from account to list head;
+the flat hash map from chapter 5 can hold it. Every place an order enters or
+leaves the book must update the list: resting, fills, cancels, reductions to
+zero, self-trade prevention. Keep the order of the cancellations as it is, or
+change the reference book in `model_check` to match.*
 
-**Done when:** each policy has a test where taker and maker share an account, and
-`model_check` still passes when every order has its own account.
+**Done when:** `model_check` still passes, and a benchmark shows `cancel_account`
+on an account with a handful of orders costing about the same in a book of 100 or
+of 100,000 orders.
 
 ### Engineering and verification
 
@@ -220,13 +226,14 @@ failure once one `Acquire` is weakened to `Relaxed`.
 ### Making the WAL production-shaped
 
 🟡 **16. Record the capacity.** Replay is only deterministic with the same `Engine`
-capacity (9.1). Store it in the header's reserved bytes (format version 3), and
-make replay refuse a log written for a different capacity. Keep version 1 and 2
-logs readable. *Hint: 9.2 explains how version 2 was added next to version 1;
-follow the same steps, including the upgrade in `open_append`.*
+capacity (9.1). Store it in the header's reserved bytes (format version 4), and
+make replay refuse a log written for a different capacity. Keep the older versions
+readable. *Hint: 9.2 explains how versions 2 and 3 were added; follow the same
+steps, including the upgrade in `open_append`. An upgraded log does not know its
+capacity: decide what replay should do then.*
 
-**Done when:** replaying a version 3 log into an engine of a different capacity
-returns a clear error, and the version 1 and 2 logs written by the existing tests
+**Done when:** replaying a version 4 log into an engine of a different capacity
+returns a clear error, and the version 1 to 3 logs written by the existing tests
 still read correctly.
 
 🟡 **17. One writer per file.** Take an exclusive lock with `File::try_lock` in
@@ -284,7 +291,7 @@ git switch main                                      # come back (stash or commi
 ```
 
 `a192ebc` has the **old API**, so the chapters, which describe the current code,
-will not match it exactly; use them for the ideas. R7 to R9 were solved much
+will not match it exactly; use them for the ideas. R7 to R10 were solved much
 later: start those from the commit just before the named one
 (`git switch --detach <hash>~1`).
 
@@ -331,6 +338,16 @@ losing time priority; reducing it to nothing should behave like a cancel. *Solve
 by `feat(engine): reduce a resting order without losing priority`. Note how many
 places a new request kind touches: the event, the reject reason, the WAL record
 and the test generator. Exercise 10 goes further.*
+
+🔴 **R10. Self-trade prevention.** Give every order an account. When a taker
+would trade with its own account's resting order, apply a policy (cancel the
+resting order, cancel the incoming one, or both) and emit matching events.
+*Solved by `feat(engine): give every order an account` and
+`feat(engine): add self-trade prevention`. Look at where the check sits in the
+inner loop of `match_incoming`, and how the cancelled maker leaves the book by
+exactly the steps of a full fill. Mass cancels, which also needed accounts, came
+next in `feat(engine): cancel every order of an account, or the whole book`;
+exercise 11 makes them faster.*
 
 ### Every fix, with its commit
 
