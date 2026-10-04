@@ -235,7 +235,7 @@ replaced.
 
 | Sub-problem | Textbook answer | Why it is not ideal here | What this engine does |
 |---|---|---|---|
-| Keep prices sorted / find the best price | `BTreeMap<Price, Level>` | O(log n), pointer-chasing across nodes, allocates on insert | **Two-level bitset**: 2 bit-scans, O(1), 520 bytes |
+| Keep prices sorted / find the best price | `BTreeMap<Price, Level>` | O(log n), pointer-chasing across nodes, allocates on insert | **Two-level bitset** (hierarchical): one bit-scan per level, O(1); two levels and 520 bytes for 4096 ticks |
 | Find the queue for a price | `HashMap<Price, Level>` | hashing cost, allocation, resizing | **Array indexed by tick**: `levels[tick]` |
 | FIFO queue of orders at a price | `VecDeque<Order>` or `LinkedList<Order>` | `VecDeque` removal from the middle is O(n); `LinkedList` allocates a node per order | **Intrusive doubly-linked list** in the arena: O(1) everything |
 | Find an order by id | `HashMap<u64, _>` (SipHash) | allocates, may resize, slower hash | **Flat open-addressing table** with a fast integer hash, plus a random seed against crafted ids |
@@ -245,7 +245,8 @@ replaced.
 The trade-off for all this speed is **fixed limits** decided up front:
 
 - at most `order_capacity` resting orders (you choose it in `Engine::new`),
-- exactly 4096 price ticks (a compile-time constant).
+- the number of price ticks chosen when the engine is built (4096 with
+  `Engine::new`, up to 2^24 with `Engine::with_ticks`).
 
 There is no limit on events: one call can report thousands of fills, and the
 sink decides whether to keep, forward or merely count them.
