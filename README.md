@@ -60,7 +60,7 @@ downstream system can follow the book from events alone
 More of the API:
 
 ```rust
-use matching_engine::{Engine, Event, OrderType, RejectReason, Side};
+use matching_engine::{Engine, Event, NewOrder, RejectReason, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -81,7 +81,7 @@ assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
 assert!(matches!(events.last(), Some(Event::CancelRejected { order_id: 1, .. }))); // and says so
 
 // Besides limit orders: immediate-or-cancel, market and post-only orders.
-engine.submit_order(3, Side::Sell, OrderType::Market, 0, 5, &mut events); // no bids left
+engine.submit_order(NewOrder::market(3, Side::Sell, 5), &mut events); // no bids left
 let expired = Event::OrderExpired { order_id: 3, expired_qty: 5 };
 assert_eq!(events.last(), Some(&expired)); // a market order never rests
 ```

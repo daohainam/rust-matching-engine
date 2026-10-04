@@ -10,14 +10,7 @@ use matching_engine::{Engine, Event, Side};
 
 fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
     match record.kind {
-        WalRecordKind::NewOrder => engine.submit_order(
-            record.order_id,
-            record.side,
-            record.order_type,
-            record.price_tick,
-            record.qty,
-            events,
-        ),
+        WalRecordKind::NewOrder => engine.submit_order(record.order(), events),
         WalRecordKind::Cancel => {
             engine.cancel_order(record.order_id, events);
         }
@@ -40,15 +33,7 @@ fn replaying_the_wal_reproduces_every_event() {
     let mut generator = OpGenerator::new(42);
     for sequence in 0..OPS {
         let record = match generator.next_op() {
-            Op::Place {
-                order_id,
-                side,
-                order_type,
-                price_tick,
-                qty,
-            } => WalRecord::new_order_with_type(
-                order_id, side, order_type, price_tick, qty, sequence,
-            ),
+            Op::Place(order) => WalRecord::submit(order, sequence),
             Op::Cancel { order_id } => WalRecord::cancel(order_id, sequence),
             Op::Reduce {
                 order_id,

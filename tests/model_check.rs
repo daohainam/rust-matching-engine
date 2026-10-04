@@ -10,7 +10,7 @@ use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
 use matching_engine::{
-    CancelRejectReason, Engine, Event, OrderType, RejectReason, RestingOrder, Side,
+    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder, Side,
 };
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
@@ -36,14 +36,14 @@ impl ReferenceBook {
         }
     }
 
-    fn place(
-        &mut self,
-        order_id: u64,
-        side: Side,
-        order_type: OrderType,
-        price_tick: u32,
-        qty: u64,
-    ) -> Vec<Event> {
+    fn place(&mut self, order: NewOrder) -> Vec<Event> {
+        let NewOrder {
+            order_id,
+            side,
+            order_type,
+            price_tick,
+            qty,
+        } = order;
         let price_tick = match (order_type, side) {
             (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
             (OrderType::Market, Side::Sell) => 0,
@@ -301,15 +301,9 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         let context = || format!("seed {seed}, step {step}: {op:?}");
         events.clear();
         let expected = match op {
-            Op::Place {
-                order_id,
-                side,
-                order_type,
-                price_tick,
-                qty,
-            } => {
-                engine.submit_order(order_id, side, order_type, price_tick, qty, &mut events);
-                model.place(order_id, side, order_type, price_tick, qty)
+            Op::Place(order) => {
+                engine.submit_order(order, &mut events);
+                model.place(order)
             }
             Op::Cancel { order_id } => {
                 let found = engine.cancel_order(order_id, &mut events);
@@ -355,9 +349,8 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         }
 
         let taker_id = match op {
-            Op::Place { order_id, .. } | Op::Cancel { order_id } | Op::Reduce { order_id, .. } => {
-                order_id
-            }
+            Op::Place(order) => order.order_id,
+            Op::Cancel { order_id } | Op::Reduce { order_id, .. } => order_id,
         };
         // The order this request named, and every maker it touched.
         let touched = events.iter().filter_map(|e| match e {

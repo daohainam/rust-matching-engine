@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use matching_engine::engine::MAX_TICKS;
-use matching_engine::{OrderType, Side};
+use matching_engine::{NewOrder, OrderType, Side};
 
 /// xorshift64*: tiny, deterministic, and plenty for driving test inputs.
 pub struct Rng(u64);
@@ -43,20 +43,9 @@ impl Rng {
 /// One engine request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    Place {
-        order_id: u64,
-        side: Side,
-        order_type: OrderType,
-        price_tick: u32,
-        qty: u64,
-    },
-    Cancel {
-        order_id: u64,
-    },
-    Reduce {
-        order_id: u64,
-        reduce_by: u64,
-    },
+    Place(NewOrder),
+    Cancel { order_id: u64 },
+    Reduce { order_id: u64, reduce_by: u64 },
 }
 
 /// Most orders land in this narrow band so they cross each other often.
@@ -151,13 +140,13 @@ impl OpGenerator {
             13..=22 => OrderType::PostOnly,
             _ => OrderType::Limit,
         };
-        Op::Place {
+        Op::Place(NewOrder {
             order_id,
             side,
             order_type,
             price_tick,
             qty,
-        }
+        })
     }
 
     fn fresh_id(&mut self) -> u64 {

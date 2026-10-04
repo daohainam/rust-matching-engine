@@ -73,6 +73,48 @@ impl OrderType {
     }
 }
 
+/// A request to submit an order, as [`Engine::submit_order`] takes it.
+///
+/// Start from [`limit`](Self::limit) or [`market`](Self::market) and adjust
+/// with [`with_type`](Self::with_type); every field is public, so struct
+/// update syntax works too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewOrder {
+    /// The caller's identifier, unique among resting orders.
+    pub order_id: u64,
+    /// Buy or sell.
+    pub side: Side,
+    /// What happens to quantity that cannot trade at once.
+    pub order_type: OrderType,
+    /// The limit price; ignored for a market order.
+    pub price_tick: u32,
+    /// How much to trade.
+    pub qty: u64,
+}
+
+impl NewOrder {
+    /// A limit order: trades at `price_tick` or better, then rests.
+    pub const fn limit(order_id: u64, side: Side, price_tick: u32, qty: u64) -> Self {
+        Self {
+            order_id,
+            side,
+            order_type: OrderType::Limit,
+            price_tick,
+            qty,
+        }
+    }
+
+    /// A market order: trades at any price, and the rest expires.
+    pub const fn market(order_id: u64, side: Side, qty: u64) -> Self {
+        Self::limit(order_id, side, 0, qty).with_type(OrderType::Market)
+    }
+
+    /// The same order with another [`OrderType`].
+    pub const fn with_type(self, order_type: OrderType) -> Self {
+        Self { order_type, ..self }
+    }
+}
+
 /// A single-threaded, price-time-priority limit order book.
 ///
 /// Orders are stored in a preallocated arena. Each price tick has a FIFO
@@ -273,10 +315,10 @@ impl Engine {
         qty: u64,
         sink: &mut S,
     ) {
-        self.submit_order(order_id, side, OrderType::Limit, price_tick, qty, sink);
+        self.submit_order(NewOrder::limit(order_id, side, price_tick, qty), sink);
     }
 
-    /// Submits a new order of any [`OrderType`].
+    /// Submits a new order of any [`OrderType`], described by a [`NewOrder`].
     ///
     /// The order is first checked for a nonzero quantity, a non-reserved ID,
     /// a valid price tick and an unused ID, and a post-only order also for
@@ -304,15 +346,14 @@ impl Engine {
     ///
     /// O(1) amortized to place; each matched maker node is processed in
     /// O(1), so total cost is O(1) + O(fills).
-    pub fn submit_order<S: EventSink + ?Sized>(
-        &mut self,
-        order_id: u64,
-        side: Side,
-        order_type: OrderType,
-        price_tick: u32,
-        qty: u64,
-        sink: &mut S,
-    ) {
+    pub fn submit_order<S: EventSink + ?Sized>(&mut self, order: NewOrder, sink: &mut S) {
+        let NewOrder {
+            order_id,
+            side,
+            order_type,
+            price_tick,
+            qty,
+        } = order;
         // A market order may trade at any price: give it the worst limit
         // its side allows, and every later step treats it as usual.
         let price_tick = match (order_type, side) {
@@ -685,7 +726,8 @@ mod tests {
         qty: u64,
     ) -> Vec<Event> {
         let mut events = Vec::new();
-        engine.submit_order(order_id, side, order_type, price_tick, qty, &mut events);
+        let order = NewOrder::limit(order_id, side, price_tick, qty).with_type(order_type);
+        engine.submit_order(order, &mut events);
         events
     }
 

@@ -85,7 +85,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::engine::OrderType;
+use crate::engine::{NewOrder, OrderType};
 use crate::pool::Side;
 
 /// Size in bytes of the file header that precedes the records.
@@ -164,26 +164,32 @@ impl std::error::Error for WalDecodeError {}
 impl WalRecord {
     /// Describes a new limit-order request.
     pub fn new_order(order_id: u64, side: Side, price_tick: u32, qty: u64, sequence: u64) -> Self {
-        Self::new_order_with_type(order_id, side, OrderType::Limit, price_tick, qty, sequence)
+        Self::submit(NewOrder::limit(order_id, side, price_tick, qty), sequence)
     }
 
-    /// Describes a new-order request of any [`OrderType`].
-    pub fn new_order_with_type(
-        order_id: u64,
-        side: Side,
-        order_type: OrderType,
-        price_tick: u32,
-        qty: u64,
-        sequence: u64,
-    ) -> Self {
+    /// Describes a request to submit `order`, of any [`OrderType`].
+    pub fn submit(order: NewOrder, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::NewOrder,
-            side,
-            order_type,
-            order_id,
-            price_tick,
-            qty,
+            side: order.side,
+            order_type: order.order_type,
+            order_id: order.order_id,
+            price_tick: order.price_tick,
+            qty: order.qty,
             sequence,
+        }
+    }
+
+    /// The order a [`NewOrder`](WalRecordKind::NewOrder) record submits,
+    /// ready for [`Engine::submit_order`](crate::Engine::submit_order).
+    /// Meaningless for other kinds of record.
+    pub fn order(&self) -> NewOrder {
+        NewOrder {
+            order_id: self.order_id,
+            side: self.side,
+            order_type: self.order_type,
+            price_tick: self.price_tick,
+            qty: self.qty,
         }
     }
 
@@ -584,12 +590,8 @@ mod tests {
             2 if i.is_multiple_of(2) => WalRecord::reduce(i - 1, i % 7 + 1, i),
             2 => WalRecord::cancel(i - 1, i),
             0 => WalRecord::new_order(i, Side::Buy, 100 + i as u32, 10 + i, i),
-            _ => WalRecord::new_order_with_type(
-                i,
-                Side::Sell,
-                order_type,
-                200 + i as u32,
-                u64::MAX - i,
+            _ => WalRecord::submit(
+                NewOrder::limit(i, Side::Sell, 200 + i as u32, u64::MAX - i).with_type(order_type),
                 i,
             ),
         }
@@ -798,7 +800,7 @@ mod tests {
         std::fs::write(&path.0, &bytes).unwrap();
         assert_eq!(read_all(&path.0).unwrap(), old, "version 1 is still read");
 
-        let new = WalRecord::new_order_with_type(2, Side::Sell, OrderType::Market, 0, 3, 2);
+        let new = WalRecord::submit(NewOrder::market(2, Side::Sell, 3), 2);
         let mut writer = WalWriter::open_append(&path.0, 4).unwrap();
         writer.append(new).unwrap();
         writer.finalize().unwrap();
