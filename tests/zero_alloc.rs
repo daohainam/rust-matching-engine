@@ -1,5 +1,6 @@
-//! Verifies that `Engine::process_order`, `Engine::reduce_order` and
-//! `Engine::cancel_order` never allocate on the heap, by installing a
+//! Verifies that `Engine::process_order`, `Engine::reduce_order`,
+//! `Engine::cancel_order` and `Engine::cancel_all` never allocate on the
+//! heap, by installing a
 //! counting global allocator for the whole test binary and asserting the
 //! allocation counter is unchanged across a sustained processing loop.
 //!
@@ -77,6 +78,9 @@ fn hot_path_performs_zero_heap_allocations() {
         events.clear();
         std::hint::black_box(engine.cancel_order(i, &mut events));
     }
+    // A mass cancel walking the whole remaining book.
+    events.clear();
+    std::hint::black_box(engine.cancel_all(&mut events));
     // One taker sweeping 500 makers; every report reaches the sink.
     let mut trades = 0usize;
     deep_book.process_order(1_000, Side::Buy, 100, 500, &mut |event: Event| {

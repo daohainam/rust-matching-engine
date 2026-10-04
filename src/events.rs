@@ -94,8 +94,9 @@ pub enum Event {
     /// rest was dropped. It is the order's last event, after any trades,
     /// and `expired_qty` never entered the book.
     OrderExpired { order_id: u64, expired_qty: u64 },
-    /// A resting order was cancelled: by a cancel or reduce request, or by
-    /// self-trade prevention (then right after `SelfTradePrevented`).
+    /// A resting order was cancelled: by a cancel, reduce or mass cancel
+    /// request, or by self-trade prevention (then right after
+    /// `SelfTradePrevented`).
     /// `side` and `price_tick` say where it rested and `cancelled_qty` how
     /// much quantity left the book, so a consumer can update its depth from
     /// this event alone.
@@ -128,6 +129,13 @@ pub enum Event {
     SelfTradePrevented {
         taker_order_id: u64,
         maker_order_id: u64,
+    },
+    /// A mass cancel finished: `account` is the account whose orders were
+    /// cancelled, or `None` for every account, and `cancelled_orders` how
+    /// many were (each reported before with its own `OrderCancelled`).
+    MassCancelled {
+        account: Option<u32>,
+        cancelled_orders: u64,
     },
     /// A cancel or reduce request was refused; `reason` says why. The book
     /// is unchanged.

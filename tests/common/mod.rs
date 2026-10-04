@@ -46,6 +46,8 @@ pub enum Op {
     Place(NewOrder),
     Cancel { order_id: u64 },
     Reduce { order_id: u64, reduce_by: u64 },
+    CancelAccount { account: u32 },
+    CancelAll,
 }
 
 /// Most orders land in this narrow band so they cross each other often.

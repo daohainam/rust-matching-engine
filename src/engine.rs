@@ -10,7 +10,7 @@
 use crate::bitset::{TwoLevelBitset, TICKS};
 use crate::events::{CancelRejectReason, Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
-use crate::pool::{OrderPool, PriceLevel, Side};
+use crate::pool::{OrderPool, PriceLevel, Side, NIL};
 
 /// The maximum representable price tick (exclusive), mirroring the dense
 /// tick space tracked by [`TwoLevelBitset`].
@@ -719,31 +719,89 @@ impl Engine {
             });
             return false;
         };
+        self.remove_cancelled(idx, sink);
+        true
+    }
+
+    /// Unlinks the resting order in slot `idx` from its level, frees the
+    /// slot and reports `OrderCancelled`. The caller has already removed
+    /// the order's ID from the ID map.
+    fn remove_cancelled<S: EventSink + ?Sized>(&mut self, idx: u32, sink: &mut S) {
         let order = *self.pool.get(idx);
-        match order.side {
-            Side::Buy => {
-                let level = &mut self.bid_levels[order.price_tick as usize];
-                level.remove(&mut self.pool, idx);
-                if level.is_empty() {
-                    self.bid_bitset.clear(order.price_tick as usize);
-                }
-            }
-            Side::Sell => {
-                let level = &mut self.ask_levels[order.price_tick as usize];
-                level.remove(&mut self.pool, idx);
-                if level.is_empty() {
-                    self.ask_bitset.clear(order.price_tick as usize);
-                }
-            }
+        let (levels, bitset) = match order.side {
+            Side::Buy => (&mut self.bid_levels, &mut self.bid_bitset),
+            Side::Sell => (&mut self.ask_levels, &mut self.ask_bitset),
+        };
+        let level = &mut levels[order.price_tick as usize];
+        level.remove(&mut self.pool, idx);
+        if level.is_empty() {
+            bitset.clear(order.price_tick as usize);
         }
         self.pool.free(idx);
         sink.emit(Event::OrderCancelled {
-            order_id,
+            order_id: order.order_id,
             side: order.side,
             price_tick: order.price_tick,
             cancelled_qty: order.remaining_qty,
         });
-        true
+    }
+
+    /// Cancels every resting order of `account`, for example when its
+    /// trader disconnects ("cancel on disconnect").
+    ///
+    /// Emits one `OrderCancelled` per order, in a fixed order (bids best
+    /// price first, then asks best price first, oldest first at each
+    /// price), and then `MassCancelled` with the count, even when it is 0.
+    /// Returns that count.
+    ///
+    /// The engine keeps no list of orders per account, so this walks the
+    /// whole book: O(ticks between the best and worst price + resting
+    /// orders), at most 4096 ticks. It does not allocate.
+    pub fn cancel_account<S: EventSink + ?Sized>(&mut self, account: u32, sink: &mut S) -> u64 {
+        self.mass_cancel(Some(account), sink)
+    }
+
+    /// Cancels every resting order, for example at the end of a trading
+    /// session or when trading halts. Works exactly like
+    /// [`cancel_account`](Self::cancel_account), for all accounts at once.
+    pub fn cancel_all<S: EventSink + ?Sized>(&mut self, sink: &mut S) -> u64 {
+        self.mass_cancel(None, sink)
+    }
+
+    fn mass_cancel<S: EventSink + ?Sized>(&mut self, account: Option<u32>, sink: &mut S) -> u64 {
+        let mut cancelled = 0;
+        for side in [Side::Buy, Side::Sell] {
+            let mut tick = match side {
+                Side::Buy => self.bid_bitset.highest(),
+                Side::Sell => self.ask_bitset.lowest(),
+            };
+            while let Some(t) = tick {
+                // Find the next level before cancelling empties this one.
+                tick = match side {
+                    Side::Buy => self.next_lower_active(&self.bid_bitset, t),
+                    Side::Sell => self.next_higher_active(&self.ask_bitset, t),
+                };
+                let mut idx = match side {
+                    Side::Buy => self.bid_levels[t].head,
+                    Side::Sell => self.ask_levels[t].head,
+                };
+                while idx != NIL {
+                    // Copy the order out: cancelling it clears its links.
+                    let order = *self.pool.get(idx);
+                    if account.is_none_or(|account| account == order.account) {
+                        self.id_map.remove(order.order_id);
+                        self.remove_cancelled(idx, sink);
+                        cancelled += 1;
+                    }
+                    idx = order.next_idx;
+                }
+            }
+        }
+        sink.emit(Event::MassCancelled {
+            account,
+            cancelled_orders: cancelled,
+        });
+        cancelled
     }
 
     /// Lowers a resting order's quantity by `reduce_by`, keeping its place in
@@ -1452,6 +1510,66 @@ mod tests {
             (false, rejected(2, CancelRejectReason::ZeroQuantity))
         );
         assert_eq!(engine.depth_at(Side::Buy, 90), 5);
+    }
+
+    #[test]
+    fn cancel_account_removes_only_that_accounts_orders_in_book_order() {
+        let mut engine = Engine::new(16);
+        let mut events = Vec::new();
+        for (order_id, account, side, tick) in [
+            (1, 1, Side::Buy, 100),
+            (2, 2, Side::Buy, 100),
+            (3, 1, Side::Buy, 101),
+            (4, 1, Side::Sell, 105),
+            (5, 2, Side::Sell, 106),
+        ] {
+            let order = NewOrder::limit(order_id, side, tick, 5).with_account(account);
+            engine.submit_order(order, &mut events);
+        }
+        events.clear();
+        assert_eq!(engine.cancel_account(1, &mut events), 3);
+        let cancelled: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::OrderCancelled { order_id, .. } => Some(*order_id),
+                _ => None,
+            })
+            .collect();
+        // Best bid first, then the asks.
+        assert_eq!(cancelled, [3, 1, 4]);
+        assert_eq!(
+            events.last(),
+            Some(&Event::MassCancelled {
+                account: Some(1),
+                cancelled_orders: 3
+            })
+        );
+        assert_eq!(engine.live_order_count(), 2);
+        assert_eq!(engine.best_bid(), Some(100));
+        assert_eq!(engine.depth_at(Side::Buy, 100), 5);
+        assert_eq!(engine.resting_order(1), None);
+    }
+
+    #[test]
+    fn cancel_all_empties_the_book_and_always_reports() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 5);
+        place(&mut engine, 2, Side::Sell, 105, 5);
+        let mut events = Vec::new();
+        assert_eq!(engine.cancel_all(&mut events), 2);
+        assert_eq!(engine.live_order_count(), 0);
+        assert_eq!((engine.best_bid(), engine.best_ask()), (None, None));
+
+        // On an empty book the summary still arrives.
+        events.clear();
+        assert_eq!(engine.cancel_all(&mut events), 0);
+        assert_eq!(
+            events,
+            vec![Event::MassCancelled {
+                account: None,
+                cancelled_orders: 0
+            }]
+        );
     }
 
     #[test]

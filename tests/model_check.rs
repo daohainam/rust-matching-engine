@@ -279,6 +279,25 @@ impl ReferenceBook {
         (true, vec![event])
     }
 
+    /// Cancels the resting orders of `account` (or every resting order),
+    /// bids best first, then asks best first, oldest first at each price.
+    fn mass_cancel(&mut self, account: Option<u32>) -> Vec<Event> {
+        let ids: Vec<u64> = self
+            .bids
+            .iter()
+            .rev()
+            .chain(self.asks.iter())
+            .flat_map(|(_, queue)| queue.iter().map(|&(id, _)| id))
+            .filter(|id| account.is_none_or(|account| self.accounts[id] == account))
+            .collect();
+        let mut events: Vec<Event> = ids.iter().flat_map(|&id| self.cancel(id).1).collect();
+        events.push(Event::MassCancelled {
+            account,
+            cancelled_orders: ids.len() as u64,
+        });
+        events
+    }
+
     fn resting_order(&self, order_id: u64) -> Option<RestingOrder> {
         let &(side, price_tick) = self.live.get(&order_id)?;
         let &(_, remaining_qty) = self.book(side)[&price_tick]
@@ -337,6 +356,7 @@ struct Coverage {
     post_only_rejections: usize,
     reductions: usize,
     self_trades_prevented: usize,
+    mass_cancelled_orders: u64,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
@@ -346,7 +366,14 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
     let mut events = Vec::new();
 
     for step in 0..ops {
-        let op = generator.next_op();
+        // Now and then, a mass cancel of one account or of the whole book.
+        let op = match step % 1_000 {
+            999 if step % 5_000 == 4_999 => Op::CancelAll,
+            999 => Op::CancelAccount {
+                account: (step / 1_000 % 4) as u32,
+            },
+            _ => generator.next_op(),
+        };
         let context = || format!("seed {seed}, step {step}: {op:?}");
         events.clear();
         let expected = match op {
@@ -369,6 +396,14 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
                 let (expected_found, expected) = model.reduce(order_id, reduce_by);
                 assert_eq!(found, expected_found, "{}", context());
                 expected
+            }
+            Op::CancelAccount { account } => {
+                engine.cancel_account(account, &mut events);
+                model.mass_cancel(Some(account))
+            }
+            Op::CancelAll => {
+                engine.cancel_all(&mut events);
+                model.mass_cancel(None)
             }
         };
 
@@ -398,15 +433,16 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         }
 
         let taker_id = match op {
-            Op::Place(order) => order.order_id,
-            Op::Cancel { order_id } | Op::Reduce { order_id, .. } => order_id,
+            Op::Place(order) => Some(order.order_id),
+            Op::Cancel { order_id } | Op::Reduce { order_id, .. } => Some(order_id),
+            Op::CancelAccount { .. } | Op::CancelAll => None,
         };
         // The order this request named, and every maker it touched.
         let touched = events.iter().filter_map(|e| match e {
             Event::Trade { maker_order_id, .. } => Some(*maker_order_id),
             _ => None,
         });
-        for order_id in std::iter::once(taker_id).chain(touched) {
+        for order_id in taker_id.into_iter().chain(touched) {
             assert_eq!(
                 engine.resting_order(order_id),
                 model.resting_order(order_id),
@@ -430,11 +466,17 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         }
         coverage.maker_partial_fills += events
             .iter()
-            .filter(|e| matches!(e, Event::OrderPartiallyFilled { order_id, .. } if *order_id != taker_id))
+            .filter(|e| matches!(e, Event::OrderPartiallyFilled { order_id, .. } if Some(*order_id) != taker_id))
             .count();
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
         coverage.expired_remainders +=
             usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        if let Some(Event::MassCancelled {
+            cancelled_orders, ..
+        }) = events.last()
+        {
+            coverage.mass_cancelled_orders += cancelled_orders;
+        }
         coverage.self_trades_prevented += events
             .iter()
             .filter(|e| matches!(e, Event::SelfTradePrevented { .. }))
@@ -466,6 +508,10 @@ fn assert_all_paths_hit(coverage: &Coverage) {
     assert!(
         coverage.self_trades_prevented > 0,
         "no self-trades prevented"
+    );
+    assert!(
+        coverage.mass_cancelled_orders > 0,
+        "no orders cancelled by a mass cancel"
     );
 }
 
