@@ -61,9 +61,9 @@ Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`,
 but **not** on `ringbuffer` or `wal`. Those two are independent building blocks
 that *you* wire around the engine (chapters 8 and 9 show how).
 
-The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the seven names most
-users need: `Engine`, `RestingOrder`, `Event`, `EventSink`, `EventBatch`,
-`RejectReason` and `Side`.
+The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the nine names most
+users need: `Engine`, `OrderType`, `RestingOrder`, `Event`, `EventSink`,
+`EventBatch`, `RejectReason`, `CancelRejectReason` and `Side`.
 
 ## 2.3 The `Engine` struct, field by field
 
@@ -177,7 +177,10 @@ sequenceDiagram
 ```
 
 (The diagram is simplified: the exact order and all failure branches are in
-[chapter 6](06-matching-algorithm.md).)
+[chapter 6](06-matching-algorithm.md). It shows a limit order. `submit_order`
+takes an `OrderType` too: an immediate-or-cancel or market order skips the
+"quantity left over" box and reports `OrderExpired` instead, and a post-only
+order that would trade is refused during validation.)
 
 The engine does not decide where events go. It hands each one, at the moment it
 happens, to the **sink** the caller passed in: a `Vec<Event>`, a closure, or a
@@ -263,7 +266,8 @@ part of why the design is fast.
   +-----------------+              +------------------------+          +-------------+
 ```
 
-The mutating methods (`process_order` and `cancel_order`) take `&mut self`, so
+The mutating methods (`submit_order`, `process_order`, `reduce_order` and
+`cancel_order`) take `&mut self`, so
 Rust itself guarantees that only one caller touches the book at a time. There
 are **no locks anywhere** in the engine. The ring buffer applies the same idea
 to the queue: it hands out exactly one `Producer` and one `Consumer`, so "one
@@ -280,7 +284,8 @@ instruments), each on its own core.
 
 ## 2.8 What "zero allocation" does and does not mean
 
-It means **no heap allocation inside `process_order` and `cancel_order`**, and
+It means **no heap allocation inside `submit_order`, `process_order`,
+`reduce_order` and `cancel_order`**, and
 this is tested (see [chapter 10](10-testing-and-performance.md)).
 
 These things *do* allocate, and that is fine because they are not on the hot path:
