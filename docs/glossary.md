@@ -28,12 +28,14 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | FOK (fill-or-kill) | An order that must fill completely at once, or not at all. Not implemented here (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Gateway | The part of an exchange that receives orders from the network, checks them, and passes them on to the matching engine. | [2](02-architecture.md) |
 | Instrument | The thing being traded: one stock, one future, one currency pair. Each instrument has its own book. | [1](01-order-book-basics.md) |
-| IOC (immediate-or-cancel) | An order that trades what it can at once; any remainder is cancelled instead of resting. Not implemented here (exercise in ch. 11). | [1](01-order-book-basics.md) |
-| Limit order | An order with a worst acceptable price: "buy at this price or lower", "sell at this price or higher". The only order type this engine supports. | [1](01-order-book-basics.md) |
+| IOC (immediate-or-cancel) | An order that trades what it can at once; any remainder expires instead of resting (`OrderType::ImmediateOrCancel`, reported with `OrderExpired`). | [1](01-order-book-basics.md) |
+| Limit order | An order with a worst acceptable price: "buy at this price or lower", "sell at this price or higher". Its remainder rests in the book. | [1](01-order-book-basics.md) |
 | Liquidity | How much can be traded without moving the price much. Resting orders *provide* liquidity; takers *remove* it. | [1](01-order-book-basics.md) |
 | Maker | The resting order in a trade. It was in the book first. | [1](01-order-book-basics.md) |
 | Market data | The public feed of trades and book changes that an exchange publishes. | [2](02-architecture.md) |
+| Market order | An order with no price of its own: it trades at whatever prices the book offers, and its remainder expires. Real exchanges limit how far it may sweep (a price band); this engine does not (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Matching engine | The component that pairs buy and sell orders and decides the trade price. This whole repository. | [1](01-order-book-basics.md) |
+| Post-only | A limit order that must not trade on arrival: if its price reaches the other side, it is rejected instead. Market makers use it to be sure they only add liquidity. | [1](01-order-book-basics.md) |
 | Price level | All orders resting at one price on one side, kept as a FIFO queue. | [1](01-order-book-basics.md) |
 | Price-time priority | Matching rule: the better price trades first; at the same price, the order that arrived earlier trades first. | [1](01-order-book-basics.md) |
 | Resting order | An order that is waiting in the book because it could not trade (fully) when it arrived. | [1](01-order-book-basics.md) |
