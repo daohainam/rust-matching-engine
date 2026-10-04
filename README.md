@@ -43,8 +43,8 @@ for event in &events {
 Output:
 
 ```text
-OrderAccepted { order_id: 2 }
-Trade { maker_order_id: 1, taker_order_id: 2, price_tick: 100, qty: 10 }
+OrderAccepted { order_id: 2, side: Buy, price_tick: 100, qty: 10 }
+Trade { trade_id: 1, maker_order_id: 1, taker_order_id: 2, taker_side: Buy, price_tick: 100, qty: 10 }
 OrderFilled { order_id: 1 }
 OrderFilled { order_id: 2 }
 ```
@@ -52,7 +52,10 @@ OrderFilled { order_id: 2 }
 The last argument of `process_order` and `cancel_order` is an **event sink**:
 anything that implements `EventSink`, such as a `Vec<Event>`, a closure, or the
 fixed-capacity `EventBatch`. The engine streams every report into it and never
-allocates by itself ([chapter 7](docs/07-events.md)).
+allocates by itself. Acceptances and cancels carry the order's side, price and
+quantity, and every trade carries its aggressor side and a `trade_id`, so a
+downstream system can follow the book from events alone
+([chapter 7](docs/07-events.md)).
 
 More of the API:
 
@@ -71,8 +74,10 @@ assert_eq!(engine.best_bid(), Some(100)); // highest resting buy tick
 assert_eq!(engine.best_ask(), None); // lowest resting sell tick
 assert_eq!(engine.depth_at(Side::Buy, 100), 10); // total quantity at one tick
 assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels first
+assert_eq!(engine.resting_order(1).map(|o| o.remaining_qty), Some(10)); // order status
 assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
 assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
+assert_eq!(events.last(), Some(&Event::CancelRejected { order_id: 1 })); // and says so
 ```
 
 Prices are **integer ticks** in `0..4096`; converting to and from real prices is
@@ -155,8 +160,8 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, Event, EventBatch, EventSink, RejectReason, Side
-  engine.rs      matching core: process_order, cancel_order, depth queries
+  lib.rs         crate root; re-exports Engine, RestingOrder, Event, EventBatch, EventSink, RejectReason, Side
+  engine.rs      matching core: process_order, cancel_order, order lookup, depth queries
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
   bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
   hashmap.rs     seeded open-addressing hash map (order id -> arena slot)
