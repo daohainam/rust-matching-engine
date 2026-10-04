@@ -201,5 +201,6 @@ impl TempFile {
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(matching_engine::wal::lock_path(&self.0));
     }
 }

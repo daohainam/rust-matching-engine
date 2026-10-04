@@ -96,14 +96,28 @@
 //!   the first invalid record as an unfinished tail and discards it. That is
 //!   right after a crash, but would also drop valid records that follow a
 //!   corrupted one.
-//! - **One writer per file.** `create` refuses an existing file, but nothing
-//!   stops a second `open_append` on a log that a live writer is using; on
-//!   Linux that truncates the file under the first writer's mapping.
+//!
+//! # One writer per log
+//!
+//! A second writer would corrupt a live log (on Linux, `open_append`
+//! truncates the file under the first writer's mapping). So every writer
+//! holds an exclusive lock on a small companion file, `<log>.lock` (see
+//! [`lock_path`]), for as long as it lives, and [`WalWriter::create`] and
+//! [`WalWriter::open_append`] fail with [`io::ErrorKind::WouldBlock`] while
+//! another writer holds it. The operating system releases the lock when the
+//! writer is dropped or its process dies, so a crash never leaves the log
+//! locked. The lock file itself stays on disk; it holds nothing.
+//!
+//! Why not lock the log itself? On Windows a file lock is *mandatory*: it
+//! would stop [`read_all`] from reading a log that a writer is using, which
+//! this module promises is safe. The lock is also only a lock between
+//! writers that use this module: it does not stop other programs from
+//! changing the file.
 
 use memmap2::{MmapMut, MmapOptions};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::engine::{Engine, NewOrder, OrderType, SelfTradePrevention};
 use crate::events::EventSink;
@@ -487,6 +501,33 @@ fn valid_records(body: &[u8]) -> impl Iterator<Item = WalRecord> + '_ {
         .map_while(|record| WalRecord::decode(record).ok())
 }
 
+/// The lock file that guards the log at `path`: the same path with
+/// `.lock` appended. See [One writer per log](self#one-writer-per-log).
+pub fn lock_path<P: AsRef<Path>>(path: P) -> PathBuf {
+    let mut name = path.as_ref().as_os_str().to_owned();
+    name.push(".lock");
+    name.into()
+}
+
+/// Takes the exclusive lock that makes the caller the only writer of the
+/// log at `path`, or fails with [`io::ErrorKind::WouldBlock`].
+fn lock_log(path: &Path) -> io::Result<File> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path(path))?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!("another writer is using {}", path.display()),
+        )),
+        Err(TryLockError::Error(err)) => Err(err),
+    }
+}
+
 /// Append-only memory-mapped WAL writer.
 ///
 /// The backing file is preallocated and grown (then remapped) only when
@@ -497,6 +538,9 @@ pub struct WalWriter {
     /// Always `Some` while the writer is usable; taken by `finalize`/`Drop`.
     mmap: Option<MmapMut>,
     file: File,
+    /// The locked `<log>.lock` file; closing it, when the writer is
+    /// dropped, releases the lock.
+    _lock: File,
     next_offset: usize,
     capacity_bytes: usize,
 }
@@ -511,6 +555,9 @@ impl WalWriter {
     /// existing log with [`open_append`](Self::open_append), or delete the
     /// file deliberately before calling `create`.
     ///
+    /// Takes the log's lock first, so it also fails with
+    /// [`io::ErrorKind::WouldBlock`] while another writer holds it.
+    ///
     /// Creation is not atomic: a crash before the header is flushed leaves a
     /// file with a zeroed header, and on Unix the new directory entry is not
     /// synced. See the [module docs](self#durability-and-its-limits).
@@ -520,12 +567,14 @@ impl WalWriter {
         capacity_records: usize,
     ) -> io::Result<Self> {
         check_engine_capacity(engine_capacity)?;
+        let path = path.as_ref();
+        let lock = lock_log(path)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(path)?;
-        let mut writer = Self::map(file, WAL_HEADER_SIZE, capacity_records)?;
+        let mut writer = Self::map(file, lock, WAL_HEADER_SIZE, capacity_records)?;
         writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header(engine_capacity));
         // The header must be durable before any record can be.
         writer.flush()?;
@@ -546,14 +595,19 @@ impl WalWriter {
     /// to find that record. An older log is upgraded to the current
     /// version first, and `engine_capacity` recorded in it (see the
     /// [module docs](self#file-format-version-4)).
-    /// Use one writer per file: opening a log that a live writer is still
-    /// using corrupts it.
+    /// While another writer is using the log, this fails with
+    /// [`io::ErrorKind::WouldBlock`] before touching it (see
+    /// [One writer per log](self#one-writer-per-log)).
     pub fn open_append<P: AsRef<Path>>(
         path: P,
         engine_capacity: usize,
         spare_records: usize,
     ) -> io::Result<Self> {
         check_engine_capacity(engine_capacity)?;
+        let path = path.as_ref();
+        // Lock before reading: the truncation below must never run under a
+        // live writer's mapping.
+        let lock = lock_log(path)?;
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -574,7 +628,7 @@ impl WalWriter {
         // Truncating (no view is mapped yet, which Windows requires) and then
         // re-extending in `map` zero-fills everything after the valid prefix.
         file.set_len(valid_len as u64)?;
-        let mut writer = Self::map(file, valid_len, spare_records)?;
+        let mut writer = Self::map(file, lock, valid_len, spare_records)?;
         if header.version != WAL_FORMAT_VERSION {
             // Every older record is also valid in the current format, so
             // only the header changes: the version, and the capacity an
@@ -588,7 +642,7 @@ impl WalWriter {
 
     /// Sizes `file` to hold at least `spare_records` records after
     /// `next_offset` and maps it read-write.
-    fn map(file: File, next_offset: usize, spare_records: usize) -> io::Result<Self> {
+    fn map(file: File, lock: File, next_offset: usize, spare_records: usize) -> io::Result<Self> {
         let capacity_bytes = spare_records
             .max(1)
             .checked_mul(WAL_RECORD_SIZE)
@@ -604,6 +658,7 @@ impl WalWriter {
         Ok(Self {
             mmap: Some(mmap),
             file,
+            _lock: lock,
             next_offset,
             capacity_bytes,
         })
@@ -795,6 +850,7 @@ mod tests {
     impl Drop for TempPath {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_file(lock_path(&self.0));
         }
     }
 
@@ -1119,6 +1175,33 @@ mod tests {
             .err()
             .expect("an unknown capacity must be refused");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_second_writer_is_refused_while_the_first_is_live() {
+        let path = TempPath::new("lock");
+        let mut first = WalWriter::create(&path.0, TEST_CAPACITY, 4).unwrap();
+        first.append(sample(0)).unwrap();
+
+        for second in [
+            WalWriter::open_append(&path.0, TEST_CAPACITY, 4),
+            WalWriter::create(&path.0, TEST_CAPACITY, 4),
+        ] {
+            let err = second.err().expect("a second writer must be refused");
+            assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+        }
+
+        // The refused writers did not touch the log: the first carries on.
+        first.append(sample(1)).unwrap();
+        first.finalize().unwrap();
+        assert_eq!(read_all(&path.0).unwrap(), [sample(0), sample(1)]);
+
+        // With the first writer gone, the lock is free again.
+        let mut next = WalWriter::open_append(&path.0, TEST_CAPACITY, 4).unwrap();
+        next.append(sample(2)).unwrap();
+        next.finalize().unwrap();
+        assert_eq!(read_all(&path.0).unwrap().len(), 3);
     }
 
     #[test]
