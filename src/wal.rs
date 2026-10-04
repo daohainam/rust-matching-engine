@@ -823,6 +823,51 @@ where
     Ok(engine)
 }
 
+/// Brings an engine restored from a checkpoint up to date: applies to
+/// `engine` every record of the log whose sequence number is
+/// `first_sequence` or more, with [`WalRecord::apply_to`], and returns how
+/// many it applied.
+///
+/// Pass the checkpoint's [`next_sequence`](crate::Checkpoint::next_sequence):
+/// the records before it are already in the snapshot. That relies on the
+/// sequence numbers growing with every record, as they do when requests
+/// are numbered 0, 1, 2, ... (chapter 9). Fails with
+/// [`io::ErrorKind::InvalidInput`], before applying anything, if the log
+/// records a capacity other than the engine's.
+pub fn replay_from<P, S>(
+    path: P,
+    engine: &mut Engine,
+    first_sequence: u64,
+    sink: &mut S,
+) -> io::Result<usize>
+where
+    P: AsRef<Path>,
+    S: EventSink + ?Sized,
+{
+    let contents = read(path)?;
+    if let Some(capacity) = contents.engine_capacity {
+        if capacity != engine.capacity() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "log was written for an engine of capacity {capacity}, not {}",
+                    engine.capacity()
+                ),
+            ));
+        }
+    }
+    let mut applied = 0;
+    for record in contents
+        .records
+        .iter()
+        .filter(|record| record.sequence >= first_sequence)
+    {
+        record.apply_to(engine, sink);
+        applied += 1;
+    }
+    Ok(applied)
+}
+
 /// Reads every valid record from a WAL file, like [`read`] without the
 /// header's engine capacity.
 pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
@@ -1203,6 +1248,40 @@ mod tests {
         next.append(sample(2)).unwrap();
         next.finalize().unwrap();
         assert_eq!(read_all(&path.0).unwrap().len(), 3);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn replay_from_finishes_what_a_snapshot_started() {
+        let path = TempPath::new("replay_from");
+        let mut live = Engine::new(TEST_CAPACITY);
+        let mut writer = WalWriter::create(&path.0, TEST_CAPACITY, 4).unwrap();
+        let mut snapshot = None;
+        for sequence in 0..8u64 {
+            let side = if sequence % 2 == 0 {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            let record = WalRecord::new_order(sequence + 1, side, 100, 1 + sequence, sequence);
+            writer.append(record).unwrap();
+            record.apply_to(&mut live, &mut |_: Event| {});
+            if sequence == 4 {
+                snapshot = Some(live.snapshot());
+            }
+        }
+        writer.finalize().unwrap();
+
+        let mut restored = Engine::restore(&snapshot.unwrap()).unwrap();
+        let applied = replay_from(&path.0, &mut restored, 5, &mut |_: Event| {}).unwrap();
+        assert_eq!(applied, 3);
+        assert_eq!(restored.snapshot(), live.snapshot());
+
+        let mut wrong_size = Engine::new(TEST_CAPACITY + 1);
+        let err = replay_from(&path.0, &mut wrong_size, 0, &mut |_: Event| {})
+            .expect_err("another capacity must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(wrong_size.live_order_count(), 0, "nothing was applied");
     }
 
     #[test]

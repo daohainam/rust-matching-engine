@@ -45,6 +45,8 @@ jobs:
       - run: cargo run --release --locked --example pipeline
       # Chapter 1's worked example; its assertions pin the book after each step.
       - run: cargo run --release --locked --example walkthrough
+      # Chapter 9's recovery from a checkpoint and the end of the log.
+      - run: cargo run --release --locked --example checkpoint
 
   msrv:
     name: MSRV (1.89)

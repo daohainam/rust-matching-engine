@@ -125,6 +125,15 @@ impl std::fmt::Display for SnapshotError {
 
 impl std::error::Error for SnapshotError {}
 
+/// Lets recovery code that already returns [`io::Result`] use `?` on
+/// [`Engine::restore`](crate::Engine::restore): a snapshot that does not
+/// restore is invalid data.
+impl From<SnapshotError> for io::Error {
+    fn from(err: SnapshotError) -> Self {
+        io::Error::new(io::ErrorKind::InvalidData, err)
+    }
+}
+
 /// A [`Snapshot`] on disk, and how far into the write-ahead log it reaches.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Checkpoint {
