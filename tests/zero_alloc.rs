@@ -1,7 +1,7 @@
-//! Verifies that `Engine::process_order` and `Engine::cancel_order` never
-//! allocate on the heap, by installing a counting global allocator for the
-//! whole test binary and asserting the allocation counter is unchanged
-//! across a sustained processing loop.
+//! Verifies that `Engine::process_order`, `Engine::reduce_order` and
+//! `Engine::cancel_order` never allocate on the heap, by installing a
+//! counting global allocator for the whole test binary and asserting the
+//! allocation counter is unchanged across a sustained processing loop.
 //!
 //! The counter is process-wide: it sees allocations from *every* thread, not
 //! only the one under test. That is sound only while this is the binary's
@@ -66,6 +66,11 @@ fn hot_path_performs_zero_heap_allocations() {
         events.clear();
         engine.process_order(i, Side::Buy, tick, 10, &mut events);
         std::hint::black_box(&events);
+    }
+    // Reductions that keep the orders resting.
+    for i in 5_000..10_000u64 {
+        events.clear();
+        std::hint::black_box(engine.reduce_order(i, 1, &mut events));
     }
     // Cancellations across the resting book.
     for i in 5_000..10_000u64 {

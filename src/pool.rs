@@ -275,9 +275,11 @@ impl PriceLevel {
             .expect("PriceLevel::total_qty underflow: bookkeeping invariant violated");
     }
 
-    /// Reduces the resting quantity of the (head) order that was partially
-    /// filled by `delta`. Caller is responsible for verifying `idx` belongs
-    /// to this level and that `delta` does not exceed the order's remainder.
+    /// Reduces the resting quantity of an order in this level by `delta`:
+    /// a head order that was partially filled, or any order reduced on
+    /// request. Its place in the queue does not change. Caller is
+    /// responsible for verifying `idx` belongs to this level and that
+    /// `delta` does not exceed the order's remainder.
     #[inline(always)]
     pub fn reduce_qty(&mut self, pool: &mut OrderPool, idx: u32, delta: u64) {
         let order = pool.get_mut(idx);

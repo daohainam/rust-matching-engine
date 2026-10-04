@@ -23,13 +23,13 @@
 //!
 //! | Offset | Size | Field                                          |
 //! |-------:|-----:|------------------------------------------------|
-//! | 0      | 1    | kind: `1` = new order, `2` = cancel            |
+//! | 0      | 1    | kind: `1` = new order, `2` = cancel, `3` = reduce |
 //! | 1      | 1    | side: `0` = buy, `1` = sell (`0` for cancels)  |
 //! | 2      | 1    | order type, see below (`0` for cancels)        |
 //! | 3      | 1    | reserved, zero                                 |
 //! | 4      | 4    | price tick (`0` for cancels)                   |
 //! | 8      | 8    | order id                                       |
-//! | 16     | 8    | quantity (`0` for cancels)                     |
+//! | 16     | 8    | quantity; the reduction for reduce records (`0` for cancels) |
 //! | 24     | 8    | caller-provided sequence number                |
 //! | 32     | 4    | checksum of bytes `0..32`                      |
 //! | 36     | 4    | reserved, zero                                 |
@@ -103,10 +103,12 @@ const CHECKSUMMED_LEN: usize = 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WalRecordKind {
-    /// A request to submit a new limit order.
+    /// A request to submit a new order.
     NewOrder = 1,
     /// A request to cancel an existing order.
     Cancel = 2,
+    /// A request to lower a resting order's quantity by `qty`.
+    Reduce = 3,
 }
 
 /// One logged engine request. See the [module docs](self) for its encoding.
@@ -122,7 +124,8 @@ pub struct WalRecord {
     pub order_id: u64,
     /// Dense integer price tick; zero for cancellation records.
     pub price_tick: u32,
-    /// Requested order quantity; zero for cancellation records.
+    /// Requested order quantity, or the reduction for reduce records; zero
+    /// for cancellation records.
     pub qty: u64,
     /// Caller-provided sequence number for deterministic request ordering.
     pub sequence: u64,
@@ -184,6 +187,16 @@ impl WalRecord {
         }
     }
 
+    /// Describes a request to lower a resting order's quantity by
+    /// `reduce_by`; side, order type and price are not used.
+    pub fn reduce(order_id: u64, reduce_by: u64, sequence: u64) -> Self {
+        Self {
+            kind: WalRecordKind::Reduce,
+            qty: reduce_by,
+            ..Self::cancel(order_id, sequence)
+        }
+    }
+
     /// Describes a cancellation request; fields not used by cancellation are zeroed.
     pub fn cancel(order_id: u64, sequence: u64) -> Self {
         Self {
@@ -225,6 +238,7 @@ impl WalRecord {
         let kind = match bytes[0] {
             1 => WalRecordKind::NewOrder,
             2 => WalRecordKind::Cancel,
+            3 => WalRecordKind::Reduce,
             other => return Err(WalDecodeError::InvalidKind(other)),
         };
         let side = match bytes[1] {
@@ -567,6 +581,7 @@ mod tests {
     fn sample(i: u64) -> WalRecord {
         let order_type = ORDER_TYPES[(i / 3 % 4) as usize];
         match i % 3 {
+            2 if i.is_multiple_of(2) => WalRecord::reduce(i - 1, i % 7 + 1, i),
             2 => WalRecord::cancel(i - 1, i),
             0 => WalRecord::new_order(i, Side::Buy, 100 + i as u32, 10 + i, i),
             _ => WalRecord::new_order_with_type(

@@ -77,7 +77,7 @@ assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels fir
 assert_eq!(engine.resting_order(1).map(|o| o.remaining_qty), Some(10)); // order status
 assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
 assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
-assert_eq!(events.last(), Some(&Event::CancelRejected { order_id: 1 })); // and says so
+assert!(matches!(events.last(), Some(Event::CancelRejected { order_id: 1, .. }))); // and says so
 ```
 
 Prices are **integer ticks** in `0..4096`; converting to and from real prices is

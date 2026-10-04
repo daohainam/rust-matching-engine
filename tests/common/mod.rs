@@ -53,6 +53,10 @@ pub enum Op {
     Cancel {
         order_id: u64,
     },
+    Reduce {
+        order_id: u64,
+        reduce_by: u64,
+    },
 }
 
 /// Most orders land in this narrow band so they cross each other often.
@@ -71,7 +75,8 @@ pub fn watched_ticks() -> impl Iterator<Item = u32> {
 const RECENT_WINDOW: usize = 256;
 
 /// Produces a reproducible request stream: mostly limit orders in [`BAND`],
-/// some other order types, some cancels, and occasional edge inputs (zero quantity, out-of-range
+/// some other order types, some cancels and reductions, and occasional edge
+/// inputs (zero quantity, out-of-range
 /// ticks, the reserved ID, reused IDs, deep sweeps, oversized quantities).
 pub struct OpGenerator {
     rng: Rng,
@@ -97,6 +102,14 @@ impl OpGenerator {
                 5..=14 => u64::MAX - 1 - self.rng.below(1_000), // never issued
                 _ => self.recent_id(),                          // live, filled, or gone
             };
+            if self.rng.percent(25) {
+                // Zero now and then, and often the whole remainder or more.
+                let reduce_by = self.rng.below(60);
+                return Op::Reduce {
+                    order_id,
+                    reduce_by,
+                };
+            }
             return Op::Cancel { order_id };
         }
 

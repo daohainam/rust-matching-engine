@@ -9,7 +9,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
-use matching_engine::{Engine, Event, OrderType, RejectReason, RestingOrder, Side};
+use matching_engine::{
+    CancelRejectReason, Engine, Event, OrderType, RejectReason, RestingOrder, Side,
+};
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
 type Queue = VecDeque<(u64, u64)>;
@@ -175,7 +177,8 @@ impl ReferenceBook {
 
     fn cancel(&mut self, order_id: u64) -> (bool, Vec<Event>) {
         let Some((side, tick)) = self.live.remove(&order_id) else {
-            return (false, vec![Event::CancelRejected { order_id }]);
+            let reason = CancelRejectReason::NotResting;
+            return (false, vec![Event::CancelRejected { order_id, reason }]);
         };
         let book = match side {
             Side::Buy => &mut self.bids,
@@ -195,6 +198,36 @@ impl ReferenceBook {
             side,
             price_tick: tick,
             cancelled_qty,
+        };
+        (true, vec![event])
+    }
+
+    fn reduce(&mut self, order_id: u64, reduce_by: u64) -> (bool, Vec<Event>) {
+        let rejected = |reason| (false, vec![Event::CancelRejected { order_id, reason }]);
+        if reduce_by == 0 {
+            return rejected(CancelRejectReason::ZeroQuantity);
+        }
+        let Some(&(side, price_tick)) = self.live.get(&order_id) else {
+            return rejected(CancelRejectReason::NotResting);
+        };
+        let book = match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        };
+        let (_, qty) = book
+            .get_mut(&price_tick)
+            .and_then(|queue| queue.iter_mut().find(|(id, _)| *id == order_id))
+            .expect("live order is queued at its level");
+        if reduce_by >= *qty {
+            return self.cancel(order_id);
+        }
+        *qty -= reduce_by;
+        let event = Event::OrderReduced {
+            order_id,
+            side,
+            price_tick,
+            reduced_qty: reduce_by,
+            remaining_qty: *qty,
         };
         (true, vec![event])
     }
@@ -254,6 +287,7 @@ struct Coverage {
     calls_beyond_batch_capacity: usize,
     expired_remainders: usize,
     post_only_rejections: usize,
+    reductions: usize,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
@@ -284,6 +318,15 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
                 coverage.cancels_found += usize::from(found);
                 expected
             }
+            Op::Reduce {
+                order_id,
+                reduce_by,
+            } => {
+                let found = engine.reduce_order(order_id, reduce_by, &mut events);
+                let (expected_found, expected) = model.reduce(order_id, reduce_by);
+                assert_eq!(found, expected_found, "{}", context());
+                expected
+            }
         };
 
         assert_eq!(events, expected, "{}", context());
@@ -312,7 +355,9 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         }
 
         let taker_id = match op {
-            Op::Place { order_id, .. } | Op::Cancel { order_id } => order_id,
+            Op::Place { order_id, .. } | Op::Cancel { order_id } | Op::Reduce { order_id, .. } => {
+                order_id
+            }
         };
         // The order this request named, and every maker it touched.
         let touched = events.iter().filter_map(|e| match e {
@@ -348,6 +393,8 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
         coverage.expired_remainders +=
             usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        coverage.reductions +=
+            usize::from(matches!(events.as_slice(), [Event::OrderReduced { .. }]));
         coverage.post_only_rejections += usize::from(matches!(
             events.as_slice(),
             [Event::OrderRejected {
@@ -369,6 +416,7 @@ fn assert_all_paths_hit(coverage: &Coverage) {
     );
     assert!(coverage.expired_remainders > 0, "no expired remainders");
     assert!(coverage.post_only_rejections > 0, "no post-only rejections");
+    assert!(coverage.reductions > 0, "no reductions");
 }
 
 #[test]

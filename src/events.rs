@@ -104,10 +104,23 @@ pub enum Event {
     /// alone (no `OrderAccepted`); a remainder that cannot rest comes after
     /// `OrderAccepted`. See [`RejectReason`].
     OrderRejected { order_id: u64, reason: RejectReason },
-    /// A cancel request named no resting order: the ID was never accepted,
-    /// or the order has already been filled, cancelled or had its remainder
-    /// rejected. The book is unchanged.
-    CancelRejected { order_id: u64 },
+    /// A resting order's quantity was lowered on request; it keeps its place
+    /// in the queue. `side` and `price_tick` say where it rests,
+    /// `reduced_qty` how much left the book and `remaining_qty` how much is
+    /// still resting.
+    OrderReduced {
+        order_id: u64,
+        side: Side,
+        price_tick: u32,
+        reduced_qty: u64,
+        remaining_qty: u64,
+    },
+    /// A cancel or reduce request was refused; `reason` says why. The book
+    /// is unchanged.
+    CancelRejected {
+        order_id: u64,
+        reason: CancelRejectReason,
+    },
 }
 
 /// Why an order was rejected.
@@ -137,6 +150,16 @@ pub enum RejectReason {
     /// The remainder could not rest: the total quantity at its price level
     /// would no longer fit in a `u64`.
     LevelQuantityOverflow,
+}
+
+/// Why a cancel or reduce request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelRejectReason {
+    /// No resting order has this ID: it was never accepted, or the order
+    /// has already been filled, cancelled or had its remainder rejected.
+    NotResting,
+    /// A reduce request asked to remove zero quantity.
+    ZeroQuantity,
 }
 
 /// Receives the events produced by one engine call, in the order they occur.

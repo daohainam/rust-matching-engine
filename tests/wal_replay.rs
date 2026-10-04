@@ -21,6 +21,9 @@ fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
         WalRecordKind::Cancel => {
             engine.cancel_order(record.order_id, events);
         }
+        WalRecordKind::Reduce => {
+            engine.reduce_order(record.order_id, record.qty, events);
+        }
     }
 }
 
@@ -47,6 +50,10 @@ fn replaying_the_wal_reproduces_every_event() {
                 order_id, side, order_type, price_tick, qty, sequence,
             ),
             Op::Cancel { order_id } => WalRecord::cancel(order_id, sequence),
+            Op::Reduce {
+                order_id,
+                reduce_by,
+            } => WalRecord::reduce(order_id, reduce_by, sequence),
         };
         // Write-ahead: the request is logged before the engine applies it.
         writer.append(record).unwrap();

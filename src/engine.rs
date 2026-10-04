@@ -8,7 +8,7 @@
 //! caller-supplied [`EventSink`] instead of being collected internally.
 
 use crate::bitset::{TwoLevelBitset, TICKS};
-use crate::events::{Event, EventSink, RejectReason};
+use crate::events::{CancelRejectReason, Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side};
 
@@ -555,15 +555,19 @@ impl Engine {
     /// price-level FIFO queue. If it was the last order at that price, the
     /// price is removed from the active-level bitset. When an order was found
     /// and removed, `OrderCancelled` is emitted to `sink` and `true` is
-    /// returned. Otherwise `CancelRejected` is emitted, the book is
-    /// unchanged and the result is `false`, so the event stream records
+    /// returned. Otherwise `CancelRejected` (reason
+    /// [`NotResting`](CancelRejectReason::NotResting)) is emitted, the book
+    /// is unchanged and the result is `false`, so the event stream records
     /// every cancel request either way.
     ///
     /// Lookup and unlink are constant-time in the usual case; hash-table
     /// probing can require additional work when resolving collisions.
     pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
         let Some(idx) = self.id_map.remove(order_id) else {
-            sink.emit(Event::CancelRejected { order_id });
+            sink.emit(Event::CancelRejected {
+                order_id,
+                reason: CancelRejectReason::NotResting,
+            });
             return false;
         };
         let order = *self.pool.get(idx);
@@ -589,6 +593,59 @@ impl Engine {
             side: order.side,
             price_tick: order.price_tick,
             cancelled_qty: order.remaining_qty,
+        });
+        true
+    }
+
+    /// Lowers a resting order's quantity by `reduce_by`, keeping its place in
+    /// the queue.
+    ///
+    /// A smaller order is never more attractive to trade with, so it keeps
+    /// its time priority. (Raising the quantity would jump the queue: cancel
+    /// and submit a new order for that.) The level's total drops with it.
+    ///
+    /// - If `reduce_by` is less than the remaining quantity, `OrderReduced`
+    ///   is emitted.
+    /// - If it is the remaining quantity or more, the order is cancelled
+    ///   exactly as by [`cancel_order`](Self::cancel_order), and
+    ///   `OrderCancelled` is emitted.
+    /// - If `reduce_by` is zero, or no resting order has this ID,
+    ///   `CancelRejected` says which, checked in that order, and the book is
+    ///   unchanged.
+    ///
+    /// Returns whether the order was reduced or cancelled. Like a cancel,
+    /// this is one hash lookup and O(1) work, and it does not allocate.
+    pub fn reduce_order<S: EventSink + ?Sized>(
+        &mut self,
+        order_id: u64,
+        reduce_by: u64,
+        sink: &mut S,
+    ) -> bool {
+        let reject = |sink: &mut S, reason| {
+            sink.emit(Event::CancelRejected { order_id, reason });
+            false
+        };
+        if reduce_by == 0 {
+            return reject(sink, CancelRejectReason::ZeroQuantity);
+        }
+        let Some(idx) = self.id_map.get(order_id) else {
+            return reject(sink, CancelRejectReason::NotResting);
+        };
+        let order = *self.pool.get(idx);
+        if reduce_by >= order.remaining_qty {
+            return self.cancel_order(order_id, sink);
+        }
+        let levels = match order.side {
+            Side::Buy => &mut self.bid_levels,
+            Side::Sell => &mut self.ask_levels,
+        };
+        levels[order.price_tick as usize].reduce_qty(&mut self.pool, idx, reduce_by);
+        sink.emit(Event::OrderReduced {
+            order_id,
+            side: order.side,
+            price_tick: order.price_tick,
+            reduced_qty: reduce_by,
+            remaining_qty: order.remaining_qty - reduce_by,
         });
         true
     }
@@ -967,7 +1024,13 @@ mod tests {
         // Cancelling again fails cleanly, and says so in the event stream.
         let (ok, events) = cancel(&mut engine, 3);
         assert!(!ok);
-        assert_eq!(events.as_slice(), &[Event::CancelRejected { order_id: 3 }]);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::CancelRejected {
+                order_id: 3,
+                reason: CancelRejectReason::NotResting
+            }]
+        );
         assert_eq!(engine.live_order_count(), 0);
     }
 
@@ -1023,9 +1086,97 @@ mod tests {
         place(&mut engine, 3, Side::Buy, 100, 5); // fills #1
         let (ok, events) = cancel(&mut engine, 1);
         assert!(!ok);
-        assert_eq!(events.as_slice(), &[Event::CancelRejected { order_id: 1 }]);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::CancelRejected {
+                order_id: 1,
+                reason: CancelRejectReason::NotResting
+            }]
+        );
         assert_eq!(engine.depth_at(Side::Sell, 100), 5);
         assert_eq!(engine.live_order_count(), 1);
+    }
+
+    /// Reduces an order and returns whether it was found plus its events.
+    fn reduce(engine: &mut Engine, order_id: u64, reduce_by: u64) -> (bool, Vec<Event>) {
+        let mut events = Vec::new();
+        let found = engine.reduce_order(order_id, reduce_by, &mut events);
+        (found, events)
+    }
+
+    #[test]
+    fn reducing_an_order_keeps_its_time_priority() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        place(&mut engine, 2, Side::Sell, 100, 5);
+        let (ok, events) = reduce(&mut engine, 1, 3);
+        assert!(ok);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderReduced {
+                order_id: 1,
+                side: Side::Sell,
+                price_tick: 100,
+                reduced_qty: 3,
+                remaining_qty: 2
+            }]
+        );
+        assert_eq!(engine.depth_at(Side::Sell, 100), 7);
+
+        // #1 is still first in line, with its smaller quantity.
+        let events = place(&mut engine, 3, Side::Buy, 100, 4);
+        let fills: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Trade {
+                    maker_order_id,
+                    qty,
+                    ..
+                } => Some((*maker_order_id, *qty)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fills, [(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn reducing_by_the_whole_remainder_cancels_the_order() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 90, 5);
+        let (ok, events) = reduce(&mut engine, 1, 9);
+        assert!(ok);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderCancelled {
+                order_id: 1,
+                side: Side::Buy,
+                price_tick: 90,
+                cancelled_qty: 5
+            }]
+        );
+        assert_eq!(engine.best_bid(), None);
+        assert_eq!(engine.live_order_count(), 0);
+    }
+
+    #[test]
+    fn reduce_rejects_zero_and_orders_that_are_not_resting() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 90, 5);
+        let rejected = |order_id, reason| vec![Event::CancelRejected { order_id, reason }];
+        assert_eq!(
+            reduce(&mut engine, 1, 0),
+            (false, rejected(1, CancelRejectReason::ZeroQuantity))
+        );
+        assert_eq!(
+            reduce(&mut engine, 2, 1),
+            (false, rejected(2, CancelRejectReason::NotResting))
+        );
+        // Zero is checked first, even for an unknown order.
+        assert_eq!(
+            reduce(&mut engine, 2, 0),
+            (false, rejected(2, CancelRejectReason::ZeroQuantity))
+        );
+        assert_eq!(engine.depth_at(Side::Buy, 90), 5);
     }
 
     #[test]
@@ -1240,7 +1391,10 @@ mod tests {
         assert!(!ok);
         assert_eq!(
             events.as_slice(),
-            &[Event::CancelRejected { order_id: u64::MAX }]
+            &[Event::CancelRejected {
+                order_id: u64::MAX,
+                reason: CancelRejectReason::NotResting
+            }]
         );
     }
 

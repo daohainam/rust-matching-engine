@@ -427,6 +427,9 @@ fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
         WalRecordKind::Cancel => {
             engine.cancel_order(record.order_id, events);
         }
+        WalRecordKind::Reduce => {
+            engine.reduce_order(record.order_id, record.qty, events);
+        }
     }
 }
 
