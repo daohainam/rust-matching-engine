@@ -72,8 +72,8 @@ pub fn watched_ticks(ticks: u32) -> impl Iterator<Item = u32> {
 const RECENT_WINDOW: usize = 256;
 
 /// Produces a reproducible request stream: mostly limit orders in [`BAND`],
-/// some other order types, some cancels and reductions, rare mass cancels,
-/// and occasional edge inputs (zero quantity, out-of-range
+/// some other order types, some cancels and reductions, rare mass cancels
+/// and risk limit changes, and occasional edge inputs (zero quantity, out-of-range
 /// ticks, the reserved ID, reused IDs, deep sweeps, oversized quantities).
 pub struct OpGenerator {
     rng: Rng,
@@ -114,6 +114,15 @@ impl OpGenerator {
                     account: self.rng.below(4) as u32,
                 }
             };
+        }
+        // Now and then, new risk limits.
+        if self.issued > 0 && self.rng.below(1_000) < 2 {
+            let max_order_qty = [u64::MAX, 25, 40][self.rng.below(3) as usize];
+            let price_band = [None, Some(0), Some(3)][self.rng.below(3) as usize];
+            return Op::SetRiskLimits(RiskLimits {
+                max_order_qty,
+                price_band,
+            });
         }
         if self.issued > 0 && self.rng.percent(30) {
             let order_id = match self.rng.below(100) {

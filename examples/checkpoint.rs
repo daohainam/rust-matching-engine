@@ -42,7 +42,7 @@ fn main() -> std::io::Result<()> {
     // The live run. Its events would go downstream; here they are dropped.
     let mut ignore = |_: Event| {};
     let mut engine = Engine::new(CAPACITY);
-    let mut wal = WalWriter::create(&log_path, CAPACITY, 16_384)?;
+    let mut wal = WalWriter::create(&log_path, &engine, 16_384)?;
     for sequence in 0..N {
         let record = request(sequence);
         wal.append(record)?; // write-ahead: log first...

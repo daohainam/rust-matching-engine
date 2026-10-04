@@ -9,9 +9,9 @@
 //! with the WAL sequence number it reaches, so recovery is: restore the
 //! checkpoint, then replay only the requests logged after it.
 //!
-//! # Checkpoint file format (version 1)
+//! # Checkpoint file format (version 2)
 //!
-//! Little-endian, like the WAL. A 56-byte header:
+//! Little-endian, like the WAL. An 80-byte header:
 //!
 //! | Offset | Size | Field                                 |
 //! |-------:|-----:|---------------------------------------|
@@ -23,7 +23,13 @@
 //! | 32     | 8    | trades                                |
 //! | 40     | 8    | next WAL sequence (see [`Checkpoint`]) |
 //! | 48     | 8    | number of orders                      |
+//! | 56     | 8    | engine tick count                     |
+//! | 64     | 8    | maximum order quantity                |
+//! | 72     | 8    | price band (`u64::MAX` = none)        |
 //!
+//! Version 1 had a 56-byte header, without the last three fields; it is
+//! still read, with the default 4096 ticks and no risk limits, the only
+//! values it could describe.
 //! then one 32-byte entry per resting order, in the snapshot's order:
 //!
 //! | Offset | Size | Field                         |
@@ -155,17 +161,15 @@ pub struct Checkpoint {
 }
 
 const MAGIC: [u8; 8] = *b"MESNAP\0\0";
-const FORMAT_VERSION: u32 = 1;
-const HEADER_SIZE: usize = 56;
+const FORMAT_VERSION: u32 = 2;
+const HEADER_SIZE: usize = 80;
+/// The header of a version 1 checkpoint, which ends before the tick count.
+const HEADER_SIZE_V1: usize = 56;
 const ENTRY_SIZE: usize = 32;
 const CHECKSUM_SIZE: usize = 8;
 
 /// Writes `checkpoint` to `path` atomically, replacing any checkpoint
 /// already there. See [Writing atomically](self#writing-atomically).
-///
-/// The format has no tick count or risk limit fields yet: a checkpoint is
-/// read back with [`DEFAULT_TICKS`](crate::engine::DEFAULT_TICKS) and no
-/// limits.
 pub fn write_checkpoint<P: AsRef<Path>>(path: P, checkpoint: &Checkpoint) -> io::Result<()> {
     let path = path.as_ref();
     let temporary = temporary_path(path);
@@ -228,8 +232,8 @@ fn encode(checkpoint: &Checkpoint) -> Vec<u8> {
         accepted_orders,
         trades,
         ref orders,
-        tick_count: _, // not in the format yet (see `write_checkpoint`)
-        risk_limits: _,
+        tick_count,
+        risk_limits,
     } = checkpoint.snapshot;
     let mut out = Vec::with_capacity(HEADER_SIZE + orders.len() * ENTRY_SIZE + CHECKSUM_SIZE);
     out.extend_from_slice(&MAGIC);
@@ -241,6 +245,9 @@ fn encode(checkpoint: &Checkpoint) -> Vec<u8> {
         trades,
         checkpoint.next_sequence,
         orders.len() as u64,
+        tick_count as u64,
+        risk_limits.max_order_qty,
+        risk_limits.price_band.map_or(u64::MAX, u64::from),
     ] {
         out.extend_from_slice(&field.to_le_bytes());
     }
@@ -265,16 +272,21 @@ fn decode(bytes: &[u8]) -> io::Result<Checkpoint> {
     let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
     let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
 
-    if bytes.len() < HEADER_SIZE + CHECKSUM_SIZE || bytes[..8] != MAGIC {
+    if bytes.len() < HEADER_SIZE_V1 + CHECKSUM_SIZE || bytes[..8] != MAGIC {
         return Err(invalid("not a checkpoint file"));
     }
-    if u32_at(8) != FORMAT_VERSION || u32_at(12) as usize != ENTRY_SIZE {
+    let header_size = match u32_at(8) {
+        1 => HEADER_SIZE_V1,
+        FORMAT_VERSION => HEADER_SIZE,
+        _ => return Err(invalid("unsupported checkpoint format")),
+    };
+    if u32_at(12) as usize != ENTRY_SIZE || bytes.len() < header_size + CHECKSUM_SIZE {
         return Err(invalid("unsupported checkpoint format"));
     }
     let count = usize::try_from(u64_at(48)).map_err(|_| invalid("too many orders"))?;
     let expected_len = count
         .checked_mul(ENTRY_SIZE)
-        .and_then(|entries| entries.checked_add(HEADER_SIZE + CHECKSUM_SIZE));
+        .and_then(|entries| entries.checked_add(header_size + CHECKSUM_SIZE));
     if expected_len != Some(bytes.len()) {
         return Err(invalid("checkpoint file has the wrong length"));
     }
@@ -283,7 +295,21 @@ fn decode(bytes: &[u8]) -> io::Result<Checkpoint> {
         return Err(invalid("checkpoint checksum mismatch"));
     }
 
-    let (entries, _) = bytes[HEADER_SIZE..body.len()].as_chunks::<ENTRY_SIZE>();
+    let (tick_count, risk_limits) = if header_size == HEADER_SIZE_V1 {
+        (crate::engine::DEFAULT_TICKS, RiskLimits::NONE)
+    } else {
+        let price_band = match u64_at(72) {
+            u64::MAX => None,
+            band => Some(u32::try_from(band).map_err(|_| invalid("price band too large"))?),
+        };
+        let ticks = usize::try_from(u64_at(56)).map_err(|_| invalid("tick count too large"))?;
+        let limits = RiskLimits {
+            max_order_qty: u64_at(64),
+            price_band,
+        };
+        (ticks, limits)
+    };
+    let (entries, _) = bytes[header_size..body.len()].as_chunks::<ENTRY_SIZE>();
     let orders = entries
         .iter()
         .map(|entry| {
@@ -305,9 +331,9 @@ fn decode(bytes: &[u8]) -> io::Result<Checkpoint> {
         next_sequence: u64_at(40),
         snapshot: Snapshot {
             capacity: usize::try_from(u64_at(16)).map_err(|_| invalid("capacity too large"))?,
-            tick_count: crate::engine::DEFAULT_TICKS,
+            tick_count,
             accepted_orders: u64_at(24),
-            risk_limits: RiskLimits::NONE,
+            risk_limits,
             trades: u64_at(32),
             orders,
         },
@@ -330,9 +356,12 @@ mod tests {
             next_sequence: 1_234,
             snapshot: Snapshot {
                 capacity: 4_096,
-                tick_count: crate::engine::DEFAULT_TICKS,
+                tick_count: 300_000,
                 accepted_orders: 1_000,
-                risk_limits: RiskLimits::NONE,
+                risk_limits: RiskLimits {
+                    max_order_qty: 5_000,
+                    price_band: Some(25),
+                },
                 trades: 77,
                 orders: vec![
                     order(5, 1, Side::Buy, 99, 7),
@@ -358,6 +387,26 @@ mod tests {
             },
         };
         assert_eq!(decode(&encode(&empty)).unwrap(), empty);
+    }
+
+    #[test]
+    fn a_version_1_checkpoint_is_still_read() {
+        // Version 1: no tick count or limits, so the defaults come back.
+        let checkpoint = Checkpoint {
+            next_sequence: 7,
+            snapshot: Snapshot {
+                tick_count: crate::engine::DEFAULT_TICKS,
+                risk_limits: RiskLimits::NONE,
+                ..sample().snapshot
+            },
+        };
+        let current = encode(&checkpoint);
+        let mut old = current[..HEADER_SIZE_V1].to_vec();
+        old[8..12].copy_from_slice(&1u32.to_le_bytes());
+        old.extend_from_slice(&current[HEADER_SIZE..current.len() - CHECKSUM_SIZE]);
+        let checksum = checksum(&old);
+        old.extend_from_slice(&checksum.to_le_bytes());
+        assert_eq!(decode(&old).unwrap(), checkpoint);
     }
 
     #[test]

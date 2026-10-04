@@ -491,7 +491,8 @@ enum Command {
 
 fn main() -> std::io::Result<()> {
     const N: u64 = 10_000;
-    // The log records this, and refuses to be continued with another.
+    // The log records the engine's capacity, and refuses to be continued
+    // for an engine of another.
     const CAPACITY: usize = 50_000;
     let (mut producer, mut consumer) = spsc_channel::<Command>(1024);
 
@@ -524,8 +525,8 @@ fn main() -> std::io::Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
-    let mut wal = WalWriter::create(&path, CAPACITY, 16_384)?;
     let mut engine = Engine::new(CAPACITY);
+    let mut wal = WalWriter::create(&path, &engine, 16_384)?;
     let mut events = Vec::new(); // one sink, reused for every call
     let mut sequence = 0;
     loop {
@@ -557,7 +558,7 @@ fn main() -> std::io::Result<()> {
     wal.finalize()?; // flush, trim the preallocated tail, sync
 
     // Recovery: rebuild the book from the log alone. `replay` builds the
-    // replica with the capacity the log records and applies every record
+    // replica like the engine the log records and applies every record
     // with `apply_to`, like the loop above. Its events are not needed here.
     let replica = replay(&path, &mut |_: Event| {})?;
     std::fs::remove_file(&path)?;

@@ -390,13 +390,7 @@ fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Covera
     let mut events = Vec::new();
 
     for step in 0..ops {
-        // Every 2,000 requests, another set of risk limits; the generator
-        // does not send them itself.
-        let op = if step % 2_000 == 1_999 {
-            Op::SetRiskLimits(LIMITS[step / 2_000 % LIMITS.len()])
-        } else {
-            generator.next_op()
-        };
+        let op = generator.next_op();
         let context = || format!("seed {seed}, step {step}: {op:?}");
         events.clear();
         let expected = match op {
@@ -550,23 +544,6 @@ fn assert_all_paths_hit(coverage: &Coverage) {
     );
     assert!(coverage.risk_rejections > 0, "no risk limit rejections");
 }
-
-/// The risk limits the model check cycles through, starting from none.
-const LIMITS: [RiskLimits; 4] = [
-    RiskLimits {
-        max_order_qty: 40,
-        price_band: Some(3),
-    },
-    RiskLimits {
-        max_order_qty: u64::MAX,
-        price_band: Some(0),
-    },
-    RiskLimits {
-        max_order_qty: 25,
-        price_band: None,
-    },
-    RiskLimits::NONE,
-];
 
 #[test]
 fn engine_matches_reference_book_when_capacity_is_tight() {
