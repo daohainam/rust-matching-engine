@@ -15,7 +15,7 @@ microseconds, this repository shows one way to do it, step by step.
 - How to design a hot path with **no heap allocation, no locks and O(1)
   operations** ([chapter 2](docs/02-architecture.md)).
 - Four data-structure techniques that are useful far beyond finance:
-  **arena + free list + intrusive linked list**, a **two-level bitset** with
+  **arena + free list + intrusive linked list**, a **hierarchical bitset** with
   hardware bit-scan, an **open-addressing hash map** with backward-shift
   deletion, and a **lock-free SPSC ring buffer**.
 - How to make a deterministic engine recoverable with a **memory-mapped
@@ -60,7 +60,7 @@ downstream system can follow the book from events alone
 More of the API:
 
 ```rust
-use matching_engine::{Engine, Event, NewOrder, RejectReason, SelfTradePrevention, Side};
+use matching_engine::{Engine, Event, NewOrder, RejectReason, RiskLimits, SelfTradePrevention, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -93,9 +93,20 @@ let own_bid = NewOrder::limit(5, Side::Buy, 110, 5)
 engine.submit_order(own_bid, &mut events); // would trade with its own ask: stopped
 assert!(matches!(events.last(), Some(Event::OrderExpired { order_id: 5, .. })));
 assert_eq!(engine.cancel_account(7, &mut events), 1); // the ask #4 goes
+
+// Pre-trade risk limits: no order above 1,000, none more than 5 ticks through the market.
+engine.set_risk_limits(RiskLimits { max_order_qty: 1_000, price_band: Some(5) });
+engine.process_order(6, Side::Buy, 100, 5_000, &mut events); // a fat finger
+let too_big = Event::OrderRejected { order_id: 6, reason: RejectReason::QuantityAboveLimit };
+assert_eq!(events.last(), Some(&too_big));
+
+// A wider price range: 300,000 ticks instead of 4096.
+let wide = Engine::with_ticks(10_000, 300_000);
+assert_eq!(wide.tick_count(), 300_000);
 ```
 
-Prices are **integer ticks** in `0..4096`; converting to and from real prices is
+Prices are **integer ticks**, `0..4096` unless an engine is built with
+`Engine::with_ticks` for a wider range; converting to and from real prices is
 the caller's job (see [chapter 1](docs/01-order-book-basics.md#18-ticks-prices-as-small-integers)).
 
 Every Rust block in this README is compiled and run by `cargo test`, so these
@@ -120,7 +131,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    BS["Two-level bitset<br/>which ticks are non-empty?<br/>best bid / best ask in O(1)"] --> LV["levels[tick]<br/>FIFO queue: head, tail, count, total_qty"]
+    BS["Hierarchical bitset<br/>which ticks are non-empty?<br/>best bid / best ask in O(1)"] --> LV["levels[tick]<br/>FIFO queue: head, tail, count, total_qty"]
     LV -->|"u32 slot indices"| OP["Order arena<br/>one flat, pre-allocated array<br/>orders linked by next_idx / prev_idx"]
     HM["Flat hash map<br/>order_id to arena slot<br/>O(1) cancel"] --> OP
     FL["Free list<br/>stack of unused slots"] --- OP
@@ -130,7 +141,8 @@ flowchart TB
 |---|---|---|---|
 | Store orders without `malloc` | Fixed **arena** + **free list** | O(1) alloc / free | [3](docs/03-order-pool.md) |
 | FIFO queue per price, cancel from the middle | **Intrusive doubly-linked list** (`u32` links) | O(1) push / pop / remove | [3](docs/03-order-pool.md) |
-| Best bid / best ask | **Two-level bitset** + `trailing_zeros` / `leading_zeros` | O(1), two bit-scans | [4](docs/04-price-ladder-bitset.md) |
+| Best bid / best ask | **Hierarchical bitset** + `trailing_zeros` / `leading_zeros` | O(1), one bit-scan per level (two for 4096 ticks) | [4](docs/04-price-ladder-bitset.md) |
+| Stop a "fat finger" | **Pre-trade risk limits**: maximum quantity, price band (also protects market orders) | O(1) | [6](docs/06-matching-algorithm.md) |
 | Find an order by id | **Open-addressing hash map** with a random seed, backward-shift delete | expected O(1) | [5](docs/05-hash-map.md) |
 | Match an incoming order | Walk levels best-first, FIFO within a level | O(1 + fills) | [6](docs/06-matching-algorithm.md) |
 | Report results without allocating | Stream events into a caller-supplied **`EventSink`** | O(1) per event | [7](docs/07-events.md) |
@@ -148,7 +160,7 @@ the next.
 | 1 | [Order book basics](docs/01-order-book-basics.md) | Bids, asks, spread, maker/taker, price-time priority, ticks, with a worked example used throughout |
 | 2 | [Architecture overview](docs/02-architecture.md) | Design goals, module map, how the structures point at each other, memory footprint, threading model |
 | 3 | [The order pool](docs/03-order-pool.md) | Arena, free stack, intrusive doubly-linked FIFO, `PriceLevel`, invariants |
-| 4 | [The price ladder bitset](docs/04-price-ladder-bitset.md) | Two-level bitset, bit-scan instructions, worked bit-level example |
+| 4 | [The price ladder bitset](docs/04-price-ladder-bitset.md) | Two-level bitset, bit-scan instructions, worked bit-level example, and more levels for wider price ranges |
 | 5 | [The flat hash map](docs/05-hash-map.md) | Linear probing, SplitMix64, a secret seed against crafted ids, load factor, backward-shift deletion |
 | 6 | [The matching algorithm](docs/06-matching-algorithm.md) | `process_order` and `cancel_order` line by line, flowcharts, a full state trace, edge cases |
 | 7 | [Events](docs/07-events.md) | Event semantics and ordering, the `EventSink` trait, choosing a sink, `EventBatch` truncation |
@@ -176,10 +188,10 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, NewOrder, OrderType, SelfTradePrevention, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side, Snapshot, SnapshotError, Checkpoint
+  lib.rs         crate root; re-exports Engine, NewOrder, OrderType, SelfTradePrevention, RiskLimits, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side, Snapshot, SnapshotError, Checkpoint, DEFAULT_TICKS
   engine.rs      matching core: submit_order, reduce/cancel/mass cancel, self-trade prevention, order lookup, depth queries, snapshot/restore
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
-  bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
+  bitset.rs      hierarchical bitset price ladder, sized per engine (best bid / ask in O(1))
   hashmap.rs     seeded open-addressing hash map (order id -> arena slot)
   events.rs      Event enum, EventSink trait, bounded EventBatch sink
   ringbuffer.rs  lock-free SPSC ring buffer with Producer / Consumer handles
@@ -206,7 +218,8 @@ docs/            the chapters listed above, plus glossary.md
 
 | Limit | Value | Where it comes from |
 |---|---|---|
-| Price range | ticks `0..=4095` | bitset is `64 × 64` bits |
+| Price range | ticks `0..=4095` by default, up to 2^24 per engine | `Engine::with_ticks`; about 48 bytes per tick |
+| Risk limits | one maximum quantity and one price band per engine | `RiskLimits`, changed with `set_risk_limits` |
 | Resting orders | `order_capacity` passed to `Engine::new` | arena size |
 | Events per call | unlimited with a `Vec` or closure sink; an `EventBatch` keeps 64 and counts the rest | your choice of `EventSink` |
 | Reserved order id | `u64::MAX` | hash map's "empty slot" marker |
