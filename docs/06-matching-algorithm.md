@@ -17,7 +17,9 @@ let mut engine = Engine::new(order_capacity);          // allocate everything, o
 let mut events = Vec::new();                            // any EventSink (chapter 7)
 
 engine.process_order(id, side, tick, qty, &mut events); // submit a limit order
+engine.submit_order(id, side, order_type, tick, qty, &mut events); // any OrderType
 let found = engine.cancel_order(id, &mut events);       // cancel a resting order: bool
+let found = engine.reduce_order(id, by, &mut events);   // lower its qty, keep its place
 
 engine.best_bid();                 // Option<u32>
 engine.best_ask();                 // Option<u32>
@@ -27,7 +29,9 @@ engine.live_order_count();         // usize number of resting orders
 engine.resting_order(id);          // Option<RestingOrder>  side, tick, remaining qty
 ```
 
-Both mutating methods take the sink as `sink: &mut S` with
+`process_order` is shorthand for `submit_order` with `OrderType::Limit`; this
+chapter follows `submit_order`, which handles every type. All mutating methods
+take the sink as `sink: &mut S` with
 `S: EventSink + ?Sized`. Being generic, they are compiled separately for each sink
 type, so `emit` is inlined into the matching loop; `?Sized` also allows a
 `&mut dyn EventSink` when you prefer one compiled copy.
@@ -35,19 +39,21 @@ type, so `emit` is inlined into the matching loop; `?Sized` also allows a
 | Method | Mutates? | Allocates? | Cost |
 |---|---|---|---|
 | `new(capacity)` | builds | **yes**, once | O(capacity) |
-| `process_order` | yes | no (a `Vec` sink may, when it grows) | expected O(1 + number of fills) |
+| `submit_order` / `process_order` | yes | no (a `Vec` sink may, when it grows) | expected O(1 + number of fills) |
 | `cancel_order` | yes | no | O(1) expected |
+| `reduce_order` | yes | no | O(1) expected |
 | `best_bid` / `best_ask` | no | no | O(1), two bit-scans |
 | `depth_at` | no | no | O(1) |
 | `depth_snapshot` | no | **yes** (`Vec`) | O(ticks scanned); for reporting only |
 | `live_order_count` | no | no | O(1) |
 | `resting_order` | no | no | O(1) expected: one hash lookup |
 
-## 6.2 `process_order` in four phases
+## 6.2 `submit_order` in four phases
 
 ```mermaid
 flowchart TD
-    A(["process_order(id, side, tick, qty, sink)"]) --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live?"}
+    A(["submit_order(id, side, type, tick, qty, sink)"]) --> A2["market order: tick = worst limit<br/>(4095 for a buy, 0 for a sell)"]
+    A2 --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live,<br/>or post-only that would trade?"}
     B -- yes --> R(["emit OrderRejected(reason)<br/>return immediately"])
     B -- no --> C["emit OrderAccepted"]
     C --> D["remaining = qty<br/>match_incoming against the opposite side"]
@@ -55,8 +61,10 @@ flowchart TD
     E -- yes --> F(["emit OrderFilled<br/>sequence += 1<br/>return"])
     E -- no --> G{"did anything trade?<br/>(filled > 0)"}
     G -- yes --> H["emit OrderPartiallyFilled<br/>(taker, remaining_qty)"]
-    G -- no --> I
-    H --> I["allocate an arena slot for the remainder"]
+    G -- no --> T
+    H --> T{"may this type rest?<br/>(limit, post-only)"}
+    T -- no --> X(["emit OrderExpired<br/>sequence += 1<br/>return"])
+    T -- yes --> I["allocate an arena slot for the remainder"]
     I --> J{"slot available?"}
     J -- no --> K["emit OrderRejected(BookFull)"]
     J -- yes --> L["id_map.insert<br/>push_back onto own price level"]
@@ -70,15 +78,21 @@ flowchart TD
 
 In words:
 
-1. **Validate.** Bad input is rejected before anything changes.
+1. **Validate.** Bad input, and a post-only order that would trade, is rejected
+   before anything changes. (A market order first gets the worst limit its side
+   allows, so from here on it is handled like any other order.)
 2. **Accept.** Emit `OrderAccepted`.
 3. **Match.** Trade against the opposite side while the prices cross.
-4. **Rest.** Put any leftover quantity into the book.
+4. **Rest.** Put any leftover quantity into the book, or let it expire if the
+   order type may not rest.
+
+The order type changes only steps 1 and 4: matching is the same for every type.
 
 ### Phases 1 and 2: validation and acceptance
 
 ```rust
-fn validate(&self, order_id: u64, price_tick: u32, qty: u64) -> Result<(), RejectReason> {
+fn validate(&self, order_id: u64, side: Side, order_type: OrderType,
+            price_tick: u32, qty: u64) -> Result<(), RejectReason> {
     if qty == 0 {
         Err(RejectReason::ZeroQuantity)
     } else if order_id == crate::hashmap::RESERVED_KEY {
@@ -87,17 +101,24 @@ fn validate(&self, order_id: u64, price_tick: u32, qty: u64) -> Result<(), Rejec
         Err(RejectReason::PriceOutOfRange)
     } else if self.id_map.get(order_id).is_some() {
         Err(RejectReason::DuplicateOrderId)
+    } else if order_type == OrderType::PostOnly && self.is_marketable(side, price_tick) {
+        Err(RejectReason::PostOnlyWouldTrade)
     } else {
         Ok(())
     }
 }
 
-// In process_order:
-if let Err(reason) = self.validate(order_id, price_tick, qty) {
+// In submit_order:
+let price_tick = match (order_type, side) {             // a market order may trade at
+    (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1, // any price: give it the
+    (OrderType::Market, Side::Sell) => 0,                   // worst limit its side allows
+    _ => price_tick,
+};
+if let Err(reason) = self.validate(order_id, side, order_type, price_tick, qty) {
     sink.emit(Event::OrderRejected { order_id, reason });
     return;
 }
-sink.emit(Event::OrderAccepted { order_id, side, price_tick, qty });
+sink.emit(Event::OrderAccepted { order_id, side, order_type, price_tick, qty });
 ```
 
 | Check | `RejectReason` | Why |
@@ -106,11 +127,15 @@ sink.emit(Event::OrderAccepted { order_id, side, price_tick, qty });
 | `order_id == u64::MAX` | `ReservedOrderId` | Reserved as the hash map's "empty" marker (chapter 5). |
 | `price_tick >= 4096` | `PriceOutOfRange` | The price ladder only has 4096 ticks; indexing beyond it would be out of bounds. |
 | `id_map.get(id).is_some()` | `DuplicateOrderId` | Duplicate id among **live** orders. (An id that has been fully filled or cancelled is gone from the map and may be reused.) |
+| post-only and `is_marketable(side, tick)` | `PostOnlyWouldTrade` | A post-only order promises never to take liquidity. `is_marketable` asks the question that starts matching (does the best opposing price reach this limit?) with one bit-scan and no change to the book. |
 
 A validation failure yields **only** `OrderRejected`, with no `OrderAccepted`
 before it. The checks run in the order of the table and stop at the first
 failure, so an order with two problems (say, zero quantity *and* a bad tick)
-always gets the same reason, `ZeroQuantity`. Returning a `Result` from a small
+always gets the same reason, `ZeroQuantity`. A market order can never fail the
+price check: its tick has been replaced before the checks run, and
+`OrderAccepted` reports that limit, so a consumer sees how far the order may
+trade. Returning a `Result` from a small
 function keeps that order easy to read, and lets the caller handle every
 rejection with one `if let`.
 
@@ -305,6 +330,26 @@ Two things can prevent an order from resting, and both produce `OrderRejected`
 > both can happen, that assertion fails, and consumers must then treat the trades
 > as real.
 
+### Remainders that may not rest
+
+Immediate-or-cancel and market orders never rest. Their remainder is dropped
+before the arena is even asked for a slot (excerpt):
+
+```rust
+if !order_type.rests() {                 // only Limit and PostOnly rest
+    sink.emit(Event::OrderExpired { order_id, expired_qty: remaining });
+    self.sequence = self.sequence.wrapping_add(1);
+    return;
+}
+```
+
+So such an order never gets `BookFull` and never uses a slot, even for an
+instant. Its events end with `OrderExpired`, after the taker's
+`OrderPartiallyFilled` if it traded. Why a new event instead of
+`OrderCancelled`? `OrderCancelled` means "this quantity left the book", and a
+consumer following the book's depth (chapter 7) subtracts it from a level. The
+expired quantity was never in the book, so there is nothing to subtract.
+
 ## 6.5 A complete trace
 
 Let's replay step 6 of the [worked example](01-order-book-basics.md#110-a-complete-worked-example)
@@ -366,12 +411,12 @@ All of that was O(1) per step, and no memory was allocated.
 two asks of 5 at tick 100 (`#1` then `#2`) and a buy of 6. `#1` trades first
 (5), then `#2` (1).
 
-## 6.6 `cancel_order`
+## 6.6 `cancel_order` and `reduce_order`
 
 ```rust
 pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
     let Some(idx) = self.id_map.remove(order_id) else {
-        sink.emit(Event::CancelRejected { order_id });   // nothing to cancel: say so
+        sink.emit(Event::CancelRejected { order_id, reason: CancelRejectReason::NotResting });
         return false;
     };
     let order = *self.pool.get(idx);                     // copy it out (Order is Copy)
@@ -401,7 +446,7 @@ pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut 
 | Recycle the slot | `pool.free` | O(1) |
 
 Cancelling an **unknown** or **already filled** id leaves the book alone, emits
-`CancelRejected` and returns `false`. Emitting an event, and not only returning
+`CancelRejected` (reason `NotResting`) and returns `false`. Emitting an event, and not only returning
 `false`, matters to anyone who follows the engine through its events alone: every
 cancel request leaves exactly one event behind. (Try cancelling order 4 twice in
 the worked example: `true` with `OrderCancelled`, then `false` with
@@ -411,6 +456,31 @@ the worked example: `true` with `OrderCancelled`, then `false` with
 record before the slot is freed, so a consumer knows which level lost how much.
 To read the same fields *without* cancelling, use `resting_order(id)`: the same
 `id_map` lookup, followed by a copy of the order's fields into a `RestingOrder`.
+
+### Reducing an order
+
+`reduce_order(id, reduce_by, sink)` lowers a resting order's quantity **in
+place** (excerpt):
+
+```rust
+if reduce_by == 0 { /* CancelRejected(ZeroQuantity) */ }
+let Some(idx) = self.id_map.get(order_id) else { /* CancelRejected(NotResting) */ };
+let order = *self.pool.get(idx);
+if reduce_by >= order.remaining_qty {
+    return self.cancel_order(order_id, sink);         // nothing would be left
+}
+let levels = match order.side { Side::Buy => &mut self.bid_levels, Side::Sell => &mut self.ask_levels };
+levels[order.price_tick as usize].reduce_qty(&mut self.pool, idx, reduce_by);
+sink.emit(Event::OrderReduced { order_id, side: order.side, price_tick: order.price_tick,
+                                reduced_qty: reduce_by, remaining_qty: order.remaining_qty - reduce_by });
+```
+
+The order stays exactly where it is in its queue. That is fair: a smaller order
+can never take a fill away from the orders behind it. (Raising the quantity
+would, so for that you cancel and send a new order, which queues at the back.)
+`reduce_qty` is the same `PriceLevel` operation a partial fill uses (chapter 3):
+it lowers the order's `remaining_qty` and the level's `total_qty` together.
+Reducing by the whole remainder or more is a cancel, with `OrderCancelled`.
 
 ## 6.7 Edge cases, verified
 
@@ -425,7 +495,13 @@ To read the same fields *without* cancelling, use `resting_order(id)`: the same
 | Order would rest but arena is full | `[OrderAccepted, OrderRejected(BookFull)]` (never preceded by trades, see 6.4) | nothing rests |
 | Order would rest but level quantity would overflow `u64` | `[OrderAccepted, OrderRejected(LevelQuantityOverflow)]` | nothing rests; state unchanged |
 | Order fully matches while arena is full | normal fills | needs no slot, so it succeeds |
-| `cancel_order` of an id that is not resting | `[CancelRejected]` (returns `false`) | none |
+| Post-only whose price reaches the best opposing price | `[OrderRejected(PostOnlyWouldTrade)]` | none |
+| Immediate-or-cancel or market order with quantity left | `[OrderAccepted, ...fills..., OrderExpired]` | nothing rests; needs no slot |
+| Market order on an empty opposing side | `[OrderAccepted, OrderExpired]` | none |
+| Market order with an out-of-range tick | handled normally: the tick is ignored | normal |
+| `cancel_order` of an id that is not resting | `[CancelRejected(NotResting)]` (returns `false`) | none |
+| `reduce_order` by 0 | `[CancelRejected(ZeroQuantity)]` (returns `false`) | none |
+| `reduce_order` by the remaining quantity or more | `[OrderCancelled]` (returns `true`) | the order is removed |
 
 ## 6.8 Complexity
 
@@ -434,7 +510,9 @@ To read the same fields *without* cancelling, use `resting_order(id)`: the same
   maker (`O(1)` unlink + free + hash remove) or ends the taker. Moving to the next
   price is a bit-scan, also O(1). Every price level visited yields at least one
   trade, so the total cost is **O(number of fills)**.
-- **Phase 4 (rest):** O(1).
+- **Phase 4 (rest or expire):** O(1).
+- **`cancel_order` and `reduce_order`:** O(1) expected: one hash lookup, then
+  constant work on the order's queue.
 
 Overall: **expected O(1 + fills)** (the "expected" is because the hash map probes;
 see chapter 5), which matches the doc comment ("O(1) + O(fills)"). A
