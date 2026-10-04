@@ -60,7 +60,7 @@ downstream system can follow the book from events alone
 More of the API:
 
 ```rust
-use matching_engine::{Engine, Event, RejectReason, Side};
+use matching_engine::{Engine, Event, OrderType, RejectReason, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -75,9 +75,15 @@ assert_eq!(engine.best_ask(), None); // lowest resting sell tick
 assert_eq!(engine.depth_at(Side::Buy, 100), 10); // total quantity at one tick
 assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels first
 assert_eq!(engine.resting_order(1).map(|o| o.remaining_qty), Some(10)); // order status
+assert!(engine.reduce_order(1, 4, &mut events)); // 6 left, keeping its place in the queue
 assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
 assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
 assert!(matches!(events.last(), Some(Event::CancelRejected { order_id: 1, .. }))); // and says so
+
+// Besides limit orders: immediate-or-cancel, market and post-only orders.
+engine.submit_order(3, Side::Sell, OrderType::Market, 0, 5, &mut events); // no bids left
+let expired = Event::OrderExpired { order_id: 3, expired_qty: 5 };
+assert_eq!(events.last(), Some(&expired)); // a market order never rests
 ```
 
 Prices are **integer ticks** in `0..4096`; converting to and from real prices is
@@ -160,8 +166,8 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, RestingOrder, Event, EventBatch, EventSink, RejectReason, Side
-  engine.rs      matching core: process_order, cancel_order, order lookup, depth queries
+  lib.rs         crate root; re-exports Engine, OrderType, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side
+  engine.rs      matching core: submit_order, reduce_order, cancel_order, order lookup, depth queries
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
   bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
   hashmap.rs     seeded open-addressing hash map (order id -> arena slot)
@@ -191,7 +197,7 @@ docs/            the chapters listed above, plus glossary.md
 | Resting orders | `order_capacity` passed to `Engine::new` | arena size |
 | Events per call | unlimited with a `Vec` or closure sink; an `EventBatch` keeps 64 and counts the rest | your choice of `EventSink` |
 | Reserved order id | `u64::MAX` | hash map's "empty slot" marker |
-| Order types | limit orders only | scope of the project |
+| Order types | limit, immediate-or-cancel, market, post-only | scope of the project |
 | Rust version | 1.88 or newer | `rust-version` in `Cargo.toml` |
 
 Details, consequences and workarounds are in
