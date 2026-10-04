@@ -55,6 +55,13 @@ impl ReferenceBook {
             Some(RejectReason::PriceOutOfRange)
         } else if self.live.contains_key(&order_id) {
             Some(RejectReason::DuplicateOrderId)
+        } else if order_type == OrderType::PostOnly
+            && match side {
+                Side::Buy => self.best_ask().is_some_and(|ask| ask <= price_tick),
+                Side::Sell => self.best_bid().is_some_and(|bid| bid >= price_tick),
+            }
+        {
+            Some(RejectReason::PostOnlyWouldTrade)
         } else {
             None
         };
@@ -246,6 +253,7 @@ struct Coverage {
     cancels_found: usize,
     calls_beyond_batch_capacity: usize,
     expired_remainders: usize,
+    post_only_rejections: usize,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
@@ -340,6 +348,13 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
         coverage.expired_remainders +=
             usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        coverage.post_only_rejections += usize::from(matches!(
+            events.as_slice(),
+            [Event::OrderRejected {
+                reason: RejectReason::PostOnlyWouldTrade,
+                ..
+            }]
+        ));
     }
 }
 
@@ -353,6 +368,7 @@ fn assert_all_paths_hit(coverage: &Coverage) {
         "no call produced more than {MAX_EVENTS_PER_CALL} events"
     );
     assert!(coverage.expired_remainders > 0, "no expired remainders");
+    assert!(coverage.post_only_rejections > 0, "no post-only rejections");
 }
 
 #[test]

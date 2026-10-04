@@ -112,11 +112,12 @@ pub enum Event {
 
 /// Why an order was rejected.
 ///
-/// The first four reasons are **input errors**: they are checked before
-/// anything else, so the order is rejected on its own, without an
-/// `OrderAccepted` event, and the book is unchanged. The last two can only
-/// happen after `OrderAccepted`, when the unfilled remainder of an order
-/// cannot rest in the book.
+/// The first five reasons are found **before acceptance**: the first four
+/// are input errors, and the fifth is a post-only order that would trade.
+/// The order is rejected on its own, without an `OrderAccepted` event, and
+/// the book is unchanged. The last two can only happen after
+/// `OrderAccepted`, when the unfilled remainder of an order cannot rest in
+/// the book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
     /// The quantity was zero.
@@ -128,6 +129,9 @@ pub enum RejectReason {
     PriceOutOfRange,
     /// A resting order already uses this order ID.
     DuplicateOrderId,
+    /// A [`PostOnly`](crate::engine::OrderType::PostOnly) order would have
+    /// traded on arrival: its price reaches the best price on the other side.
+    PostOnlyWouldTrade,
     /// The remainder could not rest: every order slot was in use.
     BookFull,
     /// The remainder could not rest: the total quantity at its price level

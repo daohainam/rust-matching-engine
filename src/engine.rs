@@ -58,13 +58,18 @@ pub enum OrderType {
     /// in is ignored: a market buy gets the highest tick as its limit and a
     /// market sell tick 0, and `OrderAccepted` reports that limit.
     Market,
+    /// Must not trade on arrival: rejected with
+    /// [`PostOnlyWouldTrade`](RejectReason::PostOnlyWouldTrade) if its price
+    /// reaches the other side's best price, otherwise rests like a limit
+    /// order. Market makers use it to be sure they only ever add liquidity.
+    PostOnly,
 }
 
 impl OrderType {
     /// Whether unfilled quantity may rest in the book.
     #[inline(always)]
     fn rests(self) -> bool {
-        matches!(self, OrderType::Limit)
+        matches!(self, OrderType::Limit | OrderType::PostOnly)
     }
 }
 
@@ -224,7 +229,14 @@ impl Engine {
     /// Checks an incoming order before it can touch the book, returning the
     /// first problem found. The checks run in a fixed order, so an order with
     /// several problems always gets the same reason.
-    fn validate(&self, order_id: u64, price_tick: u32, qty: u64) -> Result<(), RejectReason> {
+    fn validate(
+        &self,
+        order_id: u64,
+        side: Side,
+        order_type: OrderType,
+        price_tick: u32,
+        qty: u64,
+    ) -> Result<(), RejectReason> {
         if qty == 0 {
             Err(RejectReason::ZeroQuantity)
         } else if order_id == crate::hashmap::RESERVED_KEY {
@@ -233,8 +245,19 @@ impl Engine {
             Err(RejectReason::PriceOutOfRange)
         } else if self.id_map.get(order_id).is_some() {
             Err(RejectReason::DuplicateOrderId)
+        } else if order_type == OrderType::PostOnly && self.is_marketable(side, price_tick) {
+            Err(RejectReason::PostOnlyWouldTrade)
         } else {
             Ok(())
+        }
+    }
+
+    /// Whether an order on `side` limited at `price_tick` would trade at
+    /// once: its price reaches the best price on the other side.
+    fn is_marketable(&self, side: Side, price_tick: u32) -> bool {
+        match side {
+            Side::Buy => self.best_ask().is_some_and(|ask| ask <= price_tick),
+            Side::Sell => self.best_bid().is_some_and(|bid| bid >= price_tick),
         }
     }
 
@@ -256,12 +279,14 @@ impl Engine {
     /// Submits a new order of any [`OrderType`].
     ///
     /// The order is first checked for a nonzero quantity, a non-reserved ID,
-    /// a valid price tick and an unused ID, and then accepted. A failed check
+    /// a valid price tick and an unused ID, and a post-only order also for
+    /// not trading at once; then it is accepted. A failed check
     /// emits only `OrderRejected`, with the [`RejectReason`]. It trades at resting
     /// maker prices, consuming the best eligible price first and preserving
     /// FIFO order among orders at that price. A buy may trade at asks no
     /// higher than `price_tick`; a sell may trade at bids no lower than it.
-    /// The unfilled quantity of a [`Limit`](OrderType::Limit) order is added
+    /// The unfilled quantity of a [`Limit`](OrderType::Limit) or
+    /// [`PostOnly`](OrderType::PostOnly) order is added
     /// to the book if an order slot is available and the price-level
     /// quantity can be represented; that of an
     /// [`ImmediateOrCancel`](OrderType::ImmediateOrCancel) or
@@ -296,7 +321,7 @@ impl Engine {
             _ => price_tick,
         };
         // Reject invalid input before emitting acceptance or changing book state.
-        if let Err(reason) = self.validate(order_id, price_tick, qty) {
+        if let Err(reason) = self.validate(order_id, side, order_type, price_tick, qty) {
             sink.emit(Event::OrderRejected { order_id, reason });
             return;
         }
@@ -778,6 +803,48 @@ mod tests {
             ]
         );
         assert_eq!(engine.live_order_count(), 0);
+    }
+
+    #[test]
+    fn post_only_that_would_trade_is_rejected_and_the_book_is_unchanged() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        place(&mut engine, 2, Side::Buy, 98, 5);
+        for (order_id, side, tick) in [(3, Side::Buy, 100), (4, Side::Sell, 98)] {
+            let events = submit(&mut engine, order_id, side, OrderType::PostOnly, tick, 1);
+            assert_eq!(
+                events,
+                vec![Event::OrderRejected {
+                    order_id,
+                    reason: RejectReason::PostOnlyWouldTrade
+                }]
+            );
+        }
+        assert_eq!(engine.depth_at(Side::Sell, 100), 5);
+        assert_eq!(engine.depth_at(Side::Buy, 98), 5);
+        assert_eq!(engine.live_order_count(), 2);
+    }
+
+    #[test]
+    fn post_only_that_does_not_cross_rests_like_a_limit_order() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        let events = submit(&mut engine, 2, Side::Buy, OrderType::PostOnly, 99, 3);
+        assert_eq!(
+            events,
+            vec![Event::OrderAccepted {
+                order_id: 2,
+                side: Side::Buy,
+                order_type: OrderType::PostOnly,
+                price_tick: 99,
+                qty: 3
+            }]
+        );
+        assert_eq!(engine.best_bid(), Some(99));
+        assert_eq!(
+            engine.resting_order(2).map(|order| order.remaining_qty),
+            Some(3)
+        );
     }
 
     #[test]
