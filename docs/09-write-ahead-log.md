@@ -18,9 +18,9 @@ If the process crashes, the order book in memory is gone. How do we get it back?
 
 A neat trick: the engine is **deterministic**. It has no clock, its one source of
 randomness (the hash seed, chapter 5) never affects a result, and its state is a
-pure function of the requests it has received **and the capacity it was built
-with**. So **the same sequence of requests, fed to an engine of the same
-capacity, always produces exactly the same book**. Therefore we do not need to
+pure function of the requests it has received **and the capacity and tick
+count it was built with**. So **the same sequence of requests, fed to an engine
+built the same way, always produces exactly the same book**. Therefore we do not need to
 save the book; we only need to save the **requests**, in order, and replay them
 into a fresh engine. This is called *event sourcing* (here, *input* sourcing).
 
@@ -31,8 +31,10 @@ into a fresh engine. This is called *event sourcing* (here, *input* sourcing).
    restart:    Engine::new(capacity)  <-------  read the log, feed each request back in
 ```
 
-The capacity matters as much as the requests, so the log records it in its header
-(9.2), and the library's `replay` builds the engine with exactly that capacity.
+The capacity and the tick count matter as much as the requests, so the log
+records them in its header (9.2), and the library's `replay` builds the engine
+with exactly those. Risk limits are inputs too, but they can change during the
+day, so they are logged as requests of their own.
 
 "Write-ahead" means: **log the request first, then apply it.** If we crash right
 after logging, replay re-applies the request; if we had applied it first and
@@ -52,13 +54,14 @@ The header identifies the file and its format:
 | 8 | 4 | format version (`4`; versions `1` to `3` are still read) |
 | 12 | 4 | record size in bytes (`40`) |
 | 16 | 8 | engine capacity the log was written for (`0` = unknown) |
+| 24 | 8 | engine tick count (`0` = the default 4096, which every older log used) |
 | 24 | 8 | reserved, zero |
 
 Each record describes one request:
 
 | Offset | Size | Field |
 |-------:|-----:|---|
-| 0 | 1 | kind: `1` = new order, `2` = cancel, `3` = reduce, `4` = cancel an account's orders, `5` = cancel all orders (`0` is never valid) |
+| 0 | 1 | kind: `1` = new order, `2` = cancel, `3` = reduce, `4` = cancel an account's orders, `5` = cancel all orders, `6` = set the risk limits (`0` is never valid) |
 | 1 | 1 | side: `0` = buy, `1` = sell |
 | 2 | 1 | order type: `0` = limit, `1` = immediate-or-cancel, `2` = market, `3` = post-only |
 | 3 | 1 | self-trade prevention: `0` = allow, `1` = cancel resting, `2` = cancel incoming, `3` = cancel both |
@@ -72,21 +75,26 @@ Each record describes one request:
 A field that a kind does not use is zero: a cancel has no side, price or
 account, a mass cancel no order id.
 
-**Four versions.** The format grew three times. Version 1 had no order type and
+A risk limits record (kind `6`) reuses the order fields: the quantity is the
+maximum order quantity, the price tick is the price band, and the side byte says
+whether there is a band at all (`1`) or not (`0`).
+
+**Five versions.** The format grew four times. Version 1 had no order type and
 no reduce records; version 2 added those, but had no self-trade prevention, no
 account and no mass cancels; version 3 added those, but did not record the engine
-capacity. In the older versions the bytes for the missing fields were reserved,
-and always zero, and zero means "limit", "allow", "account 0" and "capacity
-unknown". So **every older record is also a valid version 4 record**, and all
-four versions are read.
+capacity; version 4 recorded it, but not the tick count, and had no risk limits.
+In the older versions the bytes for the missing fields were reserved, and always
+zero, and zero means "limit", "allow", "account 0", "capacity unknown" and "4096
+ticks". So **every older record is also a valid version 5 record**, and all five
+versions are read.
 
 The reverse is not true: an old reader would ignore the new bytes and replay, say,
 an immediate-or-cancel order as a limit order, or every order for account 0,
 leaving a different book. That is why the version number exists: `open_append`
-rewrites an older header to version 4 (and flushes it) before it appends
+rewrites an older header to version 5 (and flushes it) before it appends
 anything, and an old reader then refuses the file instead of misreading it. The
-same rewrite records the engine capacity that `open_append` was given, so from
-then on the log knows it.
+same rewrite records the capacity and tick count of the engine `open_append` was
+given, so from then on the log knows them.
 
 Here are the 40 real bytes that `encode` produces for
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, which is order `#6` from the
@@ -242,8 +250,8 @@ second mapping of the same file could (9.5).
 
 ```mermaid
 flowchart TD
-    A["WalWriter::create(path, engine_capacity, capacity_records)"] --> B["lock path.lock (fails if another writer holds it)<br/>create a NEW file (fails if it exists)<br/>set_len(32 + capacity × 40), map it<br/>write the header and flush it"]
-    O["WalWriter::open_append(path, engine_capacity, spare_records)"] --> P["lock path.lock<br/>read the file, validate the header and its capacity<br/>truncate after the last valid record<br/>set_len for the spare room, map it"]
+    A["WalWriter::create(path, &engine, capacity_records)"] --> B["lock path.lock (fails if another writer holds it)<br/>create a NEW file (fails if it exists)<br/>set_len(32 + capacity × 40), map it<br/>write the header and flush it"]
+    O["WalWriter::open_append(path, &engine, spare_records)"] --> P["lock path.lock<br/>read the file, validate the header against the engine<br/>truncate after the last valid record<br/>set_len for the spare room, map it"]
     B --> C["append(record)"]
     P --> C
     C --> D{"next_offset + 40<br/>> capacity_bytes?"}
@@ -258,7 +266,7 @@ flowchart TD
 ```
 
 ```text
-   after create(path, capacity, 4):   [ header ][ zero ][ zero ][ zero ][ zero ]   room for 4 records
+   after create(path, &engine, 4):    [ header ][ zero ][ zero ][ zero ][ zero ]   room for 4 records
    after 3 appends:                   [ header ][ rec0 ][ rec1 ][ rec2 ][ zero ]   next_offset = 32 + 3 × 40 = 152
    after the 5th append (grow):       [ header ][ rec0 .. rec4 ][ zero ... ]       file doubled: 192 -> 384 bytes
    after finalize():                  [ header ][ rec0 .. rec4 ]                   32 + 5 × 40 = 232 bytes
@@ -268,8 +276,9 @@ flowchart TD
   existing path fails with `AlreadyExists`. A restart can therefore never erase
   the log it is supposed to replay; use `open_append` to continue one, or delete
   the file on purpose.
-- **`open_append` checks the capacity.** If the header records a capacity other
-  than the one you pass, it fails with `InvalidInput` before touching the file:
+- **Both take the engine.** `create` writes its capacity and tick count into the
+  header. `open_append` checks them: if the header records another capacity or
+  tick count, it fails with `InvalidInput` before touching the file, because
   continuing the log for a different engine would make it unreplayable.
 - **One writer at a time.** Both constructors first take an exclusive lock
   (`File::try_lock`) on a small companion file, `path.lock`, and hold it for the
@@ -308,7 +317,8 @@ pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>>  // just 
 size is `ErrorKind::InvalidData`), then decodes records **until the first one that
 fails validation**: the zero-filled preallocated tail a crash leaves behind, a
 torn final write, or a partial record. It returns a `WalContents`: the engine
-capacity from the header (`None` for a log that predates version 4) and a `Vec` of
+capacity from the header (`None` for a log that predates version 4), its tick
+count (4096 for a log that predates version 5), and a `Vec` of
 typed records.
 
 Turning a record back into an engine call is the job of `WalRecord::apply_to`,
@@ -331,7 +341,8 @@ it: then the live run and a replay make exactly the same calls, by construction.
 And `replay` does the whole recovery in one call:
 
 ```rust
-let engine = replay(&path, &mut events)?;  // Engine::new(recorded capacity), then
+let engine = replay(&path, &mut events)?;  // Engine::with_ticks(recorded capacity
+                                           // and tick count), then
                                            // apply_to for every record, in order
 ```
 
@@ -345,9 +356,9 @@ the log.
 
 **Restarting after a crash** takes three steps:
 
-1. `replay` the log. It builds a fresh `Engine` **of the capacity the log
-   records** and applies every valid record.
-2. Continue the same log with `open_append(path, capacity, spare)`. It stops at
+1. `replay` the log. It builds a fresh `Engine` **with the capacity and tick
+   count the log records** and applies every valid record.
+2. Continue the same log with `open_append(path, &engine, spare)`. It stops at
    the same first invalid record that `replay` did, discards everything after it,
    and appends from there.
 3. Only then start accepting new requests.
@@ -361,7 +372,7 @@ writing its fourth record:
                                          ^ checksum fails
 
  replay:        header OK, rec 0, rec 1, rec 2 are valid; rec 3 fails -> stop.
-                Applies those 3 records to Engine::new(recorded capacity).
+                Applies those 3 records to an engine built as the header says.
 
  open_append:   finds the same first invalid record, cuts the file there,
                 and grows it again with fresh zeros:
@@ -404,13 +415,13 @@ events at all.
 On the very first start there is no log yet, so a service typically does this:
 
 ```rust
-let mut wal = match WalWriter::open_append(&path, CAPACITY, 16_384) {
+let mut wal = match WalWriter::open_append(&path, &engine, 16_384) {
     Ok(wal) => wal,                                    // continue the existing log
     Err(e) if e.kind() == io::ErrorKind::NotFound => {
-        WalWriter::create(&path, CAPACITY, 16_384)?    // first start: a new log
+        WalWriter::create(&path, &engine, 16_384)?     // first start: a new log
     }
     Err(e) => return Err(e),                           // damaged header, another
-};                                                     // capacity, another writer:
+};                                                     // engine, another writer:
                                                        // needs a human
 ```
 
@@ -588,7 +599,7 @@ What it demonstrates:
 - **Ordering:** the WAL append happens *before* the engine call.
 - **One code path:** the live run and the replay both go through
   `WalRecord::apply_to`, so they cannot drift apart.
-- **Determinism:** a fresh engine with the capacity the log records, fed the
+- **Determinism:** a fresh engine built as the log records, fed the
   logged requests, ends in exactly the same state. That is what makes the WAL
   useful for recovery, testing, and audits.
 
@@ -610,9 +621,10 @@ Replaying the whole log works, but recovery then takes longer the longer the
 engine has run: a week of requests is a week of replay. The fix is to save the
 **state** now and then, and replay only what came after it.
 
-**A snapshot** is the engine's complete state: its capacity, its two counters
-(accepted orders and trades), and every resting order in priority order (bids
-best price first, then asks, oldest first at each price). It lives in
+**A snapshot** is the engine's complete state: its capacity and tick count, its
+two counters (accepted orders and trades), its risk limits, and every resting
+order in priority order (bids best price first, then asks, oldest first at each
+price). It lives in
 [`src/snapshot.rs`](../src/snapshot.rs):
 
 ```rust
@@ -639,7 +651,7 @@ replay_from(&log_path, &mut engine, checkpoint.next_sequence, &mut events)?;
 
 `replay_from` skips every record before `next_sequence` (the snapshot holds their
 effect already), applies the rest with `apply_to`, and refuses an engine whose
-capacity differs from the log's. This relies on the sequence numbers growing by
+capacity or tick count differs from the log's. This relies on the sequence numbers growing by
 one per record, as the programs in this chapter number them.
 
 The checkpoint file is written **atomically**, because a half-written checkpoint
