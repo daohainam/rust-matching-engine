@@ -7,15 +7,15 @@
 //! up front in [`Engine::new`], and execution reports are streamed to a
 //! caller-supplied [`EventSink`] instead of being collected internally.
 
-use crate::bitset::{TwoLevelBitset, TICKS};
+use crate::bitset::TickBitset;
 use crate::events::{CancelRejectReason, Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side, NIL};
 use crate::snapshot::{Snapshot, SnapshotError};
 
-/// The maximum representable price tick (exclusive), mirroring the dense
-/// tick space tracked by [`TwoLevelBitset`].
-pub const MAX_TICKS: usize = TICKS;
+/// The number of price ticks every engine's ladder has: valid ticks are
+/// `0..MAX_TICKS`. For this size the [`TickBitset`] has two levels.
+pub const MAX_TICKS: usize = 4096;
 
 /// Which side is the aggressive taker, determining which bitset extremum
 /// (lowest vs. highest) and marketability comparison to use when crossing
@@ -189,8 +189,8 @@ impl NewOrder {
 pub struct Engine {
     pool: OrderPool,
     id_map: FlatHashMap,
-    bid_bitset: TwoLevelBitset,
-    ask_bitset: TwoLevelBitset,
+    bid_bitset: TickBitset,
+    ask_bitset: TickBitset,
     bid_levels: Box<[PriceLevel]>,
     ask_levels: Box<[PriceLevel]>,
     /// Counts accepted orders and is stamped into each resting order as
@@ -219,8 +219,8 @@ impl Engine {
         Self {
             pool: OrderPool::new(order_capacity),
             id_map: FlatHashMap::with_capacity(order_capacity),
-            bid_bitset: TwoLevelBitset::new(),
-            ask_bitset: TwoLevelBitset::new(),
+            bid_bitset: TickBitset::new(MAX_TICKS),
+            ask_bitset: TickBitset::new(MAX_TICKS),
             bid_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
             ask_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
             sequence: 0,
@@ -316,13 +316,13 @@ impl Engine {
         out
     }
 
-    fn next_lower_active(&self, bitset: &TwoLevelBitset, tick: usize) -> Option<usize> {
+    fn next_lower_active(&self, bitset: &TickBitset, tick: usize) -> Option<usize> {
         // Used for later bid levels after the best bid; inspect only lower
         // ticks and stop as soon as another active one is found.
         (0..tick).rev().find(|&t| bitset.test(t))
     }
 
-    fn next_higher_active(&self, bitset: &TwoLevelBitset, tick: usize) -> Option<usize> {
+    fn next_higher_active(&self, bitset: &TickBitset, tick: usize) -> Option<usize> {
         // Used for later ask levels after the best ask; inspect only higher
         // ticks and stop as soon as another active one is found.
         (tick + 1..MAX_TICKS).find(|&t| bitset.test(t))
@@ -659,7 +659,7 @@ impl Engine {
     fn match_incoming<S: EventSink + ?Sized>(
         pool: &mut OrderPool,
         levels: &mut [PriceLevel],
-        bitset: &mut TwoLevelBitset,
+        bitset: &mut TickBitset,
         id_map: &mut FlatHashMap,
         trades: &mut u64,
         taker: &NewOrder,
