@@ -31,10 +31,10 @@ good exercises in their own right.
 |---|---|
 | **4096 price ticks** | Fixed by the two-level bitset (`64 × 64`), checked at compile time. No tick-size or price offset logic; callers convert. |
 | **Fixed order capacity** | Chosen in `Engine::new`. A full arena rejects orders that would need to rest (orders that fully match still succeed). |
-| **Limit orders only** | No market, IOC, FOK, stop, iceberg; no modify (cancel + new loses priority); no self-trade prevention; no accounts. |
+| **Four order types** | Limit, immediate-or-cancel, market and post-only. No fill-or-kill, stop, iceberg or day orders. Quantity can be reduced in place, but raising it or changing the price means cancel + new, which loses priority. Market orders have no price protection. No self-trade prevention; no accounts. |
 | **One instrument per `Engine`** | Run several engines for several symbols. |
 | **Engine is not wired to the WAL or ring buffer** | The caller does it; [`examples/pipeline.rs`](../examples/pipeline.rs) shows how. The WAL's `sequence` is caller-supplied and independent of the engine's own counter. |
-| **WAL format is small** | Version 1 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
+| **WAL format is small** | Version 2 has a header, explicit little-endian fields and per-record checksums, but no fsync policy of its own, no recorded engine capacity and no file locking ([9.6](09-write-ahead-log.md#96-caveats-read-before-relying-on-the-wal)). |
 | **Failing loudly** | `assert!`/`expect` on invariants panic on a bookkeeping bug, in every build profile. With `panic = "abort"` (set in this repo's release profile, and needed in *your* binary's profile because Cargo ignores a dependency's) that aborts the process. Intentional for a financial component. |
 | **`depth_snapshot` is slow-ish** | It allocates a `Vec` and scans ticks linearly (documented in the source). Reporting only. |
 
@@ -120,31 +120,44 @@ the difference is bigger than the run-to-run noise criterion reports.
 
 ### New features
 
-🟡 **8. IOC orders (immediate-or-cancel).** Add a time-in-force parameter. An IOC
-order matches what it can and never rests. What should the event stream be for
-the unfilled remainder: `OrderCancelled`, or `OrderRejected` with a new
-`RejectReason`? Justify your choice.
-(Remember the rule from 6.9: the book must be consistent at every `emit`.)
+🟡 **8. Fill-or-kill orders.** Add `OrderType::FillOrKill`: the order trades its
+whole quantity at once, or nothing at all. "Nothing" must leave the book
+untouched, so the engine has to know *before the first trade* whether enough
+quantity rests at prices the order accepts. Then decide how a killed order is
+reported: rejected before acceptance (like a post-only order), or accepted and
+then expired (like an IOC order)? *Hint: walk the opposing levels best first,
+adding up `total_qty`, and stop as soon as the sum reaches `qty` or the next price
+no longer crosses; `depth_snapshot` shows how to walk the levels. Exercise 6 makes
+that walk fast. Remember that the WAL's order-type byte needs a new value.*
 
-**Done when:** tests show that an IOC order that partly fills emits its trades and
-then your chosen remainder event, an IOC order that cannot trade at all emits no
-trades, and in both cases `live_order_count()` does not grow.
+**Done when:** tests show a fill-or-kill order that fills completely when enough
+quantity is there, and one that is killed with no trades and unchanged depth when
+it is not, and `model_check` passes with fill-or-kill orders in the generator.
 
-🟡 **9. Market orders.** A buy with `price_tick = 4095` crosses every ask, but its
-remainder would *rest* at 4095, which is not what a market order means. Build real
-market orders on top of IOC (exercise 8).
+🟡 **9. Price protection for market orders.** A market order sweeps until it is
+filled, however far that takes it (1.9). Add a price band: a market order's limit
+becomes the best opposing price at arrival, plus (for a buy) or minus (for a sell)
+`band` ticks. *Hint: the limit is chosen in one place in `submit_order`; compute it
+from `best_ask` / `best_bid` there. Decide what happens on an empty opposing side,
+and where `band` lives: in `Engine::new`, or in each call.*
 
-**Done when:** a market buy sweeps the asks at every price and never rests, and a
-market order on an empty book emits only acceptance and the remainder event.
+**Done when:** with a band of 5, a market buy against asks at 100, 101 and 150
+trades at 100 and 101 only and expires the rest, and a market order on an empty
+side still emits only acceptance and `OrderExpired`.
 
-🟡 **10. Reduce-quantity in place.** Let a trader *lower* an order's quantity
-without losing time priority (raising it must still lose priority, as a
-cancel + new would). *Hint: adjust `remaining_qty` and `level.total_qty`
-together, as `reduce_qty` does. Reducing to zero should behave like a cancel.*
+🟡 **10. Amend: change the price or raise the quantity.** `reduce_order` keeps
+priority because the order gets smaller. Add `amend_order(id, new_price_tick,
+new_qty)` for every other change: it keeps the order's place when only the
+quantity goes down at the same price, and otherwise acts as cancel + new order,
+at the back of the queue, which may even trade if the new price crosses. *Hint:
+delegate the first case to `reduce_order`. For the events, keep the rule from 7.2
+that a consumer can follow the book from events alone: is `OrderCancelled` then
+`OrderAccepted` enough, or does the amend deserve its own event? The WAL needs a
+new record kind.*
 
-**Done when:** a test rests two orders at one price, reduces the first, and shows
-that a taker still fills the first one first; `depth_at` drops by the reduction,
-and reducing to zero emits `OrderCancelled`.
+**Done when:** tests show that lowering the quantity keeps priority, raising it
+loses priority, and moving the price across the spread trades; `model_check`
+sends amends too.
 
 🔴 **11. Self-trade prevention.** Add an `account: u32` to `Order`. When a taker
 would trade with its own account's resting order, apply a policy (cancel oldest,
@@ -207,13 +220,14 @@ failure once one `Acquire` is weakened to `Relaxed`.
 ### Making the WAL production-shaped
 
 🟡 **16. Record the capacity.** Replay is only deterministic with the same `Engine`
-capacity (9.1). Store it in the header's reserved bytes (format version 2), and
-make replay refuse a log written for a different capacity. Keep version 1 logs
-readable.
+capacity (9.1). Store it in the header's reserved bytes (format version 3), and
+make replay refuse a log written for a different capacity. Keep version 1 and 2
+logs readable. *Hint: 9.2 explains how version 2 was added next to version 1;
+follow the same steps, including the upgrade in `open_append`.*
 
-**Done when:** replaying a version 2 log into an engine of a different capacity
-returns a clear error, and the version 1 logs written by the existing tests still
-read correctly.
+**Done when:** replaying a version 3 log into an engine of a different capacity
+returns a clear error, and the version 1 and 2 logs written by the existing tests
+still read correctly.
 
 🟡 **17. One writer per file.** Take an exclusive lock with `File::try_lock` in
 `create` and `open_append` (stable since Rust 1.89, so raise `rust-version`), and
@@ -270,7 +284,9 @@ git switch main                                      # come back (stash or commi
 ```
 
 `a192ebc` has the **old API**, so the chapters, which describe the current code,
-will not match it exactly; use them for the ideas.
+will not match it exactly; use them for the ideas. R7 to R9 were solved much
+later: start those from the commit just before the named one
+(`git switch --detach <hash>~1`).
 
 🟢 **R1. An overflow flag.** Make the old fixed-size event batch record whether
 any event was dropped. *Solved by `fix(events)!: stream execution reports through
@@ -298,6 +314,23 @@ Exercise 12 is the next step.*
 per record, portable little-endian fields, and an open-for-append constructor.
 *Solved by `fix(wal)!: sound, portable, crash-safe log format`. The remaining
 limits are exercises 16 to 20.*
+
+🟡 **R7. Immediate-or-cancel orders.** An IOC order matches what it can and never
+rests. What should the event stream be for the unfilled remainder:
+`OrderCancelled`, or `OrderRejected` with a new `RejectReason`? Justify your
+choice. *Solved by `feat(engine): add immediate-or-cancel orders`, which chose
+neither: its commit message explains why a new `OrderExpired` event fits best.*
+
+🟡 **R8. Market orders.** A buy at tick 4095 crosses every ask, but rests its
+remainder there, which is not what a market order means. Build real market orders
+on top of IOC. *Solved by `feat(engine): add market orders`; exercise 9 adds the
+price protection real exchanges use.*
+
+🟡 **R9. Reduce quantity in place.** Let a trader lower an order's quantity without
+losing time priority; reducing it to nothing should behave like a cancel. *Solved
+by `feat(engine): reduce a resting order without losing priority`. Note how many
+places a new request kind touches: the event, the reject reason, the WAL record
+and the test generator. Exercise 10 goes further.*
 
 ### Every fix, with its commit
 
