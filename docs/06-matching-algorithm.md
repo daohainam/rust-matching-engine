@@ -17,9 +17,11 @@ let mut engine = Engine::new(order_capacity);          // allocate everything, o
 let mut events = Vec::new();                            // any EventSink (chapter 7)
 
 engine.process_order(id, side, tick, qty, &mut events); // submit a limit order
-engine.submit_order(id, side, order_type, tick, qty, &mut events); // any OrderType
+engine.submit_order(order, &mut events);                // any NewOrder (see below)
 let found = engine.cancel_order(id, &mut events);       // cancel a resting order: bool
 let found = engine.reduce_order(id, by, &mut events);   // lower its qty, keep its place
+let n = engine.cancel_account(account, &mut events);    // mass cancel one account: count
+let n = engine.cancel_all(&mut events);                 // mass cancel everything: count
 
 engine.best_bid();                 // Option<u32>
 engine.best_ask();                 // Option<u32>
@@ -29,8 +31,19 @@ engine.live_order_count();         // usize number of resting orders
 engine.resting_order(id);          // Option<RestingOrder>  side, tick, remaining qty
 ```
 
-`process_order` is shorthand for `submit_order` with `OrderType::Limit`; this
-chapter follows `submit_order`, which handles every type. All mutating methods
+`submit_order` takes a `NewOrder`, a small `Copy` struct with every term of an
+order. Its constructors and `with_*` methods read like a sentence:
+
+```rust
+let order = NewOrder::limit(42, Side::Buy, 100, 10)     // id, side, tick, qty
+    .with_type(OrderType::ImmediateOrCancel)
+    .with_account(7)
+    .with_self_trade_prevention(SelfTradePrevention::CancelResting);
+```
+
+`process_order(id, side, tick, qty, sink)` is shorthand for
+`submit_order(NewOrder::limit(id, side, tick, qty), sink)`: account 0, self-trades
+allowed. This chapter follows `submit_order`. All mutating methods
 take the sink as `sink: &mut S` with
 `S: EventSink + ?Sized`. Being generic, they are compiled separately for each sink
 type, so `emit` is inlined into the matching loop; `?Sized` also allows a
@@ -42,6 +55,7 @@ type, so `emit` is inlined into the matching loop; `?Sized` also allows a
 | `submit_order` / `process_order` | yes | no (a `Vec` sink may, when it grows) | expected O(1 + number of fills) |
 | `cancel_order` | yes | no | O(1) expected |
 | `reduce_order` | yes | no | O(1) expected |
+| `cancel_account` / `cancel_all` | yes | no | O(ticks between best and worst price + resting orders) |
 | `best_bid` / `best_ask` | no | no | O(1), two bit-scans |
 | `depth_at` | no | no | O(1) |
 | `depth_snapshot` | no | **yes** (`Vec`) | O(ticks scanned); for reporting only |
@@ -52,7 +66,7 @@ type, so `emit` is inlined into the matching loop; `?Sized` also allows a
 
 ```mermaid
 flowchart TD
-    A(["submit_order(id, side, type, tick, qty, sink)"]) --> A2["market order: tick = worst limit<br/>(4095 for a buy, 0 for a sell)"]
+    A(["submit_order(order, sink)"]) --> A2["market order: tick = worst limit<br/>(4095 for a buy, 0 for a sell)"]
     A2 --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live,<br/>or post-only that would trade?"}
     B -- yes --> R(["emit OrderRejected(reason)<br/>return immediately"])
     B -- no --> C["emit OrderAccepted"]
@@ -108,7 +122,7 @@ fn validate(&self, order_id: u64, side: Side, order_type: OrderType,
     }
 }
 
-// In submit_order:
+// In submit_order (after `let NewOrder { order_id, account, side, .. } = order;`):
 let price_tick = match (order_type, side) {             // a market order may trade at
     (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1, // any price: give it the
     (OrderType::Market, Side::Sell) => 0,                   // worst limit its side allows
@@ -118,7 +132,7 @@ if let Err(reason) = self.validate(order_id, side, order_type, price_tick, qty) 
     sink.emit(Event::OrderRejected { order_id, reason });
     return;
 }
-sink.emit(Event::OrderAccepted { order_id, side, order_type, price_tick, qty });
+sink.emit(Event::OrderAccepted { order_id, account, side, order_type, price_tick, qty });
 ```
 
 | Check | `RejectReason` | Why |
@@ -279,6 +293,47 @@ for the *next* best price.
 > bugs out of a codebase. The unit test `panicking_sink_leaves_the_book_consistent`
 > pins it down.
 
+### Self-trade prevention
+
+Right after it picks the head maker, and before it computes a trade, the inner
+loop checks whether the maker belongs to the taker's own account (excerpt):
+
+```rust
+let maker = *pool.get(maker_idx);
+let mode = taker.self_trade_prevention;
+if mode != SelfTradePrevention::Allow && maker.account == taker.account {
+    sink.emit(Event::SelfTradePrevented { taker_order_id, maker_order_id });
+    if mode.cancels_resting() {               // CancelResting or CancelBoth
+        level.remove(pool, maker_idx);        // exactly as for a full fill...
+        pool.free(maker_idx);
+        id_map.remove(maker_order_id);
+        if level.is_empty() { bitset.clear(tick); }
+        sink.emit(Event::OrderCancelled { /* maker, its side, tick and qty */ });
+    }
+    if mode.stops_incoming() {                // CancelIncoming or CancelBoth
+        return true;                          // "stopped by self-trade"
+    }
+    continue;                                 // the next maker in line
+}
+```
+
+With the default mode, `Allow`, the check is one comparison and nothing changes.
+Otherwise:
+
+| Mode | The own resting order | The incoming order |
+|---|---|---|
+| `CancelResting` | cancelled | keeps matching against the next maker |
+| `CancelIncoming` | untouched | stops; its remainder expires, even for a limit order |
+| `CancelBoth` | cancelled | stops; its remainder expires |
+
+Three details are worth a look. The `SelfTradePrevented` event comes **first**,
+while nothing has changed yet, so the sink sees a consistent book (6.9). The
+resting order leaves the book through the **same steps as a fully filled
+maker**, and in the same order: the bitset is updated before `OrderCancelled` is
+reported. And `match_incoming` now **returns a `bool`**: `submit_order` needs to
+know that the taker was stopped, because a stopped limit order must not rest.
+Trades the taker made before meeting its own order stand.
+
 ## 6.4 Phase 4: resting the remainder
 
 (Excerpt, abridged: the `Sell` arm mirrors the `Buy` arm.)
@@ -332,11 +387,12 @@ Two things can prevent an order from resting, and both produce `OrderRejected`
 
 ### Remainders that may not rest
 
-Immediate-or-cancel and market orders never rest. Their remainder is dropped
-before the arena is even asked for a slot (excerpt):
+Immediate-or-cancel and market orders never rest, and neither does an order that
+self-trade prevention stopped. Their remainder is dropped before the arena is
+even asked for a slot (excerpt):
 
 ```rust
-if !order_type.rests() {                 // only Limit and PostOnly rest
+if stopped_by_self_trade || !order_type.rests() {  // only Limit and PostOnly rest
     sink.emit(Event::OrderExpired { order_id, expired_qty: remaining });
     self.sequence = self.sequence.wrapping_add(1);
     return;
@@ -482,6 +538,42 @@ would, so for that you cancel and send a new order, which queues at the back.)
 it lowers the order's `remaining_qty` and the level's `total_qty` together.
 Reducing by the whole remainder or more is a cancel, with `OrderCancelled`.
 
+### Mass cancel
+
+`cancel_account(account, sink)` cancels every resting order of one account, and
+`cancel_all(sink)` every resting order. The engine keeps no list of orders per
+account, so both **walk the book**, the same way `depth_snapshot` does (excerpt):
+
+```rust
+for side in [Side::Buy, Side::Sell] {
+    let mut tick = /* best price on this side */;
+    while let Some(t) = tick {
+        tick = /* the next price, found before this level may empty */;
+        let mut idx = /* levels[t].head */;
+        while idx != NIL {
+            let order = *self.pool.get(idx);            // copy: cancelling clears its links
+            if account.is_none_or(|account| account == order.account) {
+                self.id_map.remove(order.order_id);
+                self.remove_cancelled(idx, sink);       // unlink, free, OrderCancelled
+                cancelled += 1;
+            }
+            idx = order.next_idx;
+        }
+    }
+}
+sink.emit(Event::MassCancelled { account, cancelled_orders: cancelled });
+```
+
+So the cancellations come in a **fixed order**: bids best first, then asks best
+first, oldest first at each price. That matters for determinism: a replay
+reports them in the same order, and the reference book in the model check can
+predict every event. `remove_cancelled` is the second half of `cancel_order`,
+shared now that two callers need it. The cost is the ticks between each side's
+best and worst price (at most 4096) plus the orders on them; the empty ticks are
+the price of not keeping a per-account list (exercise 11 in chapter 11 adds one).
+`MassCancelled` closes every mass cancel, even one that found nothing, so the
+request always leaves an event.
+
 ## 6.7 Edge cases, verified
 
 | Input | Events emitted | Book effect |
@@ -502,6 +594,10 @@ Reducing by the whole remainder or more is a cancel, with `OrderCancelled`.
 | `cancel_order` of an id that is not resting | `[CancelRejected(NotResting)]` (returns `false`) | none |
 | `reduce_order` by 0 | `[CancelRejected(ZeroQuantity)]` (returns `false`) | none |
 | `reduce_order` by the remaining quantity or more | `[OrderCancelled]` (returns `true`) | the order is removed |
+| Incoming order meets its own account's order, mode `Allow` (the default) | an ordinary `Trade` | normal |
+| ...mode `CancelResting` | `SelfTradePrevented`, `OrderCancelled(maker)`, then matching goes on | the own order is removed |
+| ...mode `CancelIncoming` | `SelfTradePrevented`, then the taker's final events and `OrderExpired` | the own order stays; nothing rests |
+| `cancel_account` of an account with no resting orders, or `cancel_all` on an empty book | `[MassCancelled { cancelled_orders: 0, .. }]` | none |
 
 ## 6.8 Complexity
 
@@ -509,10 +605,14 @@ Reducing by the whole remainder or more is a cancel, with `OrderCancelled`.
 - **Phase 3 (match):** each loop iteration produces a trade and either removes a
   maker (`O(1)` unlink + free + hash remove) or ends the taker. Moving to the next
   price is a bit-scan, also O(1). Every price level visited yields at least one
-  trade, so the total cost is **O(number of fills)**.
+  trade or one cancelled own order, so the total cost is **O(number of fills +
+  prevented self-trades)**.
 - **Phase 4 (rest or expire):** O(1).
 - **`cancel_order` and `reduce_order`:** O(1) expected: one hash lookup, then
   constant work on the order's queue.
+- **`cancel_account` and `cancel_all`:** O(ticks between the best and worst price
+  on each side + orders on them), at most 4096 ticks; no hash lookups to find
+  orders, one per cancelled order to remove it.
 
 Overall: **expected O(1 + fills)** (the "expected" is because the hash map probes;
 see chapter 5), which matches the doc comment ("O(1) + O(fills)"). A
