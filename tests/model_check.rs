@@ -83,6 +83,7 @@ impl ReferenceBook {
                 events.push(Event::Trade {
                     maker_order_id: maker,
                     taker_order_id: order_id,
+                    taker_side: side,
                     price_tick: tick,
                     qty: traded,
                 });

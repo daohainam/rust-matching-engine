@@ -60,10 +60,13 @@ pub enum Event {
         qty: u64,
     },
     /// A trade occurred: `maker_order_id` rests in the book, `taker_order_id`
-    /// is the incoming order. `price_tick` / `qty` describe the fill.
+    /// is the incoming order. `price_tick` / `qty` describe the fill, and
+    /// `taker_side` is the aggressor's side (the maker is on the other one),
+    /// which market data reports with every trade.
     Trade {
         maker_order_id: u64,
         taker_order_id: u64,
+        taker_side: Side,
         price_tick: u32,
         qty: u64,
     },

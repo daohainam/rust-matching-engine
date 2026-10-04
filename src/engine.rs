@@ -332,6 +332,10 @@ impl Engine {
         sink: &mut S,
         direction: Crossing,
     ) {
+        let taker_side = match direction {
+            Crossing::TakerBuy => Side::Buy,
+            Crossing::TakerSell => Side::Sell,
+        };
         loop {
             if *remaining == 0 {
                 break;
@@ -373,6 +377,7 @@ impl Engine {
                 sink.emit(Event::Trade {
                     maker_order_id,
                     taker_order_id,
+                    taker_side,
                     price_tick: tick as u32,
                     qty: trade_qty,
                 });
@@ -530,6 +535,7 @@ mod tests {
                 Event::Trade {
                     maker_order_id: 1,
                     taker_order_id: 2,
+                    taker_side: Side::Buy,
                     price_tick: 100,
                     qty: 10
                 },
@@ -554,6 +560,7 @@ mod tests {
                 Event::Trade {
                     maker_order_id: 1,
                     taker_order_id: 2,
+                    taker_side: Side::Buy,
                     price_tick: 100,
                     qty: 4
                 },
@@ -580,6 +587,7 @@ mod tests {
                 Event::Trade {
                     maker_order_id: 1,
                     taker_order_id: 2,
+                    taker_side: Side::Buy,
                     price_tick: 100,
                     qty: 4
                 },
@@ -680,6 +688,20 @@ mod tests {
         assert_eq!(engine.best_ask(), Some(102));
         assert_eq!(engine.depth_at(Side::Sell, 102), 3);
         assert_eq!(engine.best_bid(), None); // taker fully filled, nothing rests
+    }
+
+    #[test]
+    fn trade_names_the_aggressor_side() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 5);
+        let events = place(&mut engine, 2, Side::Sell, 100, 5);
+        assert!(events.contains(&Event::Trade {
+            maker_order_id: 1,
+            taker_order_id: 2,
+            taker_side: Side::Sell,
+            price_tick: 100,
+            qty: 5
+        }));
     }
 
     #[test]
