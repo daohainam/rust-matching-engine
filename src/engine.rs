@@ -50,6 +50,8 @@ pub struct Engine {
     /// audit metadata. Matching never reads it: time priority comes from the
     /// position in a level's FIFO queue, not from comparing this number.
     sequence: u64,
+    /// Number of trades executed so far; the last one's `trade_id`.
+    trades: u64,
 }
 
 impl Engine {
@@ -75,6 +77,7 @@ impl Engine {
             bid_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
             ask_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
             sequence: 0,
+            trades: 0,
         }
     }
 
@@ -228,6 +231,7 @@ impl Engine {
                 &mut self.ask_levels,
                 &mut self.ask_bitset,
                 &mut self.id_map,
+                &mut self.trades,
                 order_id,
                 price_tick,
                 &mut remaining,
@@ -240,6 +244,7 @@ impl Engine {
                 &mut self.bid_levels,
                 &mut self.bid_bitset,
                 &mut self.id_map,
+                &mut self.trades,
                 order_id,
                 price_tick,
                 &mut remaining,
@@ -326,6 +331,7 @@ impl Engine {
         levels: &mut [PriceLevel],
         bitset: &mut TwoLevelBitset,
         id_map: &mut FlatHashMap,
+        trades: &mut u64,
         taker_order_id: u64,
         price_tick: u32,
         remaining: &mut u64,
@@ -374,7 +380,9 @@ impl Engine {
                 // A trade can consume the maker, the taker, or both exactly.
                 let trade_qty = (*remaining).min(maker_qty);
 
+                *trades += 1;
                 sink.emit(Event::Trade {
+                    trade_id: *trades,
                     maker_order_id,
                     taker_order_id,
                     taker_side,
@@ -533,6 +541,7 @@ mod tests {
             vec![
                 accepted(2, Side::Buy, 100, 10),
                 Event::Trade {
+                    trade_id: 1,
                     maker_order_id: 1,
                     taker_order_id: 2,
                     taker_side: Side::Buy,
@@ -558,6 +567,7 @@ mod tests {
             vec![
                 accepted(2, Side::Buy, 100, 4),
                 Event::Trade {
+                    trade_id: 1,
                     maker_order_id: 1,
                     taker_order_id: 2,
                     taker_side: Side::Buy,
@@ -585,6 +595,7 @@ mod tests {
             vec![
                 accepted(2, Side::Buy, 100, 10),
                 Event::Trade {
+                    trade_id: 1,
                     maker_order_id: 1,
                     taker_order_id: 2,
                     taker_side: Side::Buy,
@@ -696,6 +707,7 @@ mod tests {
         place(&mut engine, 1, Side::Buy, 100, 5);
         let events = place(&mut engine, 2, Side::Sell, 100, 5);
         assert!(events.contains(&Event::Trade {
+            trade_id: 1,
             maker_order_id: 1,
             taker_order_id: 2,
             taker_side: Side::Sell,
@@ -725,6 +737,31 @@ mod tests {
         assert_eq!(trades, vec![(102, 5), (101, 5), (100, 2)]);
         assert_eq!(engine.best_bid(), Some(100));
         assert_eq!(engine.depth_at(Side::Buy, 100), 3);
+    }
+
+    #[test]
+    fn trade_ids_count_up_across_calls() {
+        let mut engine = Engine::new(16);
+        let trade_ids = |events: &[Event]| -> Vec<u64> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Trade { trade_id, .. } => Some(*trade_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        place(&mut engine, 1, Side::Sell, 100, 1);
+        place(&mut engine, 2, Side::Sell, 101, 1);
+        place(&mut engine, 3, Side::Sell, 102, 1);
+        let sweep = place(&mut engine, 4, Side::Buy, 101, 5);
+        assert_eq!(trade_ids(&sweep), [1, 2]);
+        // Rejections, resting orders and cancels do not use up an id.
+        place(&mut engine, 5, Side::Buy, 100, 0);
+        place(&mut engine, 6, Side::Buy, 90, 1);
+        cancel(&mut engine, 6);
+        let next = place(&mut engine, 7, Side::Sell, 101, 1);
+        assert_eq!(trade_ids(&next), [3]);
     }
 
     #[test]

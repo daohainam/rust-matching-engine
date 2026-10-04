@@ -20,6 +20,7 @@ struct ReferenceBook {
     bids: BTreeMap<u32, Queue>,
     asks: BTreeMap<u32, Queue>,
     live: HashMap<u64, (Side, u32)>,
+    trades: u64,
 }
 
 impl ReferenceBook {
@@ -29,6 +30,7 @@ impl ReferenceBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
+            trades: 0,
         }
     }
 
@@ -80,7 +82,9 @@ impl ReferenceBook {
                 let (maker, maker_qty) = *front;
                 let traded = remaining.min(maker_qty);
                 remaining -= traded;
+                self.trades += 1;
                 events.push(Event::Trade {
+                    trade_id: self.trades,
                     maker_order_id: maker,
                     taker_order_id: order_id,
                     taker_side: side,

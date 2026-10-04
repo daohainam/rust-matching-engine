@@ -62,8 +62,12 @@ pub enum Event {
     /// A trade occurred: `maker_order_id` rests in the book, `taker_order_id`
     /// is the incoming order. `price_tick` / `qty` describe the fill, and
     /// `taker_side` is the aggressor's side (the maker is on the other one),
-    /// which market data reports with every trade.
+    /// which market data reports with every trade. `trade_id` numbers the
+    /// engine's trades 1, 2, 3, ... in the order they happen; it is the same
+    /// on every replay of the same requests, so downstream can use it to
+    /// spot a duplicate or a gap.
     Trade {
+        trade_id: u64,
         maker_order_id: u64,
         taker_order_id: u64,
         taker_side: Side,
