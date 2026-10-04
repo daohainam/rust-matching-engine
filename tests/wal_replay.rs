@@ -5,26 +5,8 @@
 mod common;
 
 use common::{Op, OpGenerator, TempFile};
-use matching_engine::wal::{read, WalRecord, WalRecordKind, WalWriter};
-use matching_engine::{Engine, Event, Side};
-
-fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
-    match record.kind {
-        WalRecordKind::NewOrder => engine.submit_order(record.order(), events),
-        WalRecordKind::Cancel => {
-            engine.cancel_order(record.order_id, events);
-        }
-        WalRecordKind::Reduce => {
-            engine.reduce_order(record.order_id, record.qty, events);
-        }
-        WalRecordKind::CancelAccount => {
-            engine.cancel_account(record.account, events);
-        }
-        WalRecordKind::CancelAll => {
-            engine.cancel_all(events);
-        }
-    }
-}
+use matching_engine::wal::{read, replay, WalRecord, WalWriter};
+use matching_engine::{Engine, Side};
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri cannot map files.
@@ -51,7 +33,7 @@ fn replaying_the_wal_reproduces_every_event() {
         };
         // Write-ahead: the request is logged before the engine applies it.
         writer.append(record).unwrap();
-        apply(&mut primary, &record, &mut primary_events);
+        record.apply_to(&mut primary, &mut primary_events);
     }
     writer.finalize().unwrap();
 
@@ -63,11 +45,8 @@ fn replaying_the_wal_reproduces_every_event() {
 
     // The replica's ID map draws a different random hash seed; the results
     // must not depend on it.
-    let mut replica = Engine::new(CAPACITY);
     let mut replayed_events = Vec::new();
-    for record in &records {
-        apply(&mut replica, record, &mut replayed_events);
-    }
+    let replica = replay(&path.0, &mut replayed_events).unwrap();
 
     assert_eq!(replayed_events, primary_events);
     assert_eq!(replica.live_order_count(), primary.live_order_count());

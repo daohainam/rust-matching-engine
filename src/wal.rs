@@ -21,7 +21,7 @@
 //! | 16     | 8    | engine capacity, see below  |
 //! | 24     | 8    | reserved, zero              |
 //!
-//! The engine capacity is the `order_capacity` of the [`Engine`](crate::Engine)
+//! The engine capacity is the `order_capacity` of the [`Engine`]
 //! the log was written for. It decides which orders can rest, so a replay is
 //! deterministic only into an engine of the same capacity; recording it lets
 //! [`WalWriter::open_append`] and [`read`] check it instead of trusting the
@@ -105,7 +105,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::engine::{NewOrder, OrderType, SelfTradePrevention};
+use crate::engine::{Engine, NewOrder, OrderType, SelfTradePrevention};
+use crate::events::EventSink;
 use crate::pool::Side;
 
 /// Size in bytes of the file header that precedes the records.
@@ -231,6 +232,27 @@ impl WalRecord {
             price_tick: self.price_tick,
             qty: self.qty,
             self_trade_prevention: self.self_trade_prevention,
+        }
+    }
+
+    /// Makes the engine call this record logged, sending its events to
+    /// `sink`. The live loop and a replay should both apply requests this
+    /// way: then they are guaranteed to make exactly the same calls.
+    pub fn apply_to<S: EventSink + ?Sized>(&self, engine: &mut Engine, sink: &mut S) {
+        match self.kind {
+            WalRecordKind::NewOrder => engine.submit_order(self.order(), sink),
+            WalRecordKind::Cancel => {
+                engine.cancel_order(self.order_id, sink);
+            }
+            WalRecordKind::Reduce => {
+                engine.reduce_order(self.order_id, self.qty, sink);
+            }
+            WalRecordKind::CancelAccount => {
+                engine.cancel_account(self.account, sink);
+            }
+            WalRecordKind::CancelAll => {
+                engine.cancel_all(sink);
+            }
         }
     }
 
@@ -712,6 +734,39 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<WalContents> {
     })
 }
 
+/// Rebuilds an engine from a WAL file alone: creates an
+/// [`Engine`] with the capacity the log records, and applies every record
+/// to it with [`WalRecord::apply_to`], sending the events to `sink`.
+///
+/// Because the engine is deterministic, the result is the book the live
+/// engine had after its last logged request, and `sink` receives the same
+/// events it emitted (see chapter 9 on what to do with them).
+///
+/// Fails with [`io::ErrorKind::InvalidData`] if the log does not record its
+/// capacity (an older log that nothing has continued yet); [`read`] it and
+/// replay into an engine you build instead. Allocates (it reads the file
+/// into memory), so it belongs in recovery, not on the hot path.
+pub fn replay<P, S>(path: P, sink: &mut S) -> io::Result<Engine>
+where
+    P: AsRef<Path>,
+    S: EventSink + ?Sized,
+{
+    let contents = read(path)?;
+    let capacity = contents.engine_capacity.ok_or_else(|| {
+        invalid_data("the log does not record the engine capacity it was written for".into())
+    })?;
+    if capacity >= u32::MAX as usize {
+        return Err(invalid_data(format!(
+            "engine capacity {capacity} is too large for an engine"
+        )));
+    }
+    let mut engine = Engine::new(capacity);
+    for record in &contents.records {
+        record.apply_to(&mut engine, sink);
+    }
+    Ok(engine)
+}
+
 /// Reads every valid record from a WAL file, like [`read`] without the
 /// header's engine capacity.
 pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
@@ -721,6 +776,7 @@ pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::Event;
     use std::path::PathBuf;
 
     /// A per-process temp file path that is removed when dropped.
@@ -1027,6 +1083,42 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn replay_rebuilds_the_book_with_the_recorded_capacity() {
+        let path = TempPath::new("replay");
+        let requests = [
+            WalRecord::new_order(1, Side::Sell, 100, 5, 0),
+            WalRecord::new_order(2, Side::Buy, 99, 4, 1),
+            WalRecord::new_order(3, Side::Buy, 100, 2, 2),
+            WalRecord::reduce(2, 1, 3),
+        ];
+        let mut live = Engine::new(TEST_CAPACITY);
+        let mut live_events = Vec::new();
+        let mut writer = WalWriter::create(&path.0, TEST_CAPACITY, 4).unwrap();
+        for record in requests {
+            writer.append(record).unwrap();
+            record.apply_to(&mut live, &mut live_events);
+        }
+        writer.finalize().unwrap();
+
+        let mut replayed_events: Vec<Event> = Vec::new();
+        let replica = replay(&path.0, &mut replayed_events).unwrap();
+        assert_eq!(replica.capacity(), TEST_CAPACITY);
+        assert_eq!(replayed_events, live_events);
+        assert_eq!(replica.depth_snapshot(Side::Sell, 9), [(100, 3)]);
+        assert_eq!(replica.depth_snapshot(Side::Buy, 9), [(99, 3)]);
+
+        // A log that does not know its capacity cannot be replayed blindly.
+        let mut bytes = std::fs::read(&path.0).unwrap();
+        bytes[16..24].fill(0);
+        std::fs::write(&path.0, bytes).unwrap();
+        let err = replay(&path.0, &mut |_: Event| {})
+            .err()
+            .expect("an unknown capacity must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

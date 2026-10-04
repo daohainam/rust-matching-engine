@@ -443,7 +443,7 @@ runs.
 use std::thread;
 
 use matching_engine::ringbuffer::spsc_channel;
-use matching_engine::wal::{read_all, WalRecord, WalRecordKind, WalWriter};
+use matching_engine::wal::{replay, WalRecord, WalWriter};
 use matching_engine::{Engine, Event, Side};
 
 /// What the gateway thread sends to the matching thread.
@@ -458,26 +458,6 @@ enum Command {
     Cancel {
         id: u64,
     },
-}
-
-/// Applies one logged request. The live run and the replay share this
-/// function, so both are guaranteed to make exactly the same engine calls.
-fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
-    match record.kind {
-        WalRecordKind::NewOrder => engine.submit_order(record.order(), events),
-        WalRecordKind::Cancel => {
-            engine.cancel_order(record.order_id, events);
-        }
-        WalRecordKind::Reduce => {
-            engine.reduce_order(record.order_id, record.qty, events);
-        }
-        WalRecordKind::CancelAccount => {
-            engine.cancel_account(record.account, events);
-        }
-        WalRecordKind::CancelAll => {
-            engine.cancel_all(events);
-        }
-    }
 }
 
 fn main() -> std::io::Result<()> {
@@ -539,27 +519,18 @@ fn main() -> std::io::Result<()> {
         sequence += 1;
         // 1. Write-ahead: log the request BEFORE applying it.
         wal.append(record)?;
-        // 2. Apply it to the book.
+        // 2. Apply it to the book, exactly as a replay will.
         events.clear();
-        apply(&mut engine, &record, &mut events);
+        record.apply_to(&mut engine, &mut events);
         // 3. A real system would publish `events` downstream here.
     }
     gateway.join().expect("gateway thread panicked");
     wal.finalize()?; // flush, trim the preallocated tail, sync
 
-    // Recovery: rebuild the book from the log alone. The replica must use
-    // the same capacity, because capacity decides which orders can rest.
-    let records = read_all(&path)?;
-    assert_eq!(
-        records.len() as u64,
-        sequence,
-        "every logged request is read back"
-    );
-    let mut replica = Engine::new(CAPACITY);
-    for record in &records {
-        events.clear();
-        apply(&mut replica, record, &mut events);
-    }
+    // Recovery: rebuild the book from the log alone. `replay` builds the
+    // replica with the capacity the log records and applies every record
+    // with `apply_to`, like the loop above. Its events are not needed here.
+    let replica = replay(&path, &mut |_: Event| {})?;
     std::fs::remove_file(&path)?;
 
     assert_eq!(engine.live_order_count(), replica.live_order_count());

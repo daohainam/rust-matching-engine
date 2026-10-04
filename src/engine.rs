@@ -857,6 +857,13 @@ impl Engine {
         true
     }
 
+    /// Returns how many orders can rest at once: the `order_capacity` this
+    /// engine was created with.
+    #[inline(always)]
+    pub fn capacity(&self) -> usize {
+        self.pool.capacity()
+    }
+
     /// Returns the number of currently resting orders across both sides.
     #[inline(always)]
     pub fn live_order_count(&self) -> usize {
