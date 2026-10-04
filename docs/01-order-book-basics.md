@@ -30,6 +30,7 @@ limit order has four pieces of information:
 | `price`    | The *worst* price the trader will accept.                      | `price_tick: u32`           |
 | `qty`      | How many units (shares, lots, contracts...).                   | `qty: u64`                  |
 | `order_id` | A unique label so the order can be referred to (e.g. cancelled). | `order_id: u64`             |
+| `account`  | Who placed it: a trader, a firm, or whatever unit the caller tracks. | `account: u32`              |
 
 "Unique" here means *unique among orders that are still in the book*. The engine
 rejects a new order whose id belongs to a resting order, but once an order has
@@ -154,6 +155,22 @@ stay is fair. Raising the quantity, or changing the price, would be unfair to
 the orders queued behind it, so for that the trader cancels and sends a new
 order, which joins the back of the queue.
 
+Sometimes every order of one trader must go at once: their connection drops
+(many exchanges then "cancel on disconnect"), or a risk system pulls the plug.
+A **mass cancel** does that for one account, or for the whole book at the end
+of a session or when trading halts.
+
+### Trading with yourself
+
+A large trader often has buy and sell orders in the book at the same time, from
+different strategies. If one of their buys meets one of their own sells, a
+"trade" is printed that moved nothing from one owner to another, but that the
+rest of the market sees as real activity. Done on purpose that is called **wash
+trading**, and it is illegal market manipulation. So venues offer **self-trade
+prevention**: when an incoming order would trade with a resting order of the
+same account, the trade is blocked, and the trader chooses what happens instead:
+cancel the resting order, cancel the incoming one, or both.
+
 ## 1.8 Ticks: prices as small integers
 
 Real prices look like `101.25`. Floating-point numbers cannot represent most
@@ -184,7 +201,8 @@ dense, we can use **arrays indexed by tick** instead of trees or hash maps.
 | Limit, immediate-or-cancel, market and post-only orders | Stop orders, fill-or-kill, day orders                 |
 | Partial and full fills                                 | Iceberg orders (hidden quantity)                       |
 | Resting the unfilled remainder                         | Raising quantity or changing price in place (cancel + new works) |
-| Cancel by `order_id`; reduce quantity, keeping priority | Self-trade prevention, per-account limits             |
+| Cancel by `order_id`; reduce quantity, keeping priority | Per-account limits (position, open orders)         |
+| Accounts, self-trade prevention, mass cancel           | Trading sessions and halts (only `cancel_all` for them) |
 | Price-time priority                                    | More than one instrument per `Engine` (use one each)   |
 | Depth queries and order lookup                         | Auctions, circuit breakers, fees                       |
 
@@ -324,6 +342,8 @@ Events are how the engine talks to the outside world; see
 | Market order    | "Trade now, at any price"; what cannot trade at once expires              |
 | IOC             | Immediate-or-cancel: a limit order whose remainder expires instead of resting |
 | Post-only       | A limit order that is refused if it would trade on arrival               |
+| Account         | Who placed an order; self-trade prevention and mass cancels use it       |
+| Self-trade      | A trade between two orders of the same account; can be prevented         |
 | Marketable      | Able to trade immediately against the opposite side                      |
 | Maker           | The resting order in a trade                                             |
 | Taker           | The incoming order in a trade                                            |
