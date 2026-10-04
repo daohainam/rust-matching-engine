@@ -55,6 +55,8 @@ Reading them is a good way to learn the behaviour each module promises.
 | `reduce_rejects_zero_and_orders_that_are_not_resting` | A reduction of 0 and an unknown id get `CancelRejected` with `ZeroQuantity` and `NotResting`; zero is checked first. |
 | `cancel_account_removes_only_that_accounts_orders_in_book_order` | `cancel_account` cancels one account's bids best first, then its asks, and leaves the other account's orders alone. |
 | `cancel_all_empties_the_book_and_always_reports` | `cancel_all` empties the book, and on an empty book still emits `MassCancelled` with a count of 0. |
+| `a_restored_engine_keeps_priority_and_counters` | A snapshot lists bids best first, then asks, oldest first at each price; the restored engine fills a sweep in the same order, with trade ids that continue where the original's stopped. |
+| `restore_refuses_snapshots_no_live_book_could_have` | `restore` rejects a zero capacity, too many orders, a duplicate id, a zero quantity, a level that would overflow and a crossed book, each with its own `SnapshotError`. |
 | `crosses_multiple_ask_price_levels_in_price_time_priority` | A buy sweeps asks from the cheapest level upward. |
 | `trade_names_the_aggressor_side` | A sell taker's `Trade` reports `taker_side: Sell`. |
 | `crosses_multiple_bid_price_levels_for_incoming_sell` | A sell sweeps bids from the highest level downward (the mirror case). |
@@ -81,7 +83,8 @@ Reading them is a good way to learn the behaviour each module promises.
 | `hashmap.rs` | `insert_get_remove`, `update_existing_key`, `survives_many_collisions_and_deletions`, `insert_rejects_reserved_sentinel_key_in_all_build_profiles`, `get_and_remove_are_safe_for_reserved_sentinel_key`, `keys_crafted_for_one_seed_spread_out_under_another`, `seeded_maps_behave_identically`, `insert_refuses_to_fill_the_last_empty_slot`, `absurd_capacity_is_rejected_instead_of_wrapping` | Basic operations and backward-shift deletion under collisions; the reserved key is handled; ids crafted against one seed scatter under another (chapter 5); the seed never changes a result; a full table and an absurd size fail loudly instead of hanging or wrapping. |
 | `events.rs` | `full_batch_counts_dropped_events_until_cleared`, `closures_and_vectors_are_sinks` | A full `EventBatch` counts what it drops until `clear`; closures and `Vec`s work as sinks. |
 | `ringbuffer.rs` | `push_pop_single_thread`, `capacity_rounds_up_to_a_power_of_two`, `zero_capacity_is_rejected`, `spsc_across_threads_preserves_order`, `consumer_reports_disconnect_only_after_draining`, `producer_sees_a_dropped_consumer` | FIFO order, full/empty behaviour and wrap-around; 100,000 values cross two real threads complete and in order (failing fast if the producer stops); disconnection is reported only once nothing is left to read. |
-| `wal.rs` | `encode_decode_roundtrip`, `decode_rejects_zeroed_and_corrupted_records`, `append_grow_finalize_and_read_back`, `dropping_a_writer_finalizes_it`, `finalizing_an_empty_log_keeps_only_the_header`, `create_refuses_to_overwrite_an_existing_log`, `read_stops_at_zeroed_preallocated_tail`, `read_stops_before_a_torn_record`, `read_ignores_a_partial_trailing_record`, `open_append_resumes_after_the_last_valid_record`, `open_append_upgrades_older_logs`, `a_record_for_account_zero_keeps_its_version_2_bytes`, `rejects_files_without_a_valid_header` | Records of every kind, order type, self-trade mode and account survive encoding; an unknown order type or mode, and a flipped bit anywhere in the 40 bytes, are caught; a record for account 0 is byte for byte what version 2 wrote; growth, `finalize` and `Drop` leave exactly the header plus the records; `create` never touches an existing file; readers stop at the first zeroed, torn or partial record; `open_append` continues after the last valid record, and upgrades a version 1 or 2 log it continues; a bad header is `InvalidData`. |
+| `wal.rs` | `encode_decode_roundtrip`, `decode_rejects_zeroed_and_corrupted_records`, `append_grow_finalize_and_read_back`, `dropping_a_writer_finalizes_it`, `finalizing_an_empty_log_keeps_only_the_header`, `create_refuses_to_overwrite_an_existing_log`, `read_stops_at_zeroed_preallocated_tail`, `read_stops_before_a_torn_record`, `read_ignores_a_partial_trailing_record`, `open_append_resumes_after_the_last_valid_record`, `open_append_upgrades_older_logs`, `a_record_for_account_zero_keeps_its_version_2_bytes`, `open_append_refuses_a_log_written_for_another_capacity`, `a_second_writer_is_refused_while_the_first_is_live`, `replay_rebuilds_the_book_with_the_recorded_capacity`, `replay_from_finishes_what_a_snapshot_started`, `rejects_files_without_a_valid_header` | Records of every kind, order type, self-trade mode and account survive encoding; an unknown order type or mode, and a flipped bit anywhere in the 40 bytes, are caught; a record for account 0 is byte for byte what version 2 wrote; growth, `finalize` and `Drop` leave exactly the header plus the records; `create` never touches an existing file; readers stop at the first zeroed, torn or partial record; `open_append` continues after the last valid record, upgrades an older log it continues (recording its capacity), and refuses a log written for another capacity without touching it; a second writer gets `WouldBlock` and the first carries on; `replay` builds the engine with the recorded capacity and refuses a log that has none; `replay_from` applies only the records after a snapshot; a bad header is `InvalidData`. |
+| `snapshot.rs` | `encode_decode_roundtrip`, `damage_anywhere_is_detected`, `writing_replaces_the_checkpoint_in_one_step` | A checkpoint survives encoding, with and without orders; every flipped bit and every truncation is caught; writing replaces the old checkpoint and leaves no `.tmp` file, even when a crashed write left one behind. |
 
 The WAL's crash tests do not crash anything. They write **crash images** by hand
 (a valid header followed by chosen bytes: a zero tail, a torn record, half a
@@ -161,7 +164,15 @@ every trade), live count and depth.
 
 The replica builds its own hash map, with its own **random seed**. The test
 therefore also proves the claim from chapter 5: the seed changes where entries
-are stored, never what the engine does.
+are stored, never what the engine does. The replica is built by `wal::replay`,
+from the capacity the log records, so the test also checks that the header
+carries it.
+
+`tests/snapshot.rs` makes the same kind of claim for snapshots (chapter 9.8). It
+runs 10,000 generated requests, restores a second engine from a snapshot of the
+first, and feeds both the next 10,000 requests: every call must produce exactly
+the same events, and the two books must end identical. It runs once with a tight
+arena and once with a roomy one.
 
 ## 10.4 Proving "zero allocation"
 
@@ -379,8 +390,8 @@ Every push and pull request runs [`.github/workflows/ci.yml`](../.github/workflo
 
 | Job | Runs on | Checks |
 |---|---|---|
-| **Test** | `ubuntu-latest`, `windows-latest`, `ubuntu-24.04-arm`, Rust 1.98.1 | `cargo fmt --check`; `clippy -D warnings`; `cargo doc` with `-D warnings`; `cargo test` in debug and release; benchmarks compile; `examples/pipeline.rs` runs |
-| **MSRV** | `ubuntu-latest`, Rust 1.88 | `cargo check --lib`: the `rust-version` promise in `Cargo.toml` |
+| **Test** | `ubuntu-latest`, `windows-latest`, `ubuntu-24.04-arm`, Rust 1.98.1 | `cargo fmt --check`; `clippy -D warnings`; `cargo doc` with `-D warnings`; `cargo test` in debug and release; benchmarks compile; the `pipeline`, `walkthrough` and `checkpoint` examples run |
+| **MSRV** | `ubuntu-latest`, Rust 1.89 | `cargo check --lib`: the `rust-version` promise in `Cargo.toml` |
 | **Miri** | `ubuntu-latest`, nightly | `cargo miri test --lib`: undefined behaviour in the `unsafe` code (tests that map files are skipped) |
 
 Each choice exists to catch a specific kind of failure:
