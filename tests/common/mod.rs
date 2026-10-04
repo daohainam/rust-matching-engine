@@ -140,8 +140,11 @@ impl OpGenerator {
             13..=22 => OrderType::PostOnly,
             _ => OrderType::Limit,
         };
+        // A few accounts, so that orders of one account often meet.
+        let account = self.rng.below(4) as u32;
         Op::Place(NewOrder {
             order_id,
+            account,
             side,
             order_type,
             price_tick,

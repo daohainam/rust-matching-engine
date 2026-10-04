@@ -168,6 +168,9 @@ impl WalRecord {
     }
 
     /// Describes a request to submit `order`, of any [`OrderType`].
+    ///
+    /// The format has no account field yet: the order is logged, and
+    /// replayed, for account 0.
     pub fn submit(order: NewOrder, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::NewOrder,
@@ -186,6 +189,7 @@ impl WalRecord {
     pub fn order(&self) -> NewOrder {
         NewOrder {
             order_id: self.order_id,
+            account: 0,
             side: self.side,
             order_type: self.order_type,
             price_tick: self.price_tick,

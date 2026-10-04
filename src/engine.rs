@@ -33,6 +33,8 @@ enum Crossing {
 pub struct RestingOrder {
     /// The caller's identifier for the order.
     pub order_id: u64,
+    /// The account that owns the order.
+    pub account: u32,
     /// The side of the book it rests on.
     pub side: Side,
     /// The price tick it rests at.
@@ -76,12 +78,16 @@ impl OrderType {
 /// A request to submit an order, as [`Engine::submit_order`] takes it.
 ///
 /// Start from [`limit`](Self::limit) or [`market`](Self::market) and adjust
-/// with [`with_type`](Self::with_type); every field is public, so struct
-/// update syntax works too.
+/// with [`with_type`](Self::with_type) and [`with_account`](Self::with_account);
+/// every field is public, so struct update syntax works too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NewOrder {
     /// The caller's identifier, unique among resting orders.
     pub order_id: u64,
+    /// The account placing the order: a trader, a firm, or whatever unit
+    /// the caller tracks. The engine stores and reports it; `0` is an
+    /// ordinary account like any other.
+    pub account: u32,
     /// Buy or sell.
     pub side: Side,
     /// What happens to quantity that cannot trade at once.
@@ -97,6 +103,7 @@ impl NewOrder {
     pub const fn limit(order_id: u64, side: Side, price_tick: u32, qty: u64) -> Self {
         Self {
             order_id,
+            account: 0,
             side,
             order_type: OrderType::Limit,
             price_tick,
@@ -112,6 +119,11 @@ impl NewOrder {
     /// The same order with another [`OrderType`].
     pub const fn with_type(self, order_type: OrderType) -> Self {
         Self { order_type, ..self }
+    }
+
+    /// The same order for another account.
+    pub const fn with_account(self, account: u32) -> Self {
+        Self { account, ..self }
     }
 }
 
@@ -212,6 +224,7 @@ impl Engine {
         let order = self.pool.get(idx);
         Some(RestingOrder {
             order_id,
+            account: order.account,
             side: order.side,
             price_tick: order.price_tick,
             remaining_qty: order.remaining_qty,
@@ -349,6 +362,7 @@ impl Engine {
     pub fn submit_order<S: EventSink + ?Sized>(&mut self, order: NewOrder, sink: &mut S) {
         let NewOrder {
             order_id,
+            account,
             side,
             order_type,
             price_tick,
@@ -368,6 +382,7 @@ impl Engine {
         }
         sink.emit(Event::OrderAccepted {
             order_id,
+            account,
             side,
             order_type,
             price_tick,
@@ -431,10 +446,14 @@ impl Engine {
         }
 
         // Rest the remainder in the book.
-        match self
-            .pool
-            .allocate(order_id, side, price_tick, remaining, self.sequence)
-        {
+        match self.pool.allocate(
+            order_id,
+            account,
+            side,
+            price_tick,
+            remaining,
+            self.sequence,
+        ) {
             Some(idx) => {
                 self.id_map.insert(order_id, idx);
                 let rested = match side {
@@ -735,6 +754,7 @@ mod tests {
     fn accepted(order_id: u64, side: Side, price_tick: u32, qty: u64) -> Event {
         Event::OrderAccepted {
             order_id,
+            account: 0,
             side,
             order_type: OrderType::Limit,
             price_tick,
@@ -787,6 +807,7 @@ mod tests {
             vec![
                 Event::OrderAccepted {
                     order_id: 2,
+                    account: 0,
                     side: Side::Buy,
                     order_type: OrderType::ImmediateOrCancel,
                     price_tick: 101,
@@ -854,6 +875,7 @@ mod tests {
             events.first(),
             Some(&Event::OrderAccepted {
                 order_id: 4,
+                account: 0,
                 side: Side::Buy,
                 order_type: OrderType::Market,
                 price_tick: MAX_TICKS as u32 - 1,
@@ -890,6 +912,7 @@ mod tests {
             vec![
                 Event::OrderAccepted {
                     order_id: 1,
+                    account: 0,
                     side: Side::Sell,
                     order_type: OrderType::Market,
                     price_tick: 0,
@@ -933,6 +956,7 @@ mod tests {
             events,
             vec![Event::OrderAccepted {
                 order_id: 2,
+                account: 0,
                 side: Side::Buy,
                 order_type: OrderType::PostOnly,
                 price_tick: 99,
@@ -944,6 +968,25 @@ mod tests {
             engine.resting_order(2).map(|order| order.remaining_qty),
             Some(3)
         );
+    }
+
+    #[test]
+    fn the_account_is_reported_on_acceptance_and_kept_while_resting() {
+        let mut engine = Engine::new(16);
+        let mut events = Vec::new();
+        engine.submit_order(
+            NewOrder::limit(1, Side::Sell, 100, 5).with_account(7),
+            &mut events,
+        );
+        assert!(matches!(
+            events.as_slice(),
+            [Event::OrderAccepted {
+                order_id: 1,
+                account: 7,
+                ..
+            }]
+        ));
+        assert_eq!(engine.resting_order(1).map(|order| order.account), Some(7));
     }
 
     #[test]
@@ -1105,6 +1148,7 @@ mod tests {
         place(&mut engine, 1, Side::Sell, 120, 10);
         let resting = |remaining_qty| RestingOrder {
             order_id: 1,
+            account: 0,
             side: Side::Sell,
             price_tick: 120,
             remaining_qty,

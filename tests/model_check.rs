@@ -22,6 +22,8 @@ struct ReferenceBook {
     bids: BTreeMap<u32, Queue>,
     asks: BTreeMap<u32, Queue>,
     live: HashMap<u64, (Side, u32)>,
+    /// Account of every order that ever rested; a reused id overwrites it.
+    accounts: HashMap<u64, u32>,
     trades: u64,
 }
 
@@ -32,6 +34,7 @@ impl ReferenceBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
+            accounts: HashMap::new(),
             trades: 0,
         }
     }
@@ -39,6 +42,7 @@ impl ReferenceBook {
     fn place(&mut self, order: NewOrder) -> Vec<Event> {
         let NewOrder {
             order_id,
+            account,
             side,
             order_type,
             price_tick,
@@ -72,6 +76,7 @@ impl ReferenceBook {
         }
         let mut events = vec![Event::OrderAccepted {
             order_id,
+            account,
             side,
             order_type,
             price_tick,
@@ -171,6 +176,7 @@ impl ReferenceBook {
                 .or_default()
                 .push_back((order_id, remaining));
             self.live.insert(order_id, (side, price_tick));
+            self.accounts.insert(order_id, account);
         }
         events
     }
@@ -240,6 +246,7 @@ impl ReferenceBook {
             .expect("live order is queued at its level");
         Some(RestingOrder {
             order_id,
+            account: self.accounts[&order_id],
             side,
             price_tick,
             remaining_qty,

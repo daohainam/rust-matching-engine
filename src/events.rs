@@ -17,6 +17,7 @@
 //!     events,
 //!     [Event::OrderAccepted {
 //!         order_id: 1,
+//!         account: 0,
 //!         side: Side::Sell,
 //!         order_type: OrderType::Limit,
 //!         price_tick: 100,
@@ -59,9 +60,11 @@ pub enum Event {
     /// A new order passed validation and processing began; it may trade
     /// immediately, rest, or later have an un-rested remainder rejected.
     /// It repeats the order's terms, so a consumer of the event stream
-    /// alone knows the side, price and size of every order it sees.
+    /// alone knows the account, side, price and size of every order it
+    /// sees, and can route each later event about it to its owner.
     OrderAccepted {
         order_id: u64,
+        account: u32,
         side: Side,
         order_type: OrderType,
         price_tick: u32,
