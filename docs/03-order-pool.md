@@ -274,6 +274,10 @@ When a maker is partly filled, it stays at the head. Only the numbers change:
 The queue order (and therefore the maker's time priority) is untouched. A
 partly-filled order **keeps its place** at the front.
 
+`Engine::reduce_order` uses the same operation when a trader lowers a resting
+order's quantity (chapter 6). That order may sit anywhere in the queue, not only
+at the head, and it keeps its place too: `reduce_qty` never touches the links.
+
 ## 3.6 Invariants (things that must always be true)
 
 These are the rules the rest of the engine relies on. If one breaks, the book is
@@ -282,7 +286,7 @@ corrupt.
 | # | Invariant | Maintained by |
 |---|---|---|
 | 1 | `level.head == NIL` ⇔ `level.tail == NIL` ⇔ `level.count == 0` ⇔ `level.total_qty == 0` | `push_back`, `remove` |
-| 2 | `level.total_qty` = sum of `remaining_qty` over every order in the queue. (The "`total_qty == 0` ⇔ empty" half of invariant 1 also relies on the engine never resting a zero-quantity order: `process_order` rejects `qty == 0`; `PriceLevel` itself does not check.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
+| 2 | `level.total_qty` = sum of `remaining_qty` over every order in the queue. (The "`total_qty == 0` ⇔ empty" half of invariant 1 also relies on the engine never resting a zero-quantity order: `submit_order` rejects `qty == 0`, and `reduce_order` cancels an order instead of reducing it to zero; `PriceLevel` itself does not check.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
 | 3 | Walking `head -> next_idx -> ...` visits exactly `count` orders and ends at `tail` | `push_back`, `remove` |
 | 4 | `a.next_idx == b` ⇔ `b.prev_idx == a` | `push_back`, `remove` |
 | 5 | A slot is on the free stack ⇔ `in_use == false` | `allocate`, `free` |
