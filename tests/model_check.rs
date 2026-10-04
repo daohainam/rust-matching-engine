@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
-use matching_engine::{Engine, Event, RejectReason, Side};
+use matching_engine::{Engine, Event, RejectReason, RestingOrder, Side};
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
 type Queue = VecDeque<(u64, u64)>;
@@ -172,6 +172,20 @@ impl ReferenceBook {
         (true, vec![event])
     }
 
+    fn resting_order(&self, order_id: u64) -> Option<RestingOrder> {
+        let &(side, price_tick) = self.live.get(&order_id)?;
+        let &(_, remaining_qty) = self.book(side)[&price_tick]
+            .iter()
+            .find(|&&(id, _)| id == order_id)
+            .expect("live order is queued at its level");
+        Some(RestingOrder {
+            order_id,
+            side,
+            price_tick,
+            remaining_qty,
+        })
+    }
+
     fn best_bid(&self) -> Option<u32> {
         self.bids.last_key_value().map(|(&tick, _)| tick)
     }
@@ -270,6 +284,19 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         let taker_id = match op {
             Op::Place { order_id, .. } | Op::Cancel { order_id } => order_id,
         };
+        // The order this request named, and every maker it touched.
+        let touched = events.iter().filter_map(|e| match e {
+            Event::Trade { maker_order_id, .. } => Some(*maker_order_id),
+            _ => None,
+        });
+        for order_id in std::iter::once(taker_id).chain(touched) {
+            assert_eq!(
+                engine.resting_order(order_id),
+                model.resting_order(order_id),
+                "{} resting order {order_id}",
+                context()
+            );
+        }
         match events.as_slice() {
             [Event::OrderRejected { .. }] => coverage.input_rejections += 1,
             [Event::OrderAccepted { .. }, .., Event::OrderRejected { .. }] => {

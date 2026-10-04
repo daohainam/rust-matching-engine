@@ -27,6 +27,20 @@ enum Crossing {
     TakerSell,
 }
 
+/// A copy of one resting order's current state, returned by
+/// [`Engine::resting_order`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestingOrder {
+    /// The caller's identifier for the order.
+    pub order_id: u64,
+    /// The side of the book it rests on.
+    pub side: Side,
+    /// The price tick it rests at.
+    pub price_tick: u32,
+    /// Quantity not yet executed; less than ordered after partial fills.
+    pub remaining_qty: u64,
+}
+
 /// A single-threaded, price-time-priority limit order book.
 ///
 /// Orders are stored in a preallocated arena. Each price tick has a FIFO
@@ -110,6 +124,24 @@ impl Engine {
             Side::Sell => &self.ask_levels,
         };
         levels.get(tick as usize).map_or(0, |level| level.total_qty)
+    }
+
+    /// Looks up an order that is resting in the book.
+    ///
+    /// Returns `None` if no resting order has this ID: it was never
+    /// accepted, has been filled or cancelled, or its remainder was
+    /// rejected. A hash lookup, like the one [`cancel_order`](Self::cancel_order)
+    /// starts with; nothing is allocated.
+    #[inline]
+    pub fn resting_order(&self, order_id: u64) -> Option<RestingOrder> {
+        let idx = self.id_map.get(order_id)?;
+        let order = self.pool.get(idx);
+        Some(RestingOrder {
+            order_id,
+            side: order.side,
+            price_tick: order.price_tick,
+            remaining_qty: order.remaining_qty,
+        })
     }
 
     /// Returns up to `levels` non-empty price ticks on `side`, best first.
@@ -674,6 +706,28 @@ mod tests {
             }]
         );
         assert_eq!(engine.depth_at(Side::Sell, 120), 0);
+    }
+
+    #[test]
+    fn resting_order_follows_an_order_through_its_life() {
+        let mut engine = Engine::new(16);
+        assert_eq!(engine.resting_order(1), None);
+        place(&mut engine, 1, Side::Sell, 120, 10);
+        let resting = |remaining_qty| RestingOrder {
+            order_id: 1,
+            side: Side::Sell,
+            price_tick: 120,
+            remaining_qty,
+        };
+        assert_eq!(engine.resting_order(1), Some(resting(10)));
+        place(&mut engine, 2, Side::Buy, 120, 4);
+        assert_eq!(engine.resting_order(1), Some(resting(6)));
+        // The taker filled completely, so it never rested.
+        assert_eq!(engine.resting_order(2), None);
+        cancel(&mut engine, 1);
+        assert_eq!(engine.resting_order(1), None);
+        // The reserved id is never stored, and looking it up is harmless.
+        assert_eq!(engine.resting_order(u64::MAX), None);
     }
 
     #[test]
