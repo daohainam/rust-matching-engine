@@ -60,7 +60,7 @@ downstream system can follow the book from events alone
 More of the API:
 
 ```rust
-use matching_engine::{Engine, Event, NewOrder, RejectReason, Side};
+use matching_engine::{Engine, Event, NewOrder, RejectReason, SelfTradePrevention, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -84,6 +84,15 @@ assert!(matches!(events.last(), Some(Event::CancelRejected { order_id: 1, .. }))
 engine.submit_order(NewOrder::market(3, Side::Sell, 5), &mut events); // no bids left
 let expired = Event::OrderExpired { order_id: 3, expired_qty: 5 };
 assert_eq!(events.last(), Some(&expired)); // a market order never rests
+
+// Accounts: block trading with yourself, and cancel everything on disconnect.
+engine.submit_order(NewOrder::limit(4, Side::Sell, 110, 5).with_account(7), &mut events);
+let own_bid = NewOrder::limit(5, Side::Buy, 110, 5)
+    .with_account(7)
+    .with_self_trade_prevention(SelfTradePrevention::CancelIncoming);
+engine.submit_order(own_bid, &mut events); // would trade with its own ask: stopped
+assert!(matches!(events.last(), Some(Event::OrderExpired { order_id: 5, .. })));
+assert_eq!(engine.cancel_account(7, &mut events), 1); // the ask #4 goes
 ```
 
 Prices are **integer ticks** in `0..4096`; converting to and from real prices is
@@ -166,8 +175,8 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, OrderType, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side
-  engine.rs      matching core: submit_order, reduce_order, cancel_order, order lookup, depth queries
+  lib.rs         crate root; re-exports Engine, NewOrder, OrderType, SelfTradePrevention, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side
+  engine.rs      matching core: submit_order, reduce/cancel/mass cancel, self-trade prevention, order lookup, depth queries
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
   bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
   hashmap.rs     seeded open-addressing hash map (order id -> arena slot)
@@ -198,6 +207,7 @@ docs/            the chapters listed above, plus glossary.md
 | Events per call | unlimited with a `Vec` or closure sink; an `EventBatch` keeps 64 and counts the rest | your choice of `EventSink` |
 | Reserved order id | `u64::MAX` | hash map's "empty slot" marker |
 | Order types | limit, immediate-or-cancel, market, post-only | scope of the project |
+| Accounts | a `u32` per order, for self-trade prevention and mass cancels; no per-account limits | scope of the project |
 | Rust version | 1.88 or newer | `rust-version` in `Cargo.toml` |
 
 Details, consequences and workarounds are in
