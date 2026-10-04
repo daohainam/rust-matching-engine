@@ -7,11 +7,10 @@ mod common;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use common::{watched_ticks, Op, OpGenerator};
-use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
 use matching_engine::{
     CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder,
-    SelfTradePrevention, Side,
+    SelfTradePrevention, Side, DEFAULT_TICKS,
 };
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
@@ -20,6 +19,7 @@ type Queue = VecDeque<(u64, u64)>;
 /// Price-time priority book written for obviousness, not speed.
 struct ReferenceBook {
     capacity: usize,
+    ticks: u32,
     bids: BTreeMap<u32, Queue>,
     asks: BTreeMap<u32, Queue>,
     live: HashMap<u64, (Side, u32)>,
@@ -29,9 +29,10 @@ struct ReferenceBook {
 }
 
 impl ReferenceBook {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, ticks: u32) -> Self {
         Self {
             capacity,
+            ticks,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
@@ -51,7 +52,7 @@ impl ReferenceBook {
             self_trade_prevention,
         } = order;
         let price_tick = match (order_type, side) {
-            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
+            (OrderType::Market, Side::Buy) => self.ticks - 1,
             (OrderType::Market, Side::Sell) => 0,
             _ => price_tick,
         };
@@ -59,7 +60,7 @@ impl ReferenceBook {
             Some(RejectReason::ZeroQuantity)
         } else if order_id == u64::MAX {
             Some(RejectReason::ReservedOrderId)
-        } else if price_tick as usize >= MAX_TICKS {
+        } else if price_tick >= self.ticks {
             Some(RejectReason::PriceOutOfRange)
         } else if self.live.contains_key(&order_id) {
             Some(RejectReason::DuplicateOrderId)
@@ -359,10 +360,10 @@ struct Coverage {
     mass_cancelled_orders: u64,
 }
 
-fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
-    let mut engine = Engine::new(capacity);
-    let mut model = ReferenceBook::new(capacity);
-    let mut generator = OpGenerator::new(seed);
+fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Coverage) {
+    let mut engine = Engine::with_ticks(capacity, ticks as usize);
+    let mut model = ReferenceBook::new(capacity, ticks);
+    let mut generator = OpGenerator::with_ticks(seed, ticks);
     let mut events = Vec::new();
 
     for step in 0..ops {
@@ -404,7 +405,7 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         assert_eq!(engine.best_bid(), model.best_bid(), "{}", context());
         assert_eq!(engine.best_ask(), model.best_ask(), "{}", context());
         assert_eq!(engine.live_order_count(), model.live.len(), "{}", context());
-        for tick in watched_ticks() {
+        for tick in watched_ticks(ticks) {
             for side in [Side::Buy, Side::Sell] {
                 assert_eq!(
                     engine.depth_at(side, tick),
@@ -513,7 +514,7 @@ fn engine_matches_reference_book_when_capacity_is_tight() {
     // A 64-order arena fills constantly, so remainders are often rejected.
     let mut coverage = Coverage::default();
     for seed in 1..=4 {
-        run(seed, 20_000, 64, &mut coverage);
+        run(seed, 20_000, 64, DEFAULT_TICKS as u32, &mut coverage);
     }
     assert_all_paths_hit(&coverage);
 }
@@ -523,7 +524,18 @@ fn engine_matches_reference_book_with_ample_capacity() {
     // Deep books; remainders are rejected only when a level would overflow.
     let mut coverage = Coverage::default();
     for seed in 5..=8 {
-        run(seed, 20_000, 8_192, &mut coverage);
+        run(seed, 20_000, 8_192, DEFAULT_TICKS as u32, &mut coverage);
+    }
+    assert_all_paths_hit(&coverage);
+}
+
+#[test]
+fn engine_matches_reference_book_on_a_wide_ladder() {
+    // 300,000 ticks take four bitset levels; sweeps and oversized orders
+    // reach both ends of the ladder.
+    let mut coverage = Coverage::default();
+    for seed in 9..=10 {
+        run(seed, 20_000, 1_024, 300_000, &mut coverage);
     }
     assert_all_paths_hit(&coverage);
 }

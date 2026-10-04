@@ -160,7 +160,8 @@ pub enum RejectReason {
     /// The order ID was `u64::MAX`, which the ID map reserves to mark an
     /// empty slot (chapter 5).
     ReservedOrderId,
-    /// The price tick was not below [`MAX_TICKS`](crate::engine::MAX_TICKS).
+    /// The price tick was not below the engine's
+    /// [`tick_count`](crate::Engine::tick_count).
     PriceOutOfRange,
     /// A resting order already uses this order ID.
     DuplicateOrderId,

@@ -70,6 +70,9 @@ pub struct Snapshot {
     /// The engine's `order_capacity`. It decides which orders can rest, so
     /// a restored engine must have the same one.
     pub capacity: usize,
+    /// The engine's number of price ticks: it decides which prices are
+    /// valid and where a market order's limit is.
+    pub tick_count: usize,
     /// How many orders the engine has accepted (its audit counter).
     pub accepted_orders: u64,
     /// How many trades it has executed: the next trade gets `trades + 1`
@@ -89,6 +92,9 @@ pub struct Snapshot {
 pub enum SnapshotError {
     /// The capacity is zero or too large for an engine.
     InvalidCapacity(usize),
+    /// The tick count is zero or above
+    /// [`MAX_LADDER_TICKS`](crate::bitset::MAX_LADDER_TICKS).
+    InvalidTickCount(usize),
     /// There are more orders than the capacity allows to rest.
     TooManyOrders { orders: usize, capacity: usize },
     /// An order could not rest; `reason` says why, as it would for a new
@@ -104,6 +110,7 @@ impl std::fmt::Display for SnapshotError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidCapacity(capacity) => write!(f, "invalid engine capacity {capacity}"),
+            Self::InvalidTickCount(ticks) => write!(f, "invalid tick count {ticks}"),
             Self::TooManyOrders { orders, capacity } => {
                 write!(
                     f,
@@ -153,6 +160,9 @@ const CHECKSUM_SIZE: usize = 8;
 
 /// Writes `checkpoint` to `path` atomically, replacing any checkpoint
 /// already there. See [Writing atomically](self#writing-atomically).
+///
+/// The format has no tick count field yet: a checkpoint is read back with
+/// [`DEFAULT_TICKS`](crate::engine::DEFAULT_TICKS).
 pub fn write_checkpoint<P: AsRef<Path>>(path: P, checkpoint: &Checkpoint) -> io::Result<()> {
     let path = path.as_ref();
     let temporary = temporary_path(path);
@@ -215,6 +225,7 @@ fn encode(checkpoint: &Checkpoint) -> Vec<u8> {
         accepted_orders,
         trades,
         ref orders,
+        tick_count: _, // not in the format yet (see `write_checkpoint`)
     } = checkpoint.snapshot;
     let mut out = Vec::with_capacity(HEADER_SIZE + orders.len() * ENTRY_SIZE + CHECKSUM_SIZE);
     out.extend_from_slice(&MAGIC);
@@ -290,6 +301,7 @@ fn decode(bytes: &[u8]) -> io::Result<Checkpoint> {
         next_sequence: u64_at(40),
         snapshot: Snapshot {
             capacity: usize::try_from(u64_at(16)).map_err(|_| invalid("capacity too large"))?,
+            tick_count: crate::engine::DEFAULT_TICKS,
             accepted_orders: u64_at(24),
             trades: u64_at(32),
             orders,
@@ -313,6 +325,7 @@ mod tests {
             next_sequence: 1_234,
             snapshot: Snapshot {
                 capacity: 4_096,
+                tick_count: crate::engine::DEFAULT_TICKS,
                 accepted_orders: 1_000,
                 trades: 77,
                 orders: vec![

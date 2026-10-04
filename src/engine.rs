@@ -7,15 +7,16 @@
 //! up front in [`Engine::new`], and execution reports are streamed to a
 //! caller-supplied [`EventSink`] instead of being collected internally.
 
-use crate::bitset::TickBitset;
+use crate::bitset::{TickBitset, MAX_LADDER_TICKS};
 use crate::events::{CancelRejectReason, Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side, NIL};
 use crate::snapshot::{Snapshot, SnapshotError};
 
-/// The number of price ticks every engine's ladder has: valid ticks are
-/// `0..MAX_TICKS`. For this size the [`TickBitset`] has two levels.
-pub const MAX_TICKS: usize = 4096;
+/// The number of price ticks of an engine made with [`Engine::new`]: valid
+/// ticks are `0..4096`. For this size the [`TickBitset`] has two levels.
+/// [`Engine::with_ticks`] chooses another number.
+pub const DEFAULT_TICKS: usize = 4096;
 
 /// Which side is the aggressive taker, determining which bitset extremum
 /// (lowest vs. highest) and marketability comparison to use when crossing
@@ -212,20 +213,45 @@ impl Engine {
     /// The ID map uses a randomly seeded hash, so crafted order IDs cannot
     /// force collisions; matching results never depend on the seed.
     ///
+    /// The book has [`DEFAULT_TICKS`] (4096) price ticks; use
+    /// [`with_ticks`](Self::with_ticks) for another number.
+    ///
     /// # Panics
     /// Panics if `order_capacity` is zero or does not fit in a `u32` arena
     /// index (`order_capacity >= u32::MAX`).
     pub fn new(order_capacity: usize) -> Self {
+        Self::with_ticks(order_capacity, DEFAULT_TICKS)
+    }
+
+    /// Creates an empty book for up to `order_capacity` resting orders, with
+    /// price ticks `0..ticks`.
+    ///
+    /// Choose `ticks` for the instrument: the price range divided by the
+    /// tick size. Memory grows with it, two price levels of 24 bytes per
+    /// tick, so 4096 ticks take 196 KB and 262,144 ticks 12.6 MB; every
+    /// operation stays O(1), with one more bit-scan for every factor of 64.
+    ///
+    /// # Panics
+    /// Panics if `order_capacity` is invalid (see [`new`](Self::new)), or if
+    /// `ticks` is zero or above [`MAX_LADDER_TICKS`] (2^24).
+    pub fn with_ticks(order_capacity: usize, ticks: usize) -> Self {
         Self {
             pool: OrderPool::new(order_capacity),
             id_map: FlatHashMap::with_capacity(order_capacity),
-            bid_bitset: TickBitset::new(MAX_TICKS),
-            ask_bitset: TickBitset::new(MAX_TICKS),
-            bid_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
-            ask_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
+            bid_bitset: TickBitset::new(ticks),
+            ask_bitset: TickBitset::new(ticks),
+            bid_levels: vec![PriceLevel::empty(); ticks].into_boxed_slice(),
+            ask_levels: vec![PriceLevel::empty(); ticks].into_boxed_slice(),
             sequence: 0,
             trades: 0,
         }
+    }
+
+    /// Returns how many price ticks the book has: valid ticks are
+    /// `0..tick_count()`.
+    #[inline(always)]
+    pub fn tick_count(&self) -> usize {
+        self.bid_bitset.ticks()
     }
 
     /// Returns the highest price tick containing at least one resting bid.
@@ -249,7 +275,7 @@ impl Engine {
     /// Returns the total resting quantity at `tick` on the requested `side`.
     ///
     /// This is an aggregate across every order queued at that price. An empty
-    /// price level, or a `tick` at or above [`MAX_TICKS`], returns zero.
+    /// price level, or a `tick` outside the book's range, returns zero.
     #[inline]
     pub fn depth_at(&self, side: Side, tick: u32) -> u64 {
         let levels = match side {
@@ -287,10 +313,11 @@ impl Engine {
     /// order-processing path. Finding each level after the best one searches
     /// the intervening ticks; unlike [`best_bid`](Self::best_bid) and
     /// [`best_ask`](Self::best_ask), the work is not strictly proportional
-    /// only to the number of returned levels. At most [`MAX_TICKS`] levels
-    /// exist, so a larger `levels` (e.g. `usize::MAX`) returns every level.
+    /// only to the number of returned levels. At most
+    /// [`tick_count`](Self::tick_count) levels exist, so a larger `levels`
+    /// (e.g. `usize::MAX`) returns every level.
     pub fn depth_snapshot(&self, side: Side, levels: usize) -> Vec<(u32, u64)> {
-        let mut out = Vec::with_capacity(levels.min(MAX_TICKS));
+        let mut out = Vec::with_capacity(levels.min(self.tick_count()));
         match side {
             Side::Buy => {
                 let mut tick = self.bid_bitset.highest();
@@ -325,7 +352,7 @@ impl Engine {
     fn next_higher_active(&self, bitset: &TickBitset, tick: usize) -> Option<usize> {
         // Used for later ask levels after the best ask; inspect only higher
         // ticks and stop as soon as another active one is found.
-        (tick + 1..MAX_TICKS).find(|&t| bitset.test(t))
+        (tick + 1..self.tick_count()).find(|&t| bitset.test(t))
     }
 
     /// Checks an incoming order before it can touch the book, returning the
@@ -343,7 +370,7 @@ impl Engine {
             Err(RejectReason::ZeroQuantity)
         } else if order_id == crate::hashmap::RESERVED_KEY {
             Err(RejectReason::ReservedOrderId)
-        } else if (price_tick as usize) >= MAX_TICKS {
+        } else if (price_tick as usize) >= self.tick_count() {
             Err(RejectReason::PriceOutOfRange)
         } else if self.id_map.get(order_id).is_some() {
             Err(RejectReason::DuplicateOrderId)
@@ -424,7 +451,7 @@ impl Engine {
         // A market order may trade at any price: give it the worst limit
         // its side allows, and every later step treats it as usual.
         let price_tick = match (order_type, side) {
-            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
+            (OrderType::Market, Side::Buy) => self.tick_count() as u32 - 1,
             (OrderType::Market, Side::Sell) => 0,
             _ => price_tick,
         };
@@ -590,6 +617,7 @@ impl Engine {
         }
         Snapshot {
             capacity: self.capacity(),
+            tick_count: self.tick_count(),
             accepted_orders: self.sequence,
             trades: self.trades,
             orders,
@@ -603,12 +631,15 @@ impl Engine {
     /// The new engine emits exactly the events the original would have for
     /// any later request (its hash seed differs, which never matters).
     /// A snapshot that could not come from a live book is refused with a
-    /// [`SnapshotError`] instead of becoming a corrupt one: a bad capacity,
-    /// too many orders, an order no engine would rest, or a crossed book.
+    /// [`SnapshotError`] instead of becoming a corrupt one: a bad capacity
+    /// or tick count, too many orders, an order no engine would rest, or a crossed book.
     pub fn restore(snapshot: &Snapshot) -> Result<Engine, SnapshotError> {
         let capacity = snapshot.capacity;
         if capacity == 0 || capacity >= u32::MAX as usize {
             return Err(SnapshotError::InvalidCapacity(capacity));
+        }
+        if !(1..=MAX_LADDER_TICKS).contains(&snapshot.tick_count) {
+            return Err(SnapshotError::InvalidTickCount(snapshot.tick_count));
         }
         if snapshot.orders.len() > capacity {
             return Err(SnapshotError::TooManyOrders {
@@ -616,7 +647,7 @@ impl Engine {
                 capacity,
             });
         }
-        let mut engine = Engine::new(capacity);
+        let mut engine = Engine::with_ticks(capacity, snapshot.tick_count);
         engine.sequence = snapshot.accepted_orders;
         engine.trades = snapshot.trades;
         for &order in &snapshot.orders {
@@ -624,7 +655,7 @@ impl Engine {
                 Err(RejectReason::ZeroQuantity)
             } else if order.order_id == crate::hashmap::RESERVED_KEY {
                 Err(RejectReason::ReservedOrderId)
-            } else if order.price_tick as usize >= MAX_TICKS {
+            } else if order.price_tick as usize >= engine.tick_count() {
                 Err(RejectReason::PriceOutOfRange)
             } else if engine.id_map.get(order.order_id).is_some() {
                 Err(RejectReason::DuplicateOrderId)
@@ -1115,7 +1146,7 @@ mod tests {
         let mut engine = Engine::new(16);
         place(&mut engine, 1, Side::Sell, 0, 1);
         place(&mut engine, 2, Side::Sell, 2_000, 2);
-        place(&mut engine, 3, Side::Sell, MAX_TICKS as u32 - 1, 3);
+        place(&mut engine, 3, Side::Sell, DEFAULT_TICKS as u32 - 1, 3);
         // The tick passed in is ignored, even an out-of-range one.
         let events = submit(&mut engine, 4, Side::Buy, OrderType::Market, u32::MAX, 10);
         assert_eq!(
@@ -1125,7 +1156,7 @@ mod tests {
                 account: 0,
                 side: Side::Buy,
                 order_type: OrderType::Market,
-                price_tick: MAX_TICKS as u32 - 1,
+                price_tick: DEFAULT_TICKS as u32 - 1,
                 qty: 10
             })
         );
@@ -1138,7 +1169,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(traded, [(0, 1), (2_000, 2), (MAX_TICKS as u32 - 1, 3)]);
+        assert_eq!(traded, [(0, 1), (2_000, 2), (DEFAULT_TICKS as u32 - 1, 3)]);
         assert_eq!(
             events.last(),
             Some(&Event::OrderExpired {
@@ -1714,6 +1745,7 @@ mod tests {
         };
         let snapshot = |capacity, orders: Vec<RestingOrder>| Snapshot {
             capacity,
+            tick_count: DEFAULT_TICKS,
             accepted_orders: 0,
             trades: 0,
             orders,
@@ -1771,6 +1803,48 @@ mod tests {
                 best_ask: 20
             })
         );
+    }
+
+    #[test]
+    fn a_wide_ladder_trades_and_restores_far_beyond_4096_ticks() {
+        let ticks = 300_000; // four bitset levels
+        let mut engine = Engine::with_ticks(16, ticks);
+        assert_eq!(engine.tick_count(), ticks);
+        place(&mut engine, 1, Side::Sell, 250_000, 5);
+        place(&mut engine, 2, Side::Sell, 4_096, 5);
+        place(&mut engine, 3, Side::Buy, 100, 5);
+        assert_eq!(
+            (engine.best_bid(), engine.best_ask()),
+            (Some(100), Some(4_096))
+        );
+
+        let rejected = place(&mut engine, 4, Side::Buy, ticks as u32, 1);
+        assert!(matches!(
+            rejected[..],
+            [Event::OrderRejected {
+                reason: RejectReason::PriceOutOfRange,
+                ..
+            }]
+        ));
+
+        let mut restored = Engine::restore(&engine.snapshot()).unwrap();
+        assert_eq!(restored.tick_count(), ticks);
+        // A market buy sweeps both asks, up to the top of this ladder.
+        let sweep = |engine: &mut Engine| {
+            let mut events = Vec::new();
+            engine.submit_order(NewOrder::market(5, Side::Buy, 10), &mut events);
+            events
+        };
+        let events = sweep(&mut restored);
+        assert_eq!(events, sweep(&mut engine));
+        assert!(matches!(
+            events[0],
+            Event::OrderAccepted {
+                price_tick: 299_999,
+                ..
+            }
+        ));
+        assert_eq!(restored.best_ask(), None);
     }
 
     #[test]
@@ -1905,7 +1979,7 @@ mod tests {
     #[test]
     fn rejects_out_of_range_price_tick() {
         let mut engine = Engine::new(16);
-        let events = place(&mut engine, 1, Side::Sell, MAX_TICKS as u32, 5);
+        let events = place(&mut engine, 1, Side::Sell, DEFAULT_TICKS as u32, 5);
         assert_eq!(
             events.as_slice(),
             &[Event::OrderRejected {
@@ -2092,7 +2166,7 @@ mod tests {
         place(&mut engine, 1, Side::Buy, 100, 5);
         place(&mut engine, 2, Side::Sell, 200, 7);
 
-        assert_eq!(engine.depth_at(Side::Buy, MAX_TICKS as u32), 0);
+        assert_eq!(engine.depth_at(Side::Buy, DEFAULT_TICKS as u32), 0);
         assert_eq!(engine.depth_at(Side::Sell, u32::MAX), 0);
         assert_eq!(engine.depth_snapshot(Side::Buy, usize::MAX), vec![(100, 5)]);
         assert_eq!(

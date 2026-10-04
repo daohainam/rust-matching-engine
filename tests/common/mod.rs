@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 
-use matching_engine::engine::MAX_TICKS;
+use matching_engine::DEFAULT_TICKS;
 use matching_engine::{NewOrder, OrderType, SelfTradePrevention, Side};
 
 /// xorshift64*: tiny, deterministic, and plenty for driving test inputs.
@@ -55,11 +55,16 @@ pub const BAND: Range<u32> = 1_000..1_016;
 /// Far from the band, oversized orders rest without crossing ordinary flow,
 /// so a second one at the same tick overflows the level's total quantity.
 pub const FAR_BID_TICK: u32 = 10;
-pub const FAR_ASK_TICK: u32 = 4_000;
+
+/// The far ask tick, near the top of a ladder of `ticks` ticks (4000 for
+/// the default 4096).
+pub fn far_ask_tick(ticks: u32) -> u32 {
+    ticks - 96
+}
 
 /// Every tick the generator can rest an order at, for depth comparisons.
-pub fn watched_ticks() -> impl Iterator<Item = u32> {
-    BAND.chain([0, FAR_BID_TICK, FAR_ASK_TICK, MAX_TICKS as u32 - 1])
+pub fn watched_ticks(ticks: u32) -> impl Iterator<Item = u32> {
+    BAND.chain([0, FAR_BID_TICK, far_ask_tick(ticks), ticks - 1])
 }
 
 /// How many recently issued IDs cancels and reuse attempts choose from.
@@ -74,15 +79,27 @@ pub struct OpGenerator {
     next_id: u64,
     recent: [u64; RECENT_WINDOW],
     issued: usize,
+    /// The tick count of the engine the requests are for.
+    ticks: u32,
 }
 
 impl OpGenerator {
+    /// Requests for an engine with the default 4096 ticks.
     pub fn new(seed: u64) -> Self {
+        Self::with_ticks(seed, DEFAULT_TICKS as u32)
+    }
+
+    /// Requests for an engine with `ticks` price ticks: sweeps reach its
+    /// ends, oversized orders rest near its top, and out-of-range ticks lie
+    /// just past it.
+    pub fn with_ticks(seed: u64, ticks: u32) -> Self {
+        assert!(ticks > 1_100, "the generator's band must fit in the ladder");
         Self {
             rng: Rng::new(seed),
             next_id: 1,
             recent: [0; RECENT_WINDOW],
             issued: 0,
+            ticks,
         }
     }
 
@@ -124,7 +141,7 @@ impl OpGenerator {
         let mut qty = 1 + self.rng.below(50);
         match self.rng.below(100) {
             0 => qty = 0,
-            1 => price_tick = MAX_TICKS as u32 + self.rng.below(8) as u32,
+            1 => price_tick = self.ticks + self.rng.below(8) as u32,
             2 => order_id = u64::MAX,
             // A duplicate while the earlier order still rests, a reuse after.
             3 | 4 => order_id = self.recent_id(),
@@ -132,7 +149,7 @@ impl OpGenerator {
                 qty = u64::MAX - self.rng.below(4);
                 price_tick = match side {
                     Side::Buy => FAR_BID_TICK,
-                    Side::Sell => FAR_ASK_TICK,
+                    Side::Sell => far_ask_tick(self.ticks),
                 };
             }
             6 | 7 => {
@@ -140,7 +157,7 @@ impl OpGenerator {
                 // makers than a bounded batch could report.
                 qty = 1 + self.rng.below(2_000);
                 price_tick = match side {
-                    Side::Buy => MAX_TICKS as u32 - 1,
+                    Side::Buy => self.ticks - 1,
                     Side::Sell => 0,
                 };
             }

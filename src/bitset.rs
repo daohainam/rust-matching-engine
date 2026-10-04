@@ -8,15 +8,15 @@
 //!
 //! How many levels there are depends on the number of ticks, chosen when
 //! the bitset is created: up to 64 ticks need one level, up to 4096 (64 ×
-//! 64) two, up to 262,144 three, and up to [`MAX_TICKS`] (2^24) four. For
+//! 64) two, up to 262,144 three, and up to [`MAX_LADDER_TICKS`] (2^24) four. For
 //! 4096 ticks the bitset is exactly the classic two-level design: 64 words
 //! of ticks and one summary word.
 
 /// The largest number of ticks a [`TickBitset`] supports: 2^24 = 64^4, four
 /// levels. Price ticks are `u32`, but a ladder this long already needs 16
 /// million price levels per side.
-pub const MAX_TICKS: usize = 1 << 24;
-/// The most levels a [`TickBitset`] can have; see [`MAX_TICKS`].
+pub const MAX_LADDER_TICKS: usize = 1 << 24;
+/// The most levels a [`TickBitset`] can have; see [`MAX_LADDER_TICKS`].
 const MAX_LEVELS: usize = 4;
 
 /// An allocation-free (after [`new`](Self::new)) hierarchical bitset over a
@@ -38,11 +38,11 @@ impl TickBitset {
     /// Creates an empty bitset for ticks `0..ticks`.
     ///
     /// # Panics
-    /// Panics if `ticks` is zero or above [`MAX_TICKS`].
+    /// Panics if `ticks` is zero or above [`MAX_LADDER_TICKS`].
     pub fn new(ticks: usize) -> Self {
         assert!(
-            (1..=MAX_TICKS).contains(&ticks),
-            "a price ladder needs 1 to {MAX_TICKS} ticks, not {ticks}"
+            (1..=MAX_LADDER_TICKS).contains(&ticks),
+            "a price ladder needs 1 to {MAX_LADDER_TICKS} ticks, not {ticks}"
         );
         // Each level needs one bit per word of the level below, rounded up
         // to whole words, until a single word covers everything.
@@ -235,7 +235,7 @@ mod tests {
             (4097, 3),
             (262_144, 3),
             (262_145, 4),
-            (MAX_TICKS, 4),
+            (MAX_LADDER_TICKS, 4),
         ] {
             assert_eq!(TickBitset::new(ticks).levels(), levels, "{ticks} ticks");
         }
@@ -244,7 +244,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a price ladder needs")]
     fn a_ladder_too_long_for_four_levels_is_rejected() {
-        TickBitset::new(MAX_TICKS + 1);
+        TickBitset::new(MAX_LADDER_TICKS + 1);
     }
 
     #[test]
