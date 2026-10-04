@@ -98,10 +98,12 @@ buyer gets a better deal than they asked for ("price improvement").
 Two orders take part in every trade:
 
 - The **maker** was already resting in the book. It *made* liquidity.
-- The **taker** just arrived and *took* liquidity.
+- The **taker** just arrived and *took* liquidity. It is also called the
+  **aggressor**, and its side is the trade's **aggressor side**: a trade where
+  a buyer crossed the spread was "buyer-initiated".
 
 You will see these words everywhere in the code (`maker_order_id`,
-`taker_order_id`, `match_incoming`).
+`taker_order_id`, `taker_side`, `match_incoming`).
 
 ## 1.5 Price-time priority
 
@@ -265,15 +267,19 @@ Then `#4` is cancelled: the bid at 99 disappears, leaving bids at 102 and 100.
 The exact sequence of **events** the engine emitted for step 6 was:
 
 ```text
-OrderAccepted      { order_id: 6 }
-Trade              { maker_order_id: 2, taker_order_id: 6, price_tick: 101, qty: 3 }
-OrderFilled        { order_id: 2 }
-Trade              { maker_order_id: 3, taker_order_id: 6, price_tick: 101, qty: 4 }
-OrderFilled        { order_id: 3 }
-Trade              { maker_order_id: 1, taker_order_id: 6, price_tick: 102, qty: 5 }
-OrderFilled        { order_id: 1 }
+OrderAccepted { order_id: 6, side: Buy, price_tick: 102, qty: 14 }
+Trade { trade_id: 1, maker_order_id: 2, taker_order_id: 6, taker_side: Buy, price_tick: 101, qty: 3 }
+OrderFilled { order_id: 2 }
+Trade { trade_id: 2, maker_order_id: 3, taker_order_id: 6, taker_side: Buy, price_tick: 101, qty: 4 }
+OrderFilled { order_id: 3 }
+Trade { trade_id: 3, maker_order_id: 1, taker_order_id: 6, taker_side: Buy, price_tick: 102, qty: 5 }
+OrderFilled { order_id: 1 }
 OrderPartiallyFilled { order_id: 6, remaining_qty: 2 }
 ```
+
+Every `Trade` says who was the aggressor (`taker_side: Buy`: the buyer crossed
+the spread) and carries a `trade_id`. These are the first three trades of this
+book, so they are numbered 1, 2 and 3.
 
 Events are how the engine talks to the outside world; see
 [chapter 7](07-events.md).
