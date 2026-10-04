@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use matching_engine::engine::MAX_TICKS;
-use matching_engine::{NewOrder, OrderType, Side};
+use matching_engine::{NewOrder, OrderType, SelfTradePrevention, Side};
 
 /// xorshift64*: tiny, deterministic, and plenty for driving test inputs.
 pub struct Rng(u64);
@@ -142,6 +142,12 @@ impl OpGenerator {
         };
         // A few accounts, so that orders of one account often meet.
         let account = self.rng.below(4) as u32;
+        let self_trade_prevention = match self.rng.below(100) {
+            0..=9 => SelfTradePrevention::CancelResting,
+            10..=14 => SelfTradePrevention::CancelIncoming,
+            15..=19 => SelfTradePrevention::CancelBoth,
+            _ => SelfTradePrevention::Allow,
+        };
         Op::Place(NewOrder {
             order_id,
             account,
@@ -149,6 +155,7 @@ impl OpGenerator {
             order_type,
             price_tick,
             qty,
+            self_trade_prevention,
         })
     }
 

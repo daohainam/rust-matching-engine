@@ -85,7 +85,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
 
-use crate::engine::{NewOrder, OrderType};
+use crate::engine::{NewOrder, OrderType, SelfTradePrevention};
 use crate::pool::Side;
 
 /// Size in bytes of the file header that precedes the records.
@@ -169,8 +169,9 @@ impl WalRecord {
 
     /// Describes a request to submit `order`, of any [`OrderType`].
     ///
-    /// The format has no account field yet: the order is logged, and
-    /// replayed, for account 0.
+    /// The format has no account or self-trade prevention field yet: the
+    /// order is logged, and replayed, for account 0 with self-trades
+    /// allowed.
     pub fn submit(order: NewOrder, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::NewOrder,
@@ -194,6 +195,7 @@ impl WalRecord {
             order_type: self.order_type,
             price_tick: self.price_tick,
             qty: self.qty,
+            self_trade_prevention: SelfTradePrevention::Allow,
         }
     }
 

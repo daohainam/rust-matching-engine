@@ -10,7 +10,8 @@ use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
 use matching_engine::{
-    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder, Side,
+    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder,
+    SelfTradePrevention, Side,
 };
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
@@ -47,6 +48,7 @@ impl ReferenceBook {
             order_type,
             price_tick,
             qty,
+            self_trade_prevention,
         } = order;
         let price_tick = match (order_type, side) {
             (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
@@ -84,6 +86,11 @@ impl ReferenceBook {
         }];
 
         let mut remaining = qty;
+        let mut stopped_by_self_trade = false;
+        let maker_side = match side {
+            Side::Buy => Side::Sell,
+            Side::Sell => Side::Buy,
+        };
         let opposite = match side {
             Side::Buy => &mut self.asks,
             Side::Sell => &mut self.bids,
@@ -107,6 +114,35 @@ impl ReferenceBook {
                     break;
                 };
                 let (maker, maker_qty) = *front;
+                if self_trade_prevention != SelfTradePrevention::Allow
+                    && self.accounts[&maker] == account
+                {
+                    events.push(Event::SelfTradePrevented {
+                        taker_order_id: order_id,
+                        maker_order_id: maker,
+                    });
+                    if matches!(
+                        self_trade_prevention,
+                        SelfTradePrevention::CancelResting | SelfTradePrevention::CancelBoth
+                    ) {
+                        queue.pop_front();
+                        self.live.remove(&maker);
+                        events.push(Event::OrderCancelled {
+                            order_id: maker,
+                            side: maker_side,
+                            price_tick: tick,
+                            cancelled_qty: maker_qty,
+                        });
+                    }
+                    if matches!(
+                        self_trade_prevention,
+                        SelfTradePrevention::CancelIncoming | SelfTradePrevention::CancelBoth
+                    ) {
+                        stopped_by_self_trade = true;
+                        break;
+                    }
+                    continue;
+                }
                 let traded = remaining.min(maker_qty);
                 remaining -= traded;
                 self.trades += 1;
@@ -133,6 +169,9 @@ impl ReferenceBook {
             if queue.is_empty() {
                 opposite.remove(&tick);
             }
+            if stopped_by_self_trade {
+                break;
+            }
         }
 
         if remaining == 0 {
@@ -145,7 +184,9 @@ impl ReferenceBook {
                 remaining_qty: remaining,
             });
         }
-        if matches!(order_type, OrderType::ImmediateOrCancel | OrderType::Market) {
+        if stopped_by_self_trade
+            || matches!(order_type, OrderType::ImmediateOrCancel | OrderType::Market)
+        {
             events.push(Event::OrderExpired {
                 order_id,
                 expired_qty: remaining,
@@ -295,6 +336,7 @@ struct Coverage {
     expired_remainders: usize,
     post_only_rejections: usize,
     reductions: usize,
+    self_trades_prevented: usize,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
@@ -393,6 +435,10 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
         coverage.expired_remainders +=
             usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        coverage.self_trades_prevented += events
+            .iter()
+            .filter(|e| matches!(e, Event::SelfTradePrevented { .. }))
+            .count();
         coverage.reductions +=
             usize::from(matches!(events.as_slice(), [Event::OrderReduced { .. }]));
         coverage.post_only_rejections += usize::from(matches!(
@@ -417,6 +463,10 @@ fn assert_all_paths_hit(coverage: &Coverage) {
     assert!(coverage.expired_remainders > 0, "no expired remainders");
     assert!(coverage.post_only_rejections > 0, "no post-only rejections");
     assert!(coverage.reductions > 0, "no reductions");
+    assert!(
+        coverage.self_trades_prevented > 0,
+        "no self-trades prevented"
+    );
 }
 
 #[test]

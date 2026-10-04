@@ -94,9 +94,11 @@ pub enum Event {
     /// rest was dropped. It is the order's last event, after any trades,
     /// and `expired_qty` never entered the book.
     OrderExpired { order_id: u64, expired_qty: u64 },
-    /// An order was cancelled by explicit request. `side` and `price_tick`
-    /// say where it rested and `cancelled_qty` how much quantity left the
-    /// book, so a consumer can update its depth from this event alone.
+    /// A resting order was cancelled: by a cancel or reduce request, or by
+    /// self-trade prevention (then right after `SelfTradePrevented`).
+    /// `side` and `price_tick` say where it rested and `cancelled_qty` how
+    /// much quantity left the book, so a consumer can update its depth from
+    /// this event alone.
     OrderCancelled {
         order_id: u64,
         side: Side,
@@ -117,6 +119,15 @@ pub enum Event {
         price_tick: u32,
         reduced_qty: u64,
         remaining_qty: u64,
+    },
+    /// An incoming order met a resting order of its own account, and its
+    /// [`SelfTradePrevention`](crate::engine::SelfTradePrevention) mode
+    /// blocked the trade. What follows depends on the mode: an
+    /// `OrderCancelled` for the resting order, the incoming order's
+    /// `OrderExpired`, or both.
+    SelfTradePrevented {
+        taker_order_id: u64,
+        maker_order_id: u64,
     },
     /// A cancel or reduce request was refused; `reason` says why. The book
     /// is unchanged.

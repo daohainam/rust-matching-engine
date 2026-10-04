@@ -75,10 +75,45 @@ impl OrderType {
     }
 }
 
+/// What happens when an incoming order would trade with a resting order of
+/// its own account. The incoming order's setting decides.
+///
+/// Trading with yourself moves no risk, but it prints a trade that other
+/// traders see, and regulators treat deliberate self-trades as market
+/// manipulation (wash trading), so venues let traders block them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfTradePrevention {
+    /// Trade as usual: no prevention. The default.
+    Allow,
+    /// Cancel the resting order and keep matching ("cancel oldest").
+    CancelResting,
+    /// Stop matching; the incoming order's remainder expires, even for a
+    /// limit order ("cancel newest").
+    CancelIncoming,
+    /// Cancel the resting order, stop matching, and let the incoming
+    /// order's remainder expire.
+    CancelBoth,
+}
+
+impl SelfTradePrevention {
+    /// Whether the resting order of a prevented self-trade is cancelled.
+    #[inline(always)]
+    fn cancels_resting(self) -> bool {
+        matches!(self, Self::CancelResting | Self::CancelBoth)
+    }
+
+    /// Whether a prevented self-trade stops the incoming order.
+    #[inline(always)]
+    fn stops_incoming(self) -> bool {
+        matches!(self, Self::CancelIncoming | Self::CancelBoth)
+    }
+}
+
 /// A request to submit an order, as [`Engine::submit_order`] takes it.
 ///
 /// Start from [`limit`](Self::limit) or [`market`](Self::market) and adjust
-/// with [`with_type`](Self::with_type) and [`with_account`](Self::with_account);
+/// with [`with_type`](Self::with_type), [`with_account`](Self::with_account)
+/// and [`with_self_trade_prevention`](Self::with_self_trade_prevention);
 /// every field is public, so struct update syntax works too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NewOrder {
@@ -96,6 +131,8 @@ pub struct NewOrder {
     pub price_tick: u32,
     /// How much to trade.
     pub qty: u64,
+    /// What to do on meeting a resting order of the same account.
+    pub self_trade_prevention: SelfTradePrevention,
 }
 
 impl NewOrder {
@@ -108,6 +145,7 @@ impl NewOrder {
             order_type: OrderType::Limit,
             price_tick,
             qty,
+            self_trade_prevention: SelfTradePrevention::Allow,
         }
     }
 
@@ -124,6 +162,14 @@ impl NewOrder {
     /// The same order for another account.
     pub const fn with_account(self, account: u32) -> Self {
         Self { account, ..self }
+    }
+
+    /// The same order with another [`SelfTradePrevention`] mode.
+    pub const fn with_self_trade_prevention(self, mode: SelfTradePrevention) -> Self {
+        Self {
+            self_trade_prevention: mode,
+            ..self
+        }
     }
 }
 
@@ -350,7 +396,12 @@ impl Engine {
     /// Every event is emitted to `sink` in order: acceptance, then each trade
     /// followed by the maker's fill update, then the taker's final fill or
     /// partial-fill state. A remainder that may not rest is then reported
-    /// with `OrderExpired`. If a remainder cannot rest, an `OrderRejected`
+    /// with `OrderExpired`.
+    ///
+    /// With [`SelfTradePrevention`] on, meeting a resting order of the same
+    /// account emits `SelfTradePrevented` instead of a trade, then cancels
+    /// the resting order (`OrderCancelled`), stops the incoming one (its
+    /// remainder expires), or both, as the mode says. If a remainder cannot rest, an `OrderRejected`
     /// event (reason [`BookFull`](RejectReason::BookFull) or
     /// [`LevelQuantityOverflow`](RejectReason::LevelQuantityOverflow)) is
     /// also emitted; trades already completed by this call are not
@@ -367,6 +418,7 @@ impl Engine {
             order_type,
             price_tick,
             qty,
+            self_trade_prevention: _,
         } = order;
         // A market order may trade at any price: give it the worst limit
         // its side allows, and every later step treats it as usual.
@@ -374,6 +426,10 @@ impl Engine {
             (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
             (OrderType::Market, Side::Sell) => 0,
             _ => price_tick,
+        };
+        let order = NewOrder {
+            price_tick,
+            ..order
         };
         // Reject invalid input before emitting acceptance or changing book state.
         if let Err(reason) = self.validate(order_id, side, order_type, price_tick, qty) {
@@ -392,7 +448,7 @@ impl Engine {
         // Matching spends down the incoming quantity; only the remainder can
         // become a new resting order.
         let mut remaining = qty;
-        match side {
+        let stopped_by_self_trade = match side {
             // Incoming buy crosses resting asks priced at or below the limit.
             Side::Buy => Self::match_incoming(
                 &mut self.pool,
@@ -400,8 +456,7 @@ impl Engine {
                 &mut self.ask_bitset,
                 &mut self.id_map,
                 &mut self.trades,
-                order_id,
-                price_tick,
+                &order,
                 &mut remaining,
                 sink,
                 Crossing::TakerBuy,
@@ -413,13 +468,12 @@ impl Engine {
                 &mut self.bid_bitset,
                 &mut self.id_map,
                 &mut self.trades,
-                order_id,
-                price_tick,
+                &order,
                 &mut remaining,
                 sink,
                 Crossing::TakerSell,
             ),
-        }
+        };
 
         let filled = qty - remaining;
         if remaining == 0 {
@@ -435,7 +489,7 @@ impl Engine {
             });
         }
 
-        if !order_type.rests() {
+        if stopped_by_self_trade || !order_type.rests() {
             // The remainder never enters the book, so it needs no slot.
             sink.emit(Event::OrderExpired {
                 order_id,
@@ -502,7 +556,8 @@ impl Engine {
     /// whether we walk the opposing bitset from its lowest (taker is a
     /// buyer crossing resting asks) or highest (taker is a seller crossing
     /// resting bids) active tick, and whether a given tick is marketable
-    /// against `price_tick`.
+    /// against the taker's `price_tick`. Returns whether self-trade
+    /// prevention stopped the taker.
     ///
     /// Takes disjoint field references directly (rather than going through
     /// `&mut Engine` accessor closures) so the borrow checker can see that
@@ -514,12 +569,13 @@ impl Engine {
         bitset: &mut TwoLevelBitset,
         id_map: &mut FlatHashMap,
         trades: &mut u64,
-        taker_order_id: u64,
-        price_tick: u32,
+        taker: &NewOrder,
         remaining: &mut u64,
         sink: &mut S,
         direction: Crossing,
-    ) {
+    ) -> bool {
+        let taker_order_id = taker.order_id;
+        let price_tick = taker.price_tick;
         let taker_side = match direction {
             Crossing::TakerBuy => Side::Buy,
             Crossing::TakerSell => Side::Sell,
@@ -557,8 +613,40 @@ impl Engine {
                 // Price levels are FIFO queues, so the head is the oldest
                 // resting order and receives the next execution.
                 let maker_idx = level.head;
-                let maker_qty = pool.get(maker_idx).remaining_qty;
-                let maker_order_id = pool.get(maker_idx).order_id;
+                let maker = *pool.get(maker_idx);
+                let maker_qty = maker.remaining_qty;
+                let maker_order_id = maker.order_id;
+
+                let mode = taker.self_trade_prevention;
+                if mode != SelfTradePrevention::Allow && maker.account == taker.account {
+                    // Report the prevented trade while the book is still
+                    // untouched, then apply the mode.
+                    sink.emit(Event::SelfTradePrevented {
+                        taker_order_id,
+                        maker_order_id,
+                    });
+                    if mode.cancels_resting() {
+                        // The same removal as a full fill, then the same
+                        // event as a cancel request.
+                        level.remove(pool, maker_idx);
+                        pool.free(maker_idx);
+                        id_map.remove(maker_order_id);
+                        if level.is_empty() {
+                            bitset.clear(tick);
+                        }
+                        sink.emit(Event::OrderCancelled {
+                            order_id: maker_order_id,
+                            side: maker.side,
+                            price_tick: maker.price_tick,
+                            cancelled_qty: maker_qty,
+                        });
+                    }
+                    if mode.stops_incoming() {
+                        return true;
+                    }
+                    continue;
+                }
+
                 // A trade can consume the maker, the taker, or both exactly.
                 let trade_qty = (*remaining).min(maker_qty);
 
@@ -607,6 +695,7 @@ impl Engine {
             // The level drained and its bit is already clear, so the next
             // bitset lookup finds the next best price.
         }
+        false
     }
 
     /// Cancels a resting order by ID.
@@ -987,6 +1076,106 @@ mod tests {
             }]
         ));
         assert_eq!(engine.resting_order(1).map(|order| order.account), Some(7));
+    }
+
+    /// A book with an ask of 5 for account 2, then one of 5 for account 1,
+    /// both at tick 100, and the events of a buy of `qty` from account 1.
+    fn self_trade(mode: SelfTradePrevention, qty: u64) -> (Engine, Vec<Event>) {
+        let mut engine = Engine::new(16);
+        let mut events = Vec::new();
+        for (order_id, account) in [(1, 2), (2, 1)] {
+            let ask = NewOrder::limit(order_id, Side::Sell, 100, 5).with_account(account);
+            engine.submit_order(ask, &mut events);
+        }
+        events.clear();
+        let buy = NewOrder::limit(3, Side::Buy, 100, qty)
+            .with_account(1)
+            .with_self_trade_prevention(mode);
+        engine.submit_order(buy, &mut events);
+        (engine, events)
+    }
+
+    /// The events after acceptance, as short labels.
+    fn labels(events: &[Event]) -> Vec<String> {
+        events[1..]
+            .iter()
+            .map(|event| match event {
+                Event::Trade { maker_order_id, .. } => format!("trade {maker_order_id}"),
+                Event::OrderFilled { order_id } => format!("filled {order_id}"),
+                Event::OrderPartiallyFilled { order_id, .. } => format!("partial {order_id}"),
+                Event::SelfTradePrevented { maker_order_id, .. } => {
+                    format!("prevented {maker_order_id}")
+                }
+                Event::OrderCancelled { order_id, .. } => format!("cancelled {order_id}"),
+                Event::OrderExpired {
+                    order_id,
+                    expired_qty,
+                } => format!("expired {order_id}: {expired_qty}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn self_trades_happen_unless_prevention_is_asked_for() {
+        let (engine, events) = self_trade(SelfTradePrevention::Allow, 10);
+        assert_eq!(
+            labels(&events),
+            ["trade 1", "filled 1", "trade 2", "filled 2", "filled 3"]
+        );
+        assert_eq!(engine.best_ask(), None);
+    }
+
+    #[test]
+    fn cancel_resting_removes_the_own_order_and_keeps_matching() {
+        let (engine, events) = self_trade(SelfTradePrevention::CancelResting, 10);
+        assert_eq!(
+            labels(&events),
+            [
+                "trade 1",
+                "filled 1",
+                "prevented 2",
+                "cancelled 2",
+                "partial 3"
+            ]
+        );
+        // The buy's remainder rests: only the own order was in its way.
+        assert_eq!(engine.depth_at(Side::Buy, 100), 5);
+        assert_eq!(engine.best_ask(), None);
+    }
+
+    #[test]
+    fn cancel_incoming_expires_the_remainder_even_of_a_limit_order() {
+        let (engine, events) = self_trade(SelfTradePrevention::CancelIncoming, 10);
+        assert_eq!(
+            labels(&events),
+            [
+                "trade 1",
+                "filled 1",
+                "prevented 2",
+                "partial 3",
+                "expired 3: 5"
+            ]
+        );
+        assert_eq!(engine.depth_at(Side::Sell, 100), 5); // #2 untouched
+        assert_eq!(engine.best_bid(), None);
+    }
+
+    #[test]
+    fn cancel_both_removes_the_own_order_and_stops_the_incoming_one() {
+        let (engine, events) = self_trade(SelfTradePrevention::CancelBoth, 10);
+        assert_eq!(
+            labels(&events),
+            [
+                "trade 1",
+                "filled 1",
+                "prevented 2",
+                "cancelled 2",
+                "partial 3",
+                "expired 3: 5"
+            ]
+        );
+        assert_eq!(engine.live_order_count(), 0);
     }
 
     #[test]
