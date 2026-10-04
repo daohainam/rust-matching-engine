@@ -1,4 +1,4 @@
-# 4. The Price Ladder: A Two-Level Bitset
+# 4. The Price Ladder: A Hierarchical Bitset
 
 > **New word?** Every technical term in these chapters is explained in the
 > [glossary](glossary.md).
@@ -18,7 +18,7 @@ The matching loop needs the best opposing price at every step. Some options:
 
 | Approach | Cost to find the best price | Notes |
 |---|---|---|
-| Scan `levels[0..4096]` for the first non-empty one | up to 4096 steps | Simple, but far too slow and unpredictable. |
+| Scan `levels[0..ticks]` for the first non-empty one | up to one step per tick | Simple, but far too slow and unpredictable. |
 | Sorted tree (`BTreeMap`) | O(log n) | Pointer chasing; allocates on insert/remove. |
 | Cached "best" value, recompute when it empties | O(1) usually, O(n) sometimes | The occasional rescan is exactly the latency spike we avoid. |
 | **Bitset with bit-scan** | **O(1), always** | One bit per tick; the CPU finds a set bit in one instruction. |
@@ -26,7 +26,9 @@ The matching loop needs the best opposing price at every step. Some options:
 ## 4.2 Idea 1: one bit per price tick
 
 Keep a bit for every tick: `1` = "at least one order rests here", `0` = empty.
-4096 ticks need 4096 bits = 64 words of 64 bits.
+This chapter first follows an engine with the default 4096 ticks (4.2 to 4.5),
+then shows how the same idea scales to any number (4.6). 4096 ticks need 4096
+bits = 64 words of 64 bits.
 
 ```text
  words[0]  : ticks    0 ..  63      0000...0000
@@ -81,17 +83,17 @@ is not all zeros"**.
         = tick 2000                                     = ticks 100 and 101
 ```
 
-In code:
+For 4096 ticks, the data is just:
 
 ```rust
-pub struct TwoLevelBitset {
-    summary: u64,           // level 2: bit g set  <=>  words[g] != 0
-    words: [u64; 64],       // level 1: bit b of words[g] set <=> tick g*64+b is active
-}
+summary: u64,           // level 2: bit g set  <=>  words[g] != 0
+words: [u64; 64],       // level 1: bit b of words[g] set <=> tick g*64+b is active
 ```
 
 Size: `8 + 64 × 8 = 520 bytes`. The whole structure spans only 9 to 10 cache lines, and in
-practice only the summary plus one or two words are touched per operation.
+practice only the summary plus one or two words are touched per operation. (The
+real `TickBitset` keeps these 65 words in one array, so that the same code also
+works for more levels; 4.6 shows how.)
 
 ### Converting a tick to a (word, bit) position
 
@@ -107,10 +109,10 @@ Example, `tick = 1234`: `1234 >> 6 = 19` (since 19 × 64 = 1216) and
 
 ## 4.4 The operations
 
-> Code excerpts in this chapter are lightly condensed (for example, the source
-> copies `words[word_idx]` into a local variable first, and writes the array
-> length as the constant `WORDS`, which is 64). The behaviour is identical to
-> [`src/bitset.rs`](../src/bitset.rs).
+> The excerpts in this section spell out the two-level case, to make each step
+> visible. [`src/bitset.rs`](../src/bitset.rs) runs the same steps in a short loop
+> over the levels (4.6); for 4096 ticks, which has two levels, the loop does
+> exactly what is shown here.
 
 ### `set(tick)`: mark a tick active
 
@@ -120,7 +122,9 @@ self.summary         |= 1u64 << word_idx;  // level 2: mark its word non-empty
 ```
 
 Setting an already-set bit changes nothing, so `set` is idempotent. (The engine
-calls it every time an order rests, even if the level already had orders.)
+calls it every time an order rests, even if the level already had orders.) The
+source even stops early: if the word already had a bit set, the summary bit is set
+too, so there is nothing left to do.
 
 ### `lowest()`: best ask
 
@@ -138,8 +142,8 @@ let bit_idx  = 63 - self.words[word_idx].leading_zeros() as usize; // last set b
 Some(word_idx * 64 + bit_idx)
 ```
 
-Both return `None` immediately if `summary == 0`. **Two bit-scans, no loops**,
-regardless of whether the book has 2 levels or 4000.
+Both return `None` immediately if `summary == 0`. **Two bit-scans**, regardless
+of whether the book has 2 price levels or 4000.
 
 ### `clear(tick)`: mark a tick empty
 
@@ -191,31 +195,71 @@ unchanged. `lowest()` now returns 101.
 **`clear(101)`:** `words[1]` becomes `0`, so summary bit 1 is cleared too. The
 summary is now `{31}`, and `lowest()` returns 2000.
 
-## 4.6 Why 4096 ticks?
+## 4.6 Why 4096 ticks, and how to get more
 
 `4096 = 64 × 64`. One summary word has exactly 64 bits, one per word, so two
-levels cover 64 × 64 ticks. That is also the limit on `TICKS`: a multiple of 64,
-and at most 64 × 64 = 4096. A larger value would make the `1u64 << word_idx`
-shift in `set` overflow the summary word.
+levels cover 64 × 64 ticks. That is why 4096 is the default (`DEFAULT_TICKS`), and
+for a long time it was the only size: the bitset was a fixed two-level struct, and
+a compile-time check stopped anyone from making it larger.
 
-The source does not just document this limit, it makes the compiler check it:
+Real instruments need more. A share priced around 100.00 with a tick size of 0.01
+already needs 10,000 ticks just to reach 100.00. The way out is the one the
+summary word already took: **add a level on top whenever the one below has more
+than one word.**
+
+| Ticks (up to) | Levels | Words per level, bottom to top | Bit-scans per lookup |
+|---|---|---|---|
+| 64 | 1 | 1 | 1 |
+| 4096 (`64²`) | 2 | 64, 1 | 2 |
+| 262,144 (`64³`) | 3 | 4096, 64, 1 | 3 |
+| 16,777,216 (`64⁴`, the limit) | 4 | 262,144, 4096, 64, 1 | 4 |
+
+`Engine::with_ticks(capacity, ticks)` picks the number; `TickBitset::new(ticks)`
+computes how many levels that takes and stores all their words in **one flat
+array**, bottom level first, with the start of each level in `offsets`. One
+allocation, at construction, as for everything else.
+
+Each operation then becomes a short loop over the levels. `lowest()` walks down
+from the single top word, each bit-scan choosing the word to read on the level
+below:
 
 ```rust
-const _: () = assert!(
-    TICKS.is_multiple_of(64) && TICKS <= 64 * 64,
-    "TICKS must be a multiple of 64 and at most 4096"
-);
+let mut index = 0;
+for level in (0..self.levels).rev() {                 // top level first
+    let word = self.words[self.offsets[level] + index];
+    index = index * 64 + word.trailing_zeros() as usize;
+}
+Some(index)                                           // a tick, on level 0
 ```
 
-`const _` evaluates the expression while compiling, so an invalid `TICKS` never
-produces a program at all. Try it: set `TICKS` to 4160 and `cargo build` stops
-with `error[E0080]: evaluation panicked: TICKS must be a multiple of 64 and at
-most 4096`. Turning a comment into a compile-time check is cheap insurance for
-exactly the kind of change exercise 13 asks for.
+`set(tick)` walks up, and stops at the first word that was not empty already
+(its summary bit, and every bit above it, must be set already):
 
-Need more ticks? Add another level: three levels of `u64` cover `64³ = 262,144`
-ticks, with `highest()` / `lowest()` still taking only 3 bit-scans. (That is one
-of the exercises in [chapter 11](11-limitations-and-exercises.md).)
+```rust
+let mut index = tick;
+for level in 0..self.levels {                         // bottom level first
+    let slot = self.offsets[level] + (index >> 6);
+    let was_empty = self.words[slot] == 0;
+    self.words[slot] |= 1u64 << (index & 63);
+    if !was_empty { return; }
+    index >>= 6;                                      // this word's bit, one level up
+}
+```
+
+`clear(tick)` mirrors it and stops at the first word that is *still* not empty:
+the rule from 4.4, applied at every level. `highest()` is `lowest()` with
+`63 - leading_zeros`.
+
+With two levels the loops run exactly the steps of 4.4, and the benchmarks
+(chapter 10) show no measurable cost for the generality. A wider ladder costs one
+bit-scan per extra level, still O(1), and memory: two price levels of 24 bytes per
+tick, so 4096 ticks take 196 KB and 262,144 ticks 12.6 MB. That memory, more than
+the bit-scans, is the real reason to pick the tick count per instrument instead of
+making every book huge.
+
+The size limit is now checked when the bitset is created, not when the program is
+compiled, because the size is only known then: `TickBitset::new` panics for 0
+ticks or more than `MAX_LADDER_TICKS` (2^24, four levels).
 
 ## 4.7 How the engine uses it
 
@@ -228,10 +272,13 @@ The `Engine` owns **two** bitsets, one per side:
 
 The bit is maintained at exactly three places:
 
-1. **Order rests** (`process_order`, after `push_back` succeeds): `set(tick)`.
-2. **Level drained by matching** (`match_incoming`, when `level.is_empty()`):
+1. **Order rests** (`rest`, used by `submit_order` and `restore`, after
+   `push_back` succeeds): `set(tick)`.
+2. **Level drained by matching** (`match_incoming`, when `level.is_empty()`,
+   whether the last maker was filled or removed by self-trade prevention):
    `clear(tick)`.
-3. **Last order at a level cancelled** (`cancel_order`): `clear(tick)`.
+3. **Last order at a level cancelled** (`remove_cancelled`, used by
+   `cancel_order`, a reduction to zero and the mass cancels): `clear(tick)`.
 
 **Invariant:** bit `t` is set ⇔ `levels[t]` is non-empty. The bitset is an
 *index* over the level array: a fast way to find non-empty entries.
@@ -248,9 +295,11 @@ The bit is maintained at exactly three places:
 ## 4.8 Recap
 
 - One bit per tick, grouped in 64-bit words.
-- A summary word records which words are non-empty.
-- Best price = two hardware bit-scans: **O(1)**, no loops, no allocation.
-- `clear` only clears the summary bit when the whole word becomes empty.
+- A summary word records which words are non-empty; for more than 4096 ticks,
+  more summary levels, up to a single top word.
+- Best price = one hardware bit-scan per level (two for 4096 ticks): **O(1)**, no
+  allocation.
+- `clear` only clears a summary bit when the whole word below it becomes empty.
 
 ## 4.9 Try it yourself
 
@@ -261,8 +310,10 @@ cargo test bitset::
 ```
 
 Then write a small test of your own at the end of the `tests` module in
-[`src/bitset.rs`](../src/bitset.rs): set ticks `5`, `70` and `4000`, predict what
-`lowest()` and `highest()` return, and which bits of `summary` are set, then
-check with `assert_eq!`. Clear tick `5` and predict again.
+[`src/bitset.rs`](../src/bitset.rs): in a `TickBitset::new(4096)`, set ticks `5`,
+`70` and `4000`, predict what `lowest()` and `highest()` return, and which bits
+of the summary are set, then check with `assert_eq!`. Clear tick `5` and predict
+again. Then do the same in a `TickBitset::new(300_000)`, with ticks `5`, `70`
+and `250_000`: which word of each of its four levels does `lowest()` read?
 
 **Next:** [5. The flat hash map](05-hash-map.md)
