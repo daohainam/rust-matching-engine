@@ -586,7 +586,7 @@ first, oldest first at each price. That matters for determinism: a replay
 reports them in the same order, and the reference book in the model check can
 predict every event. `remove_cancelled` is the second half of `cancel_order`,
 shared now that two callers need it. The cost is the ticks between each side's
-best and worst price (at most 4096) plus the orders on them; the empty ticks are
+best and worst price (at most the tick count) plus the orders on them; the empty ticks are
 the price of not keeping a per-account list (exercise 11 in chapter 11 adds one).
 `MassCancelled` closes every mass cancel, even one that found nothing, so the
 request always leaves an event.
@@ -631,7 +631,7 @@ request always leaves an event.
 - **`cancel_order` and `reduce_order`:** O(1) expected: one hash lookup, then
   constant work on the order's queue.
 - **`cancel_account` and `cancel_all`:** O(ticks between the best and worst price
-  on each side + orders on them), at most 4096 ticks; no hash lookups to find
+  on each side + orders on them), at most `tick_count()` ticks; no hash lookups to find
   orders, one per cancelled order to remove it.
 
 Overall: **expected O(1 + fills)** (the "expected" is because the hash map probes;
