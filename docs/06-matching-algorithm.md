@@ -14,7 +14,9 @@ shown where the other mirrors it); the behaviour is identical to the source.
 
 ```rust
 let mut engine = Engine::new(order_capacity);          // allocate everything, once
+// or Engine::with_ticks(order_capacity, ticks): another price range (chapter 4)
 let mut events = Vec::new();                            // any EventSink (chapter 7)
+engine.set_risk_limits(limits);                         // pre-trade checks (6.2)
 
 engine.process_order(id, side, tick, qty, &mut events); // submit a limit order
 engine.submit_order(order, &mut events);                // any NewOrder (see below)
@@ -29,6 +31,8 @@ engine.depth_at(side, tick);       // u64   total resting qty at one tick
 engine.depth_snapshot(side, n);    // Vec<(tick, qty)>  best n levels, best first
 engine.live_order_count();         // usize number of resting orders
 engine.resting_order(id);          // Option<RestingOrder>  side, tick, remaining qty
+engine.tick_count();               // usize valid ticks are 0..tick_count()
+engine.risk_limits();              // RiskLimits
 ```
 
 `submit_order` takes a `NewOrder`, a small `Copy` struct with every term of an
@@ -61,13 +65,14 @@ type, so `emit` is inlined into the matching loop; `?Sized` also allows a
 | `depth_snapshot` | no | **yes** (`Vec`) | O(ticks scanned); for reporting only |
 | `live_order_count` | no | no | O(1) |
 | `resting_order` | no | no | O(1) expected: one hash lookup |
+| `set_risk_limits` / `risk_limits` / `tick_count` | only `set_risk_limits` | no | O(1) |
 
 ## 6.2 `submit_order` in four phases
 
 ```mermaid
 flowchart TD
-    A(["submit_order(order, sink)"]) --> A2["market order: tick = worst limit<br/>(4095 for a buy, 0 for a sell)"]
-    A2 --> B{"qty == 0, or id is reserved,<br/>or tick >= 4096,<br/>or id already live,<br/>or post-only that would trade?"}
+    A(["submit_order(order, sink)"]) --> A2["market order: tick = the edge of the price band,<br/>or else the end of the ladder"]
+    A2 --> B{"qty == 0, or id is reserved,<br/>or tick out of range,<br/>or id already live,<br/>or a risk limit broken,<br/>or post-only that would trade?"}
     B -- yes --> R(["emit OrderRejected(reason)<br/>return immediately"])
     B -- no --> C["emit OrderAccepted"]
     C --> D["remaining = qty<br/>match_incoming against the opposite side"]
@@ -92,9 +97,10 @@ flowchart TD
 
 In words:
 
-1. **Validate.** Bad input, and a post-only order that would trade, is rejected
-   before anything changes. (A market order first gets the worst limit its side
-   allows, so from here on it is handled like any other order.)
+1. **Validate.** Bad input, an order that breaks a risk limit, and a post-only
+   order that would trade, are rejected before anything changes. (A market order
+   first gets a limit: the edge of the price band, or without one the worst
+   price its side allows; from here on it is handled like any other order.)
 2. **Accept.** Emit `OrderAccepted`.
 3. **Match.** Trade against the opposite side while the prices cross.
 4. **Rest.** Put any leftover quantity into the book, or let it expire if the
@@ -111,10 +117,14 @@ fn validate(&self, order_id: u64, side: Side, order_type: OrderType,
         Err(RejectReason::ZeroQuantity)
     } else if order_id == crate::hashmap::RESERVED_KEY {
         Err(RejectReason::ReservedOrderId)
-    } else if (price_tick as usize) >= MAX_TICKS {
+    } else if (price_tick as usize) >= self.tick_count() {
         Err(RejectReason::PriceOutOfRange)
     } else if self.id_map.get(order_id).is_some() {
         Err(RejectReason::DuplicateOrderId)
+    } else if qty > self.limits.max_order_qty {
+        Err(RejectReason::QuantityAboveLimit)
+    } else if self.is_outside_band(side, price_tick) {
+        Err(RejectReason::PriceOutsideBand)
     } else if order_type == OrderType::PostOnly && self.is_marketable(side, price_tick) {
         Err(RejectReason::PostOnlyWouldTrade)
     } else {
@@ -123,10 +133,9 @@ fn validate(&self, order_id: u64, side: Side, order_type: OrderType,
 }
 
 // In submit_order (after `let NewOrder { order_id, account, side, .. } = order;`):
-let price_tick = match (order_type, side) {             // a market order may trade at
-    (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1, // any price: give it the
-    (OrderType::Market, Side::Sell) => 0,                   // worst limit its side allows
-    _ => price_tick,
+let price_tick = match order_type {
+    OrderType::Market => self.market_limit(side),       // the edge of the price band,
+    _ => price_tick,                                    // or the end of the ladder
 };
 if let Err(reason) = self.validate(order_id, side, order_type, price_tick, qty) {
     sink.emit(Event::OrderRejected { order_id, reason });
@@ -139,17 +148,25 @@ sink.emit(Event::OrderAccepted { order_id, account, side, order_type, price_tick
 |---|---|---|
 | `qty == 0` | `ZeroQuantity` | An empty order is meaningless. Without the check it would sail through matching with nothing to fill and emit a spurious `OrderAccepted` + `OrderFilled` pair. |
 | `order_id == u64::MAX` | `ReservedOrderId` | Reserved as the hash map's "empty" marker (chapter 5). |
-| `price_tick >= 4096` | `PriceOutOfRange` | The price ladder only has 4096 ticks; indexing beyond it would be out of bounds. |
+| `price_tick >= tick_count()` | `PriceOutOfRange` | The price ladder has only this many ticks (4096 by default); indexing beyond it would be out of bounds. |
 | `id_map.get(id).is_some()` | `DuplicateOrderId` | Duplicate id among **live** orders. (An id that has been fully filled or cancelled is gone from the map and may be reused.) |
+| `qty > limits.max_order_qty` | `QuantityAboveLimit` | A pre-trade risk limit against "fat fingers": an extra zero on the quantity. |
+| `is_outside_band(side, tick)` | `PriceOutsideBand` | The other risk limit: a buy may be priced at most `band` ticks above the best ask, a sell at most `band` ticks below the best bid. With no order on the other side there is no reference, and no band applies. |
 | post-only and `is_marketable(side, tick)` | `PostOnlyWouldTrade` | A post-only order promises never to take liquidity. `is_marketable` asks the question that starts matching (does the best opposing price reach this limit?) with one bit-scan and no change to the book. |
 
 A validation failure yields **only** `OrderRejected`, with no `OrderAccepted`
 before it. The checks run in the order of the table and stop at the first
 failure, so an order with two problems (say, zero quantity *and* a bad tick)
 always gets the same reason, `ZeroQuantity`. A market order can never fail the
-price check: its tick has been replaced before the checks run, and
-`OrderAccepted` reports that limit, so a consumer sees how far the order may
-trade. Returning a `Result` from a small
+price checks: its tick has been replaced before they run, by `market_limit`,
+with the edge of the price band (best ask + band for a buy, best bid − band for a
+sell) or, without a band, the end of the ladder. `OrderAccepted` reports that
+limit, so a consumer sees how far the order may trade, and the band turns into
+**protection for market orders**: they stop at its edge, and their remainder
+expires.
+
+The risk limits are engine state, changed with `set_risk_limits`. Like an order,
+that call changes later results, so it is logged like one (chapter 9). Returning a `Result` from a small
 function keeps that order easy to read, and lets the caller handle every
 rejection with one `if let`.
 
@@ -591,6 +608,9 @@ request always leaves an event.
 | Immediate-or-cancel or market order with quantity left | `[OrderAccepted, ...fills..., OrderExpired]` | nothing rests; needs no slot |
 | Market order on an empty opposing side | `[OrderAccepted, OrderExpired]` | none |
 | Market order with an out-of-range tick | handled normally: the tick is ignored | normal |
+| Quantity above `max_order_qty` | `[OrderRejected(QuantityAboveLimit)]` | none |
+| Buy priced more than `band` ticks above the best ask (or a sell below the best bid) | `[OrderRejected(PriceOutsideBand)]` | none |
+| Market order with a price band | `OrderAccepted` with limit best ask + band (or best bid − band); trades up to it; `OrderExpired` for the rest | normal |
 | `cancel_order` of an id that is not resting | `[CancelRejected(NotResting)]` (returns `false`) | none |
 | `reduce_order` by 0 | `[CancelRejected(ZeroQuantity)]` (returns `false`) | none |
 | `reduce_order` by the remaining quantity or more | `[OrderCancelled]` (returns `true`) | the order is removed |
