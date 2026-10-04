@@ -72,8 +72,15 @@ pub enum Event {
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     /// An order has no remaining quantity; a resting maker is removed.
     OrderFilled { order_id: u64 },
-    /// An order was cancelled by explicit request.
-    OrderCancelled { order_id: u64 },
+    /// An order was cancelled by explicit request. `side` and `price_tick`
+    /// say where it rested and `cancelled_qty` how much quantity left the
+    /// book, so a consumer can update its depth from this event alone.
+    OrderCancelled {
+        order_id: u64,
+        side: Side,
+        price_tick: u32,
+        cancelled_qty: u64,
+    },
     /// An order was rejected; `reason` says why. An input error is reported
     /// alone (no `OrderAccepted`); a remainder that cannot rest comes after
     /// `OrderAccepted`. See [`RejectReason`].
@@ -271,7 +278,7 @@ mod tests {
         assert_eq!(seen, 2);
 
         let mut events = Vec::new();
-        events.emit(Event::OrderCancelled { order_id: 3 });
-        assert_eq!(events, vec![Event::OrderCancelled { order_id: 3 }]);
+        events.emit(Event::OrderFilled { order_id: 3 });
+        assert_eq!(events, vec![Event::OrderFilled { order_id: 3 }]);
     }
 }

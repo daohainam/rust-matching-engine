@@ -446,7 +446,12 @@ impl Engine {
             }
         }
         self.pool.free(idx);
-        sink.emit(Event::OrderCancelled { order_id });
+        sink.emit(Event::OrderCancelled {
+            order_id,
+            side: order.side,
+            price_tick: order.price_tick,
+            cancelled_qty: order.remaining_qty,
+        });
         true
     }
 
@@ -601,7 +606,15 @@ mod tests {
         // Cancel middle.
         let (ok, events) = cancel(&mut engine, 2);
         assert!(ok);
-        assert_eq!(events.as_slice(), &[Event::OrderCancelled { order_id: 2 }]);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderCancelled {
+                order_id: 2,
+                side: Side::Buy,
+                price_tick: 50,
+                cancelled_qty: 1
+            }]
+        );
         assert_eq!(engine.depth_at(Side::Buy, 50), 2);
 
         // Cancel head.
@@ -620,6 +633,28 @@ mod tests {
         let (ok, events) = cancel(&mut engine, 3);
         assert!(!ok);
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn cancel_reports_only_what_is_left_after_a_partial_fill() {
+        // A consumer that applies every event to its own depth view must end
+        // with the engine's depth: the cancel removes the 6 left, not the 10
+        // originally ordered.
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 120, 10);
+        place(&mut engine, 2, Side::Buy, 120, 4);
+        let (ok, events) = cancel(&mut engine, 1);
+        assert!(ok);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderCancelled {
+                order_id: 1,
+                side: Side::Sell,
+                price_tick: 120,
+                cancelled_qty: 6
+            }]
+        );
+        assert_eq!(engine.depth_at(Side::Sell, 120), 0);
     }
 
     #[test]

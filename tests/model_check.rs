@@ -150,11 +150,21 @@ impl ReferenceBook {
             Side::Sell => &mut self.asks,
         };
         let queue = book.get_mut(&tick).expect("live order has a level");
-        queue.retain(|&(id, _)| id != order_id);
+        let position = queue
+            .iter()
+            .position(|&(id, _)| id == order_id)
+            .expect("live order is queued at its level");
+        let (_, cancelled_qty) = queue.remove(position).expect("position is in range");
         if queue.is_empty() {
             book.remove(&tick);
         }
-        (true, vec![Event::OrderCancelled { order_id }])
+        let event = Event::OrderCancelled {
+            order_id,
+            side,
+            price_tick: tick,
+            cancelled_qty,
+        };
+        (true, vec![event])
     }
 
     fn best_bid(&self) -> Option<u32> {
