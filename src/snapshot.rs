@@ -55,7 +55,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::engine::RestingOrder;
+use crate::engine::{RestingOrder, RiskLimits};
 use crate::events::RejectReason;
 use crate::pool::Side;
 use crate::wal::mix64;
@@ -78,6 +78,8 @@ pub struct Snapshot {
     /// How many trades it has executed: the next trade gets `trades + 1`
     /// as its `trade_id`.
     pub trades: u64,
+    /// The pre-trade risk limits in force.
+    pub risk_limits: RiskLimits,
     /// Every resting order, in priority order: bids best price first, then
     /// asks best price first, oldest first at each price. Restoring needs
     /// only the order *within* each price; the rest makes snapshots of the
@@ -161,8 +163,9 @@ const CHECKSUM_SIZE: usize = 8;
 /// Writes `checkpoint` to `path` atomically, replacing any checkpoint
 /// already there. See [Writing atomically](self#writing-atomically).
 ///
-/// The format has no tick count field yet: a checkpoint is read back with
-/// [`DEFAULT_TICKS`](crate::engine::DEFAULT_TICKS).
+/// The format has no tick count or risk limit fields yet: a checkpoint is
+/// read back with [`DEFAULT_TICKS`](crate::engine::DEFAULT_TICKS) and no
+/// limits.
 pub fn write_checkpoint<P: AsRef<Path>>(path: P, checkpoint: &Checkpoint) -> io::Result<()> {
     let path = path.as_ref();
     let temporary = temporary_path(path);
@@ -226,6 +229,7 @@ fn encode(checkpoint: &Checkpoint) -> Vec<u8> {
         trades,
         ref orders,
         tick_count: _, // not in the format yet (see `write_checkpoint`)
+        risk_limits: _,
     } = checkpoint.snapshot;
     let mut out = Vec::with_capacity(HEADER_SIZE + orders.len() * ENTRY_SIZE + CHECKSUM_SIZE);
     out.extend_from_slice(&MAGIC);
@@ -303,6 +307,7 @@ fn decode(bytes: &[u8]) -> io::Result<Checkpoint> {
             capacity: usize::try_from(u64_at(16)).map_err(|_| invalid("capacity too large"))?,
             tick_count: crate::engine::DEFAULT_TICKS,
             accepted_orders: u64_at(24),
+            risk_limits: RiskLimits::NONE,
             trades: u64_at(32),
             orders,
         },
@@ -327,6 +332,7 @@ mod tests {
                 capacity: 4_096,
                 tick_count: crate::engine::DEFAULT_TICKS,
                 accepted_orders: 1_000,
+                risk_limits: RiskLimits::NONE,
                 trades: 77,
                 orders: vec![
                     order(5, 1, Side::Buy, 99, 7),

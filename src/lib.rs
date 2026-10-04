@@ -36,7 +36,9 @@ pub mod ringbuffer;
 pub mod snapshot;
 pub mod wal;
 
-pub use engine::{Engine, NewOrder, OrderType, RestingOrder, SelfTradePrevention, DEFAULT_TICKS};
+pub use engine::{
+    Engine, NewOrder, OrderType, RestingOrder, RiskLimits, SelfTradePrevention, DEFAULT_TICKS,
+};
 pub use events::{CancelRejectReason, Event, EventBatch, EventSink, RejectReason};
 pub use pool::Side;
 pub use snapshot::{Checkpoint, Snapshot, SnapshotError};

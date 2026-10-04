@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::events::MAX_EVENTS_PER_CALL;
 use matching_engine::{
-    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder,
+    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder, RiskLimits,
     SelfTradePrevention, Side, DEFAULT_TICKS,
 };
 
@@ -26,6 +26,7 @@ struct ReferenceBook {
     /// Account of every order that ever rested; a reused id overwrites it.
     accounts: HashMap<u64, u32>,
     trades: u64,
+    limits: RiskLimits,
 }
 
 impl ReferenceBook {
@@ -38,6 +39,7 @@ impl ReferenceBook {
             live: HashMap::new(),
             accounts: HashMap::new(),
             trades: 0,
+            limits: RiskLimits::NONE,
         }
     }
 
@@ -51,10 +53,26 @@ impl ReferenceBook {
             qty,
             self_trade_prevention,
         } = order;
-        let price_tick = match (order_type, side) {
-            (OrderType::Market, Side::Buy) => self.ticks - 1,
-            (OrderType::Market, Side::Sell) => 0,
+        let top = self.ticks - 1;
+        let price_tick = match (order_type, side, self.limits.price_band) {
+            (OrderType::Market, Side::Buy, Some(band)) => self
+                .best_ask()
+                .map_or(top, |ask| ask.saturating_add(band).min(top)),
+            (OrderType::Market, Side::Sell, Some(band)) => {
+                self.best_bid().map_or(0, |bid| bid.saturating_sub(band))
+            }
+            (OrderType::Market, Side::Buy, None) => top,
+            (OrderType::Market, Side::Sell, None) => 0,
             _ => price_tick,
+        };
+        let outside_band = match (self.limits.price_band, side) {
+            (Some(band), Side::Buy) => self
+                .best_ask()
+                .is_some_and(|ask| price_tick > ask.saturating_add(band)),
+            (Some(band), Side::Sell) => self
+                .best_bid()
+                .is_some_and(|bid| price_tick < bid.saturating_sub(band)),
+            (None, _) => false,
         };
         let invalid = if qty == 0 {
             Some(RejectReason::ZeroQuantity)
@@ -64,6 +82,10 @@ impl ReferenceBook {
             Some(RejectReason::PriceOutOfRange)
         } else if self.live.contains_key(&order_id) {
             Some(RejectReason::DuplicateOrderId)
+        } else if qty > self.limits.max_order_qty {
+            Some(RejectReason::QuantityAboveLimit)
+        } else if outside_band {
+            Some(RejectReason::PriceOutsideBand)
         } else if order_type == OrderType::PostOnly
             && match side {
                 Side::Buy => self.best_ask().is_some_and(|ask| ask <= price_tick),
@@ -358,6 +380,7 @@ struct Coverage {
     reductions: usize,
     self_trades_prevented: usize,
     mass_cancelled_orders: u64,
+    risk_rejections: usize,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Coverage) {
@@ -367,7 +390,13 @@ fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Covera
     let mut events = Vec::new();
 
     for step in 0..ops {
-        let op = generator.next_op();
+        // Every 2,000 requests, another set of risk limits; the generator
+        // does not send them itself.
+        let op = if step % 2_000 == 1_999 {
+            Op::SetRiskLimits(LIMITS[step / 2_000 % LIMITS.len()])
+        } else {
+            generator.next_op()
+        };
         let context = || format!("seed {seed}, step {step}: {op:?}");
         events.clear();
         let expected = match op {
@@ -399,6 +428,11 @@ fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Covera
                 engine.cancel_all(&mut events);
                 model.mass_cancel(None)
             }
+            Op::SetRiskLimits(limits) => {
+                engine.set_risk_limits(limits);
+                model.limits = limits;
+                Vec::new()
+            }
         };
 
         assert_eq!(events, expected, "{}", context());
@@ -429,7 +463,7 @@ fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Covera
         let taker_id = match op {
             Op::Place(order) => Some(order.order_id),
             Op::Cancel { order_id } | Op::Reduce { order_id, .. } => Some(order_id),
-            Op::CancelAccount { .. } | Op::CancelAll => None,
+            Op::CancelAccount { .. } | Op::CancelAll | Op::SetRiskLimits(_) => None,
         };
         // The order this request named, and every maker it touched.
         let touched = events.iter().filter_map(|e| match e {
@@ -465,6 +499,13 @@ fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Covera
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
         coverage.expired_remainders +=
             usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        coverage.risk_rejections += usize::from(matches!(
+            events.as_slice(),
+            [Event::OrderRejected {
+                reason: RejectReason::QuantityAboveLimit | RejectReason::PriceOutsideBand,
+                ..
+            }]
+        ));
         if let Some(Event::MassCancelled {
             cancelled_orders, ..
         }) = events.last()
@@ -507,7 +548,25 @@ fn assert_all_paths_hit(coverage: &Coverage) {
         coverage.mass_cancelled_orders > 0,
         "no orders cancelled by a mass cancel"
     );
+    assert!(coverage.risk_rejections > 0, "no risk limit rejections");
 }
+
+/// The risk limits the model check cycles through, starting from none.
+const LIMITS: [RiskLimits; 4] = [
+    RiskLimits {
+        max_order_qty: 40,
+        price_band: Some(3),
+    },
+    RiskLimits {
+        max_order_qty: u64::MAX,
+        price_band: Some(0),
+    },
+    RiskLimits {
+        max_order_qty: 25,
+        price_band: None,
+    },
+    RiskLimits::NONE,
+];
 
 #[test]
 fn engine_matches_reference_book_when_capacity_is_tight() {

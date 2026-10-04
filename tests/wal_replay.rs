@@ -30,6 +30,7 @@ fn replaying_the_wal_reproduces_every_event() {
             } => WalRecord::reduce(order_id, reduce_by, sequence),
             Op::CancelAccount { account } => WalRecord::cancel_account(account, sequence),
             Op::CancelAll => WalRecord::cancel_all(sequence),
+            Op::SetRiskLimits(_) => unreachable!("the generator sends no limit changes"),
         };
         // Write-ahead: the request is logged before the engine applies it.
         writer.append(record).unwrap();

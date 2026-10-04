@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use matching_engine::DEFAULT_TICKS;
-use matching_engine::{NewOrder, OrderType, SelfTradePrevention, Side};
+use matching_engine::{NewOrder, OrderType, RiskLimits, SelfTradePrevention, Side};
 
 /// xorshift64*: tiny, deterministic, and plenty for driving test inputs.
 pub struct Rng(u64);
@@ -48,6 +48,7 @@ pub enum Op {
     Reduce { order_id: u64, reduce_by: u64 },
     CancelAccount { account: u32 },
     CancelAll,
+    SetRiskLimits(RiskLimits),
 }
 
 /// Most orders land in this narrow band so they cross each other often.

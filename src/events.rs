@@ -147,9 +147,9 @@ pub enum Event {
 
 /// Why an order was rejected.
 ///
-/// The first five reasons are found **before acceptance**: the first four
-/// are input errors, and the fifth is a post-only order that would trade.
-/// The order is rejected on its own, without an `OrderAccepted` event, and
+/// The first seven reasons are found **before acceptance**: four input
+/// errors, two pre-trade risk limits, and a post-only order that would
+/// trade. The order is rejected on its own, without an `OrderAccepted` event, and
 /// the book is unchanged. The last two can only happen after
 /// `OrderAccepted`, when the unfilled remainder of an order cannot rest in
 /// the book.
@@ -165,6 +165,12 @@ pub enum RejectReason {
     PriceOutOfRange,
     /// A resting order already uses this order ID.
     DuplicateOrderId,
+    /// The quantity is above the engine's
+    /// [`max_order_qty`](crate::engine::RiskLimits::max_order_qty).
+    QuantityAboveLimit,
+    /// The price reaches further past the best opposing price than the
+    /// engine's [`price_band`](crate::engine::RiskLimits::price_band) allows.
+    PriceOutsideBand,
     /// A [`PostOnly`](crate::engine::OrderType::PostOnly) order would have
     /// traded on arrival: its price reaches the best price on the other side.
     PostOnlyWouldTrade,

@@ -26,6 +26,7 @@ fn apply(engine: &mut Engine, op: Op, events: &mut Vec<Event>) {
         Op::CancelAll => {
             engine.cancel_all(events);
         }
+        Op::SetRiskLimits(limits) => engine.set_risk_limits(limits),
     }
 }
 

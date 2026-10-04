@@ -111,6 +111,42 @@ impl SelfTradePrevention {
     }
 }
 
+/// Pre-trade risk limits: checks every new order must pass before it may
+/// trade. They catch "fat finger" mistakes, such as an extra zero on the
+/// quantity or a price far through the market, before they cost anything.
+///
+/// Limits are engine state, set with [`Engine::set_risk_limits`]. They
+/// change the outcome of later orders, so a change must be logged like any
+/// other request for a replay to reproduce the book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RiskLimits {
+    /// The largest quantity one order may have; a larger order is rejected
+    /// with [`QuantityAboveLimit`](RejectReason::QuantityAboveLimit).
+    pub max_order_qty: u64,
+    /// How many ticks past the best opposing price an order may reach: a
+    /// buy may be priced at most `best ask + band`, a sell at least
+    /// `best bid - band`, or it is rejected with
+    /// [`PriceOutsideBand`](RejectReason::PriceOutsideBand). A market order
+    /// gets exactly that price as its limit, so it can sweep no further.
+    /// With no opposing order there is no reference, and no band applies.
+    /// `None` means no band at all.
+    pub price_band: Option<u32>,
+}
+
+impl RiskLimits {
+    /// No limits: any quantity, any price. The default.
+    pub const NONE: Self = Self {
+        max_order_qty: u64::MAX,
+        price_band: None,
+    };
+}
+
+impl Default for RiskLimits {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// A request to submit an order, as [`Engine::submit_order`] takes it.
 ///
 /// Start from [`limit`](Self::limit) or [`market`](Self::market) and adjust
@@ -200,6 +236,8 @@ pub struct Engine {
     sequence: u64,
     /// Number of trades executed so far; the last one's `trade_id`.
     trades: u64,
+    /// The checks every new order must pass.
+    limits: RiskLimits,
 }
 
 impl Engine {
@@ -244,7 +282,21 @@ impl Engine {
             ask_levels: vec![PriceLevel::empty(); ticks].into_boxed_slice(),
             sequence: 0,
             trades: 0,
+            limits: RiskLimits::NONE,
         }
+    }
+
+    /// Returns the pre-trade risk limits new orders are checked against.
+    #[inline(always)]
+    pub fn risk_limits(&self) -> RiskLimits {
+        self.limits
+    }
+
+    /// Replaces the pre-trade risk limits; orders already resting are not
+    /// affected. Like an order, this is a request that changes later
+    /// results: log it, so that a replay applies it at the same point.
+    pub fn set_risk_limits(&mut self, limits: RiskLimits) {
+        self.limits = limits;
     }
 
     /// Returns how many price ticks the book has: valid ticks are
@@ -374,10 +426,44 @@ impl Engine {
             Err(RejectReason::PriceOutOfRange)
         } else if self.id_map.get(order_id).is_some() {
             Err(RejectReason::DuplicateOrderId)
+        } else if qty > self.limits.max_order_qty {
+            Err(RejectReason::QuantityAboveLimit)
+        } else if self.is_outside_band(side, price_tick) {
+            Err(RejectReason::PriceOutsideBand)
         } else if order_type == OrderType::PostOnly && self.is_marketable(side, price_tick) {
             Err(RejectReason::PostOnlyWouldTrade)
         } else {
             Ok(())
+        }
+    }
+
+    /// Whether an order on `side` limited at `price_tick` reaches more than
+    /// the price band past the best opposing price.
+    fn is_outside_band(&self, side: Side, price_tick: u32) -> bool {
+        let Some(band) = self.limits.price_band else {
+            return false;
+        };
+        match side {
+            Side::Buy => self
+                .best_ask()
+                .is_some_and(|ask| price_tick > ask.saturating_add(band)),
+            Side::Sell => self
+                .best_bid()
+                .is_some_and(|bid| price_tick < bid.saturating_sub(band)),
+        }
+    }
+
+    /// The limit a market order on `side` gets: as far as the price band
+    /// allows past the best opposing price, or the end of the ladder.
+    fn market_limit(&self, side: Side) -> u32 {
+        let top = self.tick_count() as u32 - 1;
+        match (side, self.limits.price_band) {
+            (Side::Buy, Some(band)) => self
+                .best_ask()
+                .map_or(top, |ask| ask.saturating_add(band).min(top)),
+            (Side::Sell, Some(band)) => self.best_bid().map_or(0, |bid| bid.saturating_sub(band)),
+            (Side::Buy, None) => top,
+            (Side::Sell, None) => 0,
         }
     }
 
@@ -450,9 +536,8 @@ impl Engine {
         } = order;
         // A market order may trade at any price: give it the worst limit
         // its side allows, and every later step treats it as usual.
-        let price_tick = match (order_type, side) {
-            (OrderType::Market, Side::Buy) => self.tick_count() as u32 - 1,
-            (OrderType::Market, Side::Sell) => 0,
+        let price_tick = match order_type {
+            OrderType::Market => self.market_limit(side),
             _ => price_tick,
         };
         let order = NewOrder {
@@ -620,6 +705,7 @@ impl Engine {
             tick_count: self.tick_count(),
             accepted_orders: self.sequence,
             trades: self.trades,
+            risk_limits: self.limits,
             orders,
         }
     }
@@ -650,6 +736,7 @@ impl Engine {
         let mut engine = Engine::with_ticks(capacity, snapshot.tick_count);
         engine.sequence = snapshot.accepted_orders;
         engine.trades = snapshot.trades;
+        engine.limits = snapshot.risk_limits;
         for &order in &snapshot.orders {
             let check = if order.remaining_qty == 0 {
                 Err(RejectReason::ZeroQuantity)
@@ -1748,6 +1835,7 @@ mod tests {
             tick_count: DEFAULT_TICKS,
             accepted_orders: 0,
             trades: 0,
+            risk_limits: RiskLimits::NONE,
             orders,
         };
         let restore = |s: &Snapshot| Engine::restore(s).err();
@@ -1845,6 +1933,74 @@ mod tests {
             }
         ));
         assert_eq!(restored.best_ask(), None);
+    }
+
+    #[test]
+    fn risk_limits_reject_oversized_orders_and_prices_far_through_the_market() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 50);
+        place(&mut engine, 2, Side::Buy, 90, 50);
+        engine.set_risk_limits(RiskLimits {
+            max_order_qty: 10,
+            price_band: Some(2),
+        });
+        let reason = |events: Vec<Event>| match events[..] {
+            [Event::OrderRejected { reason, .. }] => Some(reason),
+            _ => None,
+        };
+        let too_big = reason(place(&mut engine, 3, Side::Buy, 100, 11));
+        assert_eq!(too_big, Some(RejectReason::QuantityAboveLimit));
+        let buy_too_high = reason(place(&mut engine, 4, Side::Buy, 103, 1));
+        assert_eq!(buy_too_high, Some(RejectReason::PriceOutsideBand));
+        let sell_too_low = reason(place(&mut engine, 5, Side::Sell, 87, 1));
+        assert_eq!(sell_too_low, Some(RejectReason::PriceOutsideBand));
+        // Exactly at the edge of the band is allowed, and trades as usual.
+        assert_eq!(reason(place(&mut engine, 6, Side::Buy, 102, 10)), None);
+        assert_eq!(reason(place(&mut engine, 7, Side::Sell, 88, 10)), None);
+        // Orders resting before the limits came are untouched.
+        assert_eq!(engine.depth_at(Side::Sell, 100), 40);
+        assert_eq!(engine.depth_at(Side::Buy, 90), 40);
+    }
+
+    #[test]
+    fn the_price_band_stops_a_market_order_sweep() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 1);
+        place(&mut engine, 2, Side::Sell, 101, 1);
+        place(&mut engine, 3, Side::Sell, 150, 1);
+        engine.set_risk_limits(RiskLimits {
+            price_band: Some(5),
+            ..RiskLimits::NONE
+        });
+        let mut events = Vec::new();
+        engine.submit_order(NewOrder::market(4, Side::Buy, 5), &mut events);
+        assert!(matches!(
+            events[0],
+            Event::OrderAccepted {
+                price_tick: 105,
+                ..
+            }
+        ));
+        let traded: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Trade { price_tick, .. } => Some(*price_tick),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(traded, [100, 101]);
+        assert_eq!(
+            events.last(),
+            Some(&Event::OrderExpired {
+                order_id: 4,
+                expired_qty: 3
+            })
+        );
+        assert_eq!(engine.best_ask(), Some(150));
+
+        // The limits are part of the state a snapshot keeps.
+        let restored = Engine::restore(&engine.snapshot()).unwrap();
+        assert_eq!(restored.risk_limits(), engine.risk_limits());
     }
 
     #[test]
