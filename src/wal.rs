@@ -5,7 +5,7 @@
 //! record directly into a memory-mapped file, so appending needs no
 //! serialization allocation and records can be located by arithmetic.
 //!
-//! # File format (version 1)
+//! # File format (version 2)
 //!
 //! All integers are little-endian and every field is encoded explicitly, so
 //! a log is portable across targets and never contains padding bytes.
@@ -15,7 +15,7 @@
 //! | Offset | Size | Field                       |
 //! |-------:|-----:|-----------------------------|
 //! | 0      | 8    | magic `b"MEWALOG\0"`        |
-//! | 8      | 4    | format version (`1`)        |
+//! | 8      | 4    | format version (`2`)        |
 //! | 12     | 4    | record size in bytes (`40`) |
 //! | 16     | 16   | reserved, zero              |
 //!
@@ -25,13 +25,23 @@
 //! |-------:|-----:|------------------------------------------------|
 //! | 0      | 1    | kind: `1` = new order, `2` = cancel            |
 //! | 1      | 1    | side: `0` = buy, `1` = sell (`0` for cancels)  |
-//! | 2      | 2    | reserved, zero                                 |
+//! | 2      | 1    | order type, see below (`0` for cancels)        |
+//! | 3      | 1    | reserved, zero                                 |
 //! | 4      | 4    | price tick (`0` for cancels)                   |
 //! | 8      | 8    | order id                                       |
 //! | 16     | 8    | quantity (`0` for cancels)                     |
 //! | 24     | 8    | caller-provided sequence number                |
 //! | 32     | 4    | checksum of bytes `0..32`                      |
 //! | 36     | 4    | reserved, zero                                 |
+//!
+//! Order types: `0` = limit, `1` = immediate-or-cancel, `2` = market,
+//! `3` = post-only.
+//!
+//! Version 1 had no order type: byte 2 was reserved and always zero, which
+//! reads as "limit". Readers therefore accept both versions, and
+//! [`WalWriter::open_append`] upgrades a version 1 header to version 2
+//! before appending, so that an older reader cannot mistake a new record
+//! for a limit order.
 //!
 //! # Crash safety
 //!
@@ -75,14 +85,16 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::path::Path;
 
+use crate::engine::OrderType;
 use crate::pool::Side;
 
 /// Size in bytes of the file header that precedes the records.
 pub const WAL_HEADER_SIZE: usize = 32;
 /// Size in bytes of one encoded record.
 pub const WAL_RECORD_SIZE: usize = 40;
-/// On-disk format version written by this module.
-pub const WAL_FORMAT_VERSION: u32 = 1;
+/// On-disk format version written by this module. Version 1 logs are
+/// still read; see the [module docs](self#file-format-version-2).
+pub const WAL_FORMAT_VERSION: u32 = 2;
 
 const WAL_MAGIC: [u8; 8] = *b"MEWALOG\0";
 /// Bytes of an encoded record covered by its checksum.
@@ -104,6 +116,8 @@ pub struct WalRecord {
     pub kind: WalRecordKind,
     /// Side of a new order; [`Side::Buy`] for cancellation records.
     pub side: Side,
+    /// Type of a new order; [`OrderType::Limit`] for cancellation records.
+    pub order_type: OrderType,
     /// Identifier supplied by the caller.
     pub order_id: u64,
     /// Dense integer price tick; zero for cancellation records.
@@ -122,6 +136,8 @@ pub enum WalDecodeError {
     InvalidKind(u8),
     /// The side byte is neither `0` (buy) nor `1` (sell).
     InvalidSide(u8),
+    /// The order type byte is not a known [`OrderType`].
+    InvalidOrderType(u8),
     /// The stored checksum does not match the record contents, e.g. after a
     /// torn write.
     ChecksumMismatch,
@@ -132,6 +148,9 @@ impl std::fmt::Display for WalDecodeError {
         match self {
             Self::InvalidKind(kind) => write!(f, "invalid WAL record kind {kind}"),
             Self::InvalidSide(side) => write!(f, "invalid WAL record side {side}"),
+            Self::InvalidOrderType(order_type) => {
+                write!(f, "invalid WAL record order type {order_type}")
+            }
             Self::ChecksumMismatch => f.write_str("WAL record checksum mismatch"),
         }
     }
@@ -140,11 +159,24 @@ impl std::fmt::Display for WalDecodeError {
 impl std::error::Error for WalDecodeError {}
 
 impl WalRecord {
-    /// Describes a new-order request.
+    /// Describes a new limit-order request.
     pub fn new_order(order_id: u64, side: Side, price_tick: u32, qty: u64, sequence: u64) -> Self {
+        Self::new_order_with_type(order_id, side, OrderType::Limit, price_tick, qty, sequence)
+    }
+
+    /// Describes a new-order request of any [`OrderType`].
+    pub fn new_order_with_type(
+        order_id: u64,
+        side: Side,
+        order_type: OrderType,
+        price_tick: u32,
+        qty: u64,
+        sequence: u64,
+    ) -> Self {
         Self {
             kind: WalRecordKind::NewOrder,
             side,
+            order_type,
             order_id,
             price_tick,
             qty,
@@ -157,6 +189,7 @@ impl WalRecord {
         Self {
             kind: WalRecordKind::Cancel,
             side: Side::Buy,
+            order_type: OrderType::Limit,
             order_id,
             price_tick: 0,
             qty: 0,
@@ -171,6 +204,12 @@ impl WalRecord {
         out[1] = match self.side {
             Side::Buy => 0,
             Side::Sell => 1,
+        };
+        out[2] = match self.order_type {
+            OrderType::Limit => 0,
+            OrderType::ImmediateOrCancel => 1,
+            OrderType::Market => 2,
+            OrderType::PostOnly => 3,
         };
         out[4..8].copy_from_slice(&self.price_tick.to_le_bytes());
         out[8..16].copy_from_slice(&self.order_id.to_le_bytes());
@@ -193,12 +232,20 @@ impl WalRecord {
             1 => Side::Sell,
             other => return Err(WalDecodeError::InvalidSide(other)),
         };
+        let order_type = match bytes[2] {
+            0 => OrderType::Limit,
+            1 => OrderType::ImmediateOrCancel,
+            2 => OrderType::Market,
+            3 => OrderType::PostOnly,
+            other => return Err(WalDecodeError::InvalidOrderType(other)),
+        };
         if read_u32(bytes, 32) != checksum(&bytes[..CHECKSUMMED_LEN]) {
             return Err(WalDecodeError::ChecksumMismatch);
         }
         Ok(Self {
             kind,
             side,
+            order_type,
             price_tick: read_u32(bytes, 4),
             order_id: read_u64(bytes, 8),
             qty: read_u64(bytes, 16),
@@ -245,7 +292,8 @@ fn encode_header() -> [u8; WAL_HEADER_SIZE] {
     out
 }
 
-fn validate_header(bytes: &[u8]) -> io::Result<()> {
+/// Checks the header and returns the log's format version.
+fn validate_header(bytes: &[u8]) -> io::Result<u32> {
     if bytes.len() < WAL_HEADER_SIZE {
         return Err(invalid_data("file is shorter than a WAL header".into()));
     }
@@ -253,7 +301,7 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
         return Err(invalid_data("not a WAL file (bad magic)".into()));
     }
     let version = read_u32(bytes, 8);
-    if version != WAL_FORMAT_VERSION {
+    if !(1..=WAL_FORMAT_VERSION).contains(&version) {
         return Err(invalid_data(format!(
             "unsupported WAL format version {version}"
         )));
@@ -264,7 +312,7 @@ fn validate_header(bytes: &[u8]) -> io::Result<()> {
             "unexpected WAL record size {record_size}"
         )));
     }
-    Ok(())
+    Ok(version)
 }
 
 fn invalid_data(message: String) -> io::Error {
@@ -326,19 +374,29 @@ impl WalWriter {
     /// are discarded, so they can never be mistaken for records later. That
     /// is right after a crash, but it would also discard valid records that
     /// follow a corrupted one. The whole file is read once, with plain I/O,
-    /// to find that record. Use one writer per file: opening a log that a
-    /// live writer is still using corrupts it.
+    /// to find that record. A version 1 log is upgraded to the current
+    /// version first (see the [module docs](self#file-format-version-2)).
+    /// Use one writer per file: opening a log that a live writer is still
+    /// using corrupts it.
     pub fn open_append<P: AsRef<Path>>(path: P, spare_records: usize) -> io::Result<Self> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        validate_header(&bytes)?;
+        let version = validate_header(&bytes)?;
         let valid_len =
             WAL_HEADER_SIZE + valid_records(&bytes[WAL_HEADER_SIZE..]).count() * WAL_RECORD_SIZE;
         // Truncating (no view is mapped yet, which Windows requires) and then
         // re-extending in `map` zero-fills everything after the valid prefix.
         file.set_len(valid_len as u64)?;
-        Self::map(file, valid_len, spare_records)
+        let mut writer = Self::map(file, valid_len, spare_records)?;
+        if version != WAL_FORMAT_VERSION {
+            // Every older record is also valid in the current format, so
+            // only the version field changes. It must be durable before a
+            // record that an older reader would misread can be.
+            writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header());
+            writer.flush()?;
+        }
+        Ok(writer)
     }
 
     /// Sizes `file` to hold at least `spare_records` records after
@@ -499,11 +557,26 @@ mod tests {
         }
     }
 
+    const ORDER_TYPES: [OrderType; 4] = [
+        OrderType::Limit,
+        OrderType::ImmediateOrCancel,
+        OrderType::Market,
+        OrderType::PostOnly,
+    ];
+
     fn sample(i: u64) -> WalRecord {
+        let order_type = ORDER_TYPES[(i / 3 % 4) as usize];
         match i % 3 {
             2 => WalRecord::cancel(i - 1, i),
             0 => WalRecord::new_order(i, Side::Buy, 100 + i as u32, 10 + i, i),
-            _ => WalRecord::new_order(i, Side::Sell, 200 + i as u32, u64::MAX - i, i),
+            _ => WalRecord::new_order_with_type(
+                i,
+                Side::Sell,
+                order_type,
+                200 + i as u32,
+                u64::MAX - i,
+                i,
+            ),
         }
     }
 
@@ -560,10 +633,16 @@ mod tests {
             WalRecord::decode(&bad_side),
             Err(WalDecodeError::InvalidSide(7))
         );
+        let mut bad_type = good;
+        bad_type[2] = 4;
+        assert_eq!(
+            WalRecord::decode(&bad_type),
+            Err(WalDecodeError::InvalidOrderType(4))
+        );
 
         // Every single-bit flip in the covered fields or in the checksum
-        // itself is detected. A flip in byte 0 or 1 may be caught as an
-        // invalid kind or side instead of a checksum mismatch.
+        // itself is detected. A flip in byte 0, 1 or 2 may be caught as an
+        // invalid kind, side or order type instead of a checksum mismatch.
         for byte in 0..36 {
             for bit in 0..8 {
                 let mut torn = good;
@@ -692,6 +771,30 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
+    fn open_append_upgrades_a_version_1_log() {
+        // A version 1 log: limit orders and cancels, byte 2 always zero.
+        let path = TempPath::new("v1");
+        let old: Vec<_> = vec![
+            WalRecord::new_order(1, Side::Buy, 100, 5, 0),
+            WalRecord::cancel(1, 1),
+        ];
+        let mut bytes = image(&old.iter().map(WalRecord::encode).collect::<Vec<_>>());
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&path.0, &bytes).unwrap();
+        assert_eq!(read_all(&path.0).unwrap(), old, "version 1 is still read");
+
+        let new = WalRecord::new_order_with_type(2, Side::Sell, OrderType::Market, 0, 3, 2);
+        let mut writer = WalWriter::open_append(&path.0, 4).unwrap();
+        writer.append(new).unwrap();
+        writer.finalize().unwrap();
+
+        let bytes = std::fs::read(&path.0).unwrap();
+        assert_eq!(read_u32(&bytes, 8), WAL_FORMAT_VERSION);
+        assert_eq!(read_all(&path.0).unwrap(), [old[0], old[1], new]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
     fn rejects_files_without_a_valid_header() {
         let path = TempPath::new("bad_header");
         let is_invalid_data = |result: io::Result<Vec<WalRecord>>| matches!(result, Err(e) if e.kind() == io::ErrorKind::InvalidData);
@@ -709,7 +812,7 @@ mod tests {
         );
 
         let mut bytes = image(&[sample(0).encode()]);
-        bytes[8] = 2;
+        bytes[8] = 3;
         std::fs::write(&path.0, &bytes).unwrap();
         assert!(is_invalid_data(read_all(&path.0)), "future version");
     }

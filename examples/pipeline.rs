@@ -31,9 +31,10 @@ enum Command {
 /// function, so both are guaranteed to make exactly the same engine calls.
 fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
     match record.kind {
-        WalRecordKind::NewOrder => engine.process_order(
+        WalRecordKind::NewOrder => engine.submit_order(
             record.order_id,
             record.side,
+            record.order_type,
             record.price_tick,
             record.qty,
             events,
