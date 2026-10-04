@@ -17,6 +17,12 @@ fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
         WalRecordKind::Reduce => {
             engine.reduce_order(record.order_id, record.qty, events);
         }
+        WalRecordKind::CancelAccount => {
+            engine.cancel_account(record.account, events);
+        }
+        WalRecordKind::CancelAll => {
+            engine.cancel_all(events);
+        }
     }
 }
 
@@ -39,9 +45,8 @@ fn replaying_the_wal_reproduces_every_event() {
                 order_id,
                 reduce_by,
             } => WalRecord::reduce(order_id, reduce_by, sequence),
-            Op::CancelAccount { .. } | Op::CancelAll => {
-                unreachable!("the generator sends no mass cancels")
-            }
+            Op::CancelAccount { account } => WalRecord::cancel_account(account, sequence),
+            Op::CancelAll => WalRecord::cancel_all(sequence),
         };
         // Write-ahead: the request is logged before the engine applies it.
         writer.append(record).unwrap();

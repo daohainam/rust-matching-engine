@@ -443,6 +443,12 @@ fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
         WalRecordKind::Reduce => {
             engine.reduce_order(record.order_id, record.qty, events);
         }
+        WalRecordKind::CancelAccount => {
+            engine.cancel_account(record.account, events);
+        }
+        WalRecordKind::CancelAll => {
+            engine.cancel_all(events);
+        }
     }
 }
 

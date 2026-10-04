@@ -66,8 +66,8 @@ pub fn watched_ticks() -> impl Iterator<Item = u32> {
 const RECENT_WINDOW: usize = 256;
 
 /// Produces a reproducible request stream: mostly limit orders in [`BAND`],
-/// some other order types, some cancels and reductions, and occasional edge
-/// inputs (zero quantity, out-of-range
+/// some other order types, some cancels and reductions, rare mass cancels,
+/// and occasional edge inputs (zero quantity, out-of-range
 /// ticks, the reserved ID, reused IDs, deep sweeps, oversized quantities).
 pub struct OpGenerator {
     rng: Rng,
@@ -87,6 +87,16 @@ impl OpGenerator {
     }
 
     pub fn next_op(&mut self) -> Op {
+        // Rarely, a mass cancel: of one account, or (less often) of all.
+        if self.issued > 0 && self.rng.below(1_000) < 5 {
+            return if self.rng.percent(10) {
+                Op::CancelAll
+            } else {
+                Op::CancelAccount {
+                    account: self.rng.below(4) as u32,
+                }
+            };
+        }
         if self.issued > 0 && self.rng.percent(30) {
             let order_id = match self.rng.below(100) {
                 0..=4 => u64::MAX,                              // reserved sentinel

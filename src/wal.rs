@@ -1,11 +1,12 @@
 //! Memory-mapped binary Write-Ahead Log (WAL) for deterministic replay of
 //! matching engine requests.
 //!
-//! Every mutating request (new order / cancel) is appended as a fixed-size
+//! Every mutating request (new order, cancel, reduce, mass cancel) is
+//! appended as a fixed-size
 //! record directly into a memory-mapped file, so appending needs no
 //! serialization allocation and records can be located by arithmetic.
 //!
-//! # File format (version 2)
+//! # File format (version 3)
 //!
 //! All integers are little-endian and every field is encoded explicitly, so
 //! a log is portable across targets and never contains padding bytes.
@@ -15,7 +16,7 @@
 //! | Offset | Size | Field                       |
 //! |-------:|-----:|-----------------------------|
 //! | 0      | 8    | magic `b"MEWALOG\0"`        |
-//! | 8      | 4    | format version (`2`)        |
+//! | 8      | 4    | format version (`3`)        |
 //! | 12     | 4    | record size in bytes (`40`) |
 //! | 16     | 16   | reserved, zero              |
 //!
@@ -23,31 +24,42 @@
 //!
 //! | Offset | Size | Field                                          |
 //! |-------:|-----:|------------------------------------------------|
-//! | 0      | 1    | kind: `1` = new order, `2` = cancel, `3` = reduce |
-//! | 1      | 1    | side: `0` = buy, `1` = sell (`0` for cancels)  |
-//! | 2      | 1    | order type, see below (`0` for cancels)        |
-//! | 3      | 1    | reserved, zero                                 |
-//! | 4      | 4    | price tick (`0` for cancels)                   |
+//! | 0      | 1    | kind, see below                                |
+//! | 1      | 1    | side: `0` = buy, `1` = sell                    |
+//! | 2      | 1    | order type, see below                          |
+//! | 3      | 1    | self-trade prevention, see below               |
+//! | 4      | 4    | price tick                                     |
 //! | 8      | 8    | order id                                       |
-//! | 16     | 8    | quantity; the reduction for reduce records (`0` for cancels) |
+//! | 16     | 8    | quantity; the reduction for reduce records     |
 //! | 24     | 8    | caller-provided sequence number                |
-//! | 32     | 4    | checksum of bytes `0..32`                      |
-//! | 36     | 4    | reserved, zero                                 |
+//! | 32     | 4    | checksum                                       |
+//! | 36     | 4    | account                                        |
 //!
-//! Order types: `0` = limit, `1` = immediate-or-cancel, `2` = market,
-//! `3` = post-only.
+//! Kinds: `1` = new order, `2` = cancel, `3` = reduce, `4` = cancel an
+//! account's orders, `5` = cancel all orders. Order types: `0` = limit,
+//! `1` = immediate-or-cancel, `2` = market, `3` = post-only. Self-trade
+//! prevention: `0` = allow, `1` = cancel resting, `2` = cancel incoming,
+//! `3` = cancel both. A field a kind does not use is zero.
 //!
-//! Version 1 had no order type: byte 2 was reserved and always zero, which
-//! reads as "limit". Readers therefore accept both versions, and
-//! [`WalWriter::open_append`] upgrades a version 1 header to version 2
-//! before appending, so that an older reader cannot mistake a new record
-//! for a limit order.
+//! The checksum covers bytes `0..32`, and the account as well when it is
+//! not zero (skipping a zero account keeps older records valid, see
+//! below).
+//!
+//! Version 1 had no order type, and version 2 no self-trade prevention,
+//! account or mass cancels. Their unused bytes were always zero, which
+//! reads as "limit", "allow" and account 0, and a record for account 0 has
+//! the same checksum in every version. So every older record is also a
+//! valid version 3 record: readers accept all three versions, and
+//! [`WalWriter::open_append`] upgrades an older header to version 3 before
+//! appending, so that an older reader refuses the file instead of
+//! misreading a new record.
 //!
 //! # Crash safety
 //!
 //! The writer preallocates zero-filled space, and a crash can leave a torn
 //! final record, so readers treat the first record that fails validation
-//! (unknown kind or side, or a checksum mismatch) as the end of the log. The
+//! (an unknown kind, side, order type or self-trade prevention mode, or a
+//! checksum mismatch) as the end of the log. The
 //! checksum detects torn and zeroed records; it is not a cryptographic MAC.
 //! [`WalWriter::open_append`] resumes an existing log after that point.
 //!
@@ -92,12 +104,12 @@ use crate::pool::Side;
 pub const WAL_HEADER_SIZE: usize = 32;
 /// Size in bytes of one encoded record.
 pub const WAL_RECORD_SIZE: usize = 40;
-/// On-disk format version written by this module. Version 1 logs are
-/// still read; see the [module docs](self#file-format-version-2).
-pub const WAL_FORMAT_VERSION: u32 = 2;
+/// On-disk format version written by this module. Older logs are
+/// still read; see the [module docs](self#file-format-version-3).
+pub const WAL_FORMAT_VERSION: u32 = 3;
 
 const WAL_MAGIC: [u8; 8] = *b"MEWALOG\0";
-/// Bytes of an encoded record covered by its checksum.
+/// Bytes of an encoded record that its checksum always covers.
 const CHECKSUMMED_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +121,10 @@ pub enum WalRecordKind {
     Cancel = 2,
     /// A request to lower a resting order's quantity by `qty`.
     Reduce = 3,
+    /// A request to cancel every resting order of `account`.
+    CancelAccount = 4,
+    /// A request to cancel every resting order.
+    CancelAll = 5,
 }
 
 /// One logged engine request. See the [module docs](self) for its encoding.
@@ -120,6 +136,13 @@ pub struct WalRecord {
     pub side: Side,
     /// Type of a new order; [`OrderType::Limit`] for cancellation records.
     pub order_type: OrderType,
+    /// Self-trade prevention of a new order;
+    /// [`SelfTradePrevention::Allow`] for other records.
+    pub self_trade_prevention: SelfTradePrevention,
+    /// Account of a new order, or the account a
+    /// [`CancelAccount`](WalRecordKind::CancelAccount) record cancels; zero
+    /// for other records.
+    pub account: u32,
     /// Identifier supplied by the caller.
     pub order_id: u64,
     /// Dense integer price tick; zero for cancellation records.
@@ -141,6 +164,9 @@ pub enum WalDecodeError {
     InvalidSide(u8),
     /// The order type byte is not a known [`OrderType`].
     InvalidOrderType(u8),
+    /// The self-trade prevention byte is not a known
+    /// [`SelfTradePrevention`] mode.
+    InvalidSelfTradePrevention(u8),
     /// The stored checksum does not match the record contents, e.g. after a
     /// torn write.
     ChecksumMismatch,
@@ -153,6 +179,9 @@ impl std::fmt::Display for WalDecodeError {
             Self::InvalidSide(side) => write!(f, "invalid WAL record side {side}"),
             Self::InvalidOrderType(order_type) => {
                 write!(f, "invalid WAL record order type {order_type}")
+            }
+            Self::InvalidSelfTradePrevention(mode) => {
+                write!(f, "invalid WAL record self-trade prevention {mode}")
             }
             Self::ChecksumMismatch => f.write_str("WAL record checksum mismatch"),
         }
@@ -168,15 +197,13 @@ impl WalRecord {
     }
 
     /// Describes a request to submit `order`, of any [`OrderType`].
-    ///
-    /// The format has no account or self-trade prevention field yet: the
-    /// order is logged, and replayed, for account 0 with self-trades
-    /// allowed.
     pub fn submit(order: NewOrder, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::NewOrder,
             side: order.side,
             order_type: order.order_type,
+            self_trade_prevention: order.self_trade_prevention,
+            account: order.account,
             order_id: order.order_id,
             price_tick: order.price_tick,
             qty: order.qty,
@@ -190,12 +217,12 @@ impl WalRecord {
     pub fn order(&self) -> NewOrder {
         NewOrder {
             order_id: self.order_id,
-            account: 0,
+            account: self.account,
             side: self.side,
             order_type: self.order_type,
             price_tick: self.price_tick,
             qty: self.qty,
-            self_trade_prevention: SelfTradePrevention::Allow,
+            self_trade_prevention: self.self_trade_prevention,
         }
     }
 
@@ -209,12 +236,31 @@ impl WalRecord {
         }
     }
 
+    /// Describes a request to cancel every resting order of `account`.
+    pub fn cancel_account(account: u32, sequence: u64) -> Self {
+        Self {
+            kind: WalRecordKind::CancelAccount,
+            account,
+            ..Self::cancel(0, sequence)
+        }
+    }
+
+    /// Describes a request to cancel every resting order.
+    pub fn cancel_all(sequence: u64) -> Self {
+        Self {
+            kind: WalRecordKind::CancelAll,
+            ..Self::cancel(0, sequence)
+        }
+    }
+
     /// Describes a cancellation request; fields not used by cancellation are zeroed.
     pub fn cancel(order_id: u64, sequence: u64) -> Self {
         Self {
             kind: WalRecordKind::Cancel,
             side: Side::Buy,
             order_type: OrderType::Limit,
+            self_trade_prevention: SelfTradePrevention::Allow,
+            account: 0,
             order_id,
             price_tick: 0,
             qty: 0,
@@ -236,11 +282,18 @@ impl WalRecord {
             OrderType::Market => 2,
             OrderType::PostOnly => 3,
         };
+        out[3] = match self.self_trade_prevention {
+            SelfTradePrevention::Allow => 0,
+            SelfTradePrevention::CancelResting => 1,
+            SelfTradePrevention::CancelIncoming => 2,
+            SelfTradePrevention::CancelBoth => 3,
+        };
         out[4..8].copy_from_slice(&self.price_tick.to_le_bytes());
         out[8..16].copy_from_slice(&self.order_id.to_le_bytes());
         out[16..24].copy_from_slice(&self.qty.to_le_bytes());
         out[24..32].copy_from_slice(&self.sequence.to_le_bytes());
-        let checksum = checksum(&out[..CHECKSUMMED_LEN]);
+        out[36..40].copy_from_slice(&self.account.to_le_bytes());
+        let checksum = checksum(&out);
         out[32..36].copy_from_slice(&checksum.to_le_bytes());
         out
     }
@@ -251,6 +304,8 @@ impl WalRecord {
             1 => WalRecordKind::NewOrder,
             2 => WalRecordKind::Cancel,
             3 => WalRecordKind::Reduce,
+            4 => WalRecordKind::CancelAccount,
+            5 => WalRecordKind::CancelAll,
             other => return Err(WalDecodeError::InvalidKind(other)),
         };
         let side = match bytes[1] {
@@ -265,13 +320,22 @@ impl WalRecord {
             3 => OrderType::PostOnly,
             other => return Err(WalDecodeError::InvalidOrderType(other)),
         };
-        if read_u32(bytes, 32) != checksum(&bytes[..CHECKSUMMED_LEN]) {
+        let self_trade_prevention = match bytes[3] {
+            0 => SelfTradePrevention::Allow,
+            1 => SelfTradePrevention::CancelResting,
+            2 => SelfTradePrevention::CancelIncoming,
+            3 => SelfTradePrevention::CancelBoth,
+            other => return Err(WalDecodeError::InvalidSelfTradePrevention(other)),
+        };
+        if read_u32(bytes, 32) != checksum(bytes) {
             return Err(WalDecodeError::ChecksumMismatch);
         }
         Ok(Self {
             kind,
             side,
             order_type,
+            self_trade_prevention,
+            account: read_u32(bytes, 36),
             price_tick: read_u32(bytes, 4),
             order_id: read_u64(bytes, 8),
             qty: read_u64(bytes, 16),
@@ -290,15 +354,26 @@ fn read_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8-byte field"))
 }
 
-/// Folds the checksummed bytes, as little-endian words, through the
-/// SplitMix64 finalizer. Cheap enough for the append path and sensitive to
-/// every bit; not a cryptographic MAC.
-fn checksum(body: &[u8]) -> u32 {
-    let (words, _) = body.as_chunks::<8>();
-    let folded = words
+/// Folds bytes `0..32` of a record, as little-endian words, through the
+/// SplitMix64 finalizer, and then the account (bytes `36..40`) as a fifth
+/// word, but only when it is not zero. Cheap enough for the append path
+/// and sensitive to every covered bit; not a cryptographic MAC.
+///
+/// Skipping a zero account keeps the checksum of a record for account 0
+/// exactly what it was in versions 1 and 2, whose bytes `36..40` were
+/// always zero, so older records stay valid. A damaged account is still
+/// caught: if it turns zero, or turns non-zero, the fifth word appears or
+/// disappears.
+fn checksum(record: &[u8; WAL_RECORD_SIZE]) -> u32 {
+    let (words, _) = record[..CHECKSUMMED_LEN].as_chunks::<8>();
+    let mut folded = words
         .iter()
         .map(|word| u64::from_le_bytes(*word))
         .fold(0u64, |acc, word| mix64(acc ^ word));
+    let account = read_u32(record, 36);
+    if account != 0 {
+        folded = mix64(folded ^ u64::from(account));
+    }
     (folded ^ (folded >> 32)) as u32
 }
 
@@ -400,8 +475,8 @@ impl WalWriter {
     /// are discarded, so they can never be mistaken for records later. That
     /// is right after a crash, but it would also discard valid records that
     /// follow a corrupted one. The whole file is read once, with plain I/O,
-    /// to find that record. A version 1 log is upgraded to the current
-    /// version first (see the [module docs](self#file-format-version-2)).
+    /// to find that record. An older log is upgraded to the current
+    /// version first (see the [module docs](self#file-format-version-3)).
     /// Use one writer per file: opening a log that a live writer is still
     /// using corrupts it.
     pub fn open_append<P: AsRef<Path>>(path: P, spare_records: usize) -> io::Result<Self> {
@@ -590,14 +665,30 @@ mod tests {
         OrderType::PostOnly,
     ];
 
+    const SELF_TRADE_MODES: [SelfTradePrevention; 4] = [
+        SelfTradePrevention::Allow,
+        SelfTradePrevention::CancelResting,
+        SelfTradePrevention::CancelIncoming,
+        SelfTradePrevention::CancelBoth,
+    ];
+
+    /// Every kind of record, every order type and self-trade mode, and
+    /// accounts both zero and not, over `sample(0..12)`.
     fn sample(i: u64) -> WalRecord {
-        let order_type = ORDER_TYPES[(i / 3 % 4) as usize];
+        let variant = (i / 3 % 4) as usize;
         match i % 3 {
-            2 if i.is_multiple_of(2) => WalRecord::reduce(i - 1, i % 7 + 1, i),
-            2 => WalRecord::cancel(i - 1, i),
+            2 => match i % 4 {
+                0 => WalRecord::reduce(i - 1, i % 7 + 1, i),
+                1 => WalRecord::cancel(i - 1, i),
+                2 => WalRecord::cancel_account(i as u32 * 7, i),
+                _ => WalRecord::cancel_all(i),
+            },
             0 => WalRecord::new_order(i, Side::Buy, 100 + i as u32, 10 + i, i),
             _ => WalRecord::submit(
-                NewOrder::limit(i, Side::Sell, 200 + i as u32, u64::MAX - i).with_type(order_type),
+                NewOrder::limit(i, Side::Sell, 200 + i as u32, u64::MAX - i)
+                    .with_type(ORDER_TYPES[variant])
+                    .with_account(i as u32 * 1_000_003)
+                    .with_self_trade_prevention(SELF_TRADE_MODES[variant]),
                 i,
             ),
         }
@@ -663,24 +754,44 @@ mod tests {
             Err(WalDecodeError::InvalidOrderType(4))
         );
 
-        // Every single-bit flip in the covered fields or in the checksum
-        // itself is detected. A flip in byte 0, 1 or 2 may be caught as an
-        // invalid kind, side or order type instead of a checksum mismatch.
-        for byte in 0..36 {
-            for bit in 0..8 {
-                let mut torn = good;
-                torn[byte] ^= 1 << bit;
-                assert!(
-                    WalRecord::decode(&torn).is_err(),
-                    "flip of bit {bit} in byte {byte} went undetected"
-                );
+        let mut bad_mode = good;
+        bad_mode[3] = 4;
+        assert_eq!(
+            WalRecord::decode(&bad_mode),
+            Err(WalDecodeError::InvalidSelfTradePrevention(4))
+        );
+
+        // Every single-bit flip anywhere in the record, the account and the
+        // checksum included, is detected, whether the account was zero
+        // (sample 0) or not (sample 1). A flip in bytes 0 to 3 may be caught
+        // as an invalid kind, side, order type or mode instead.
+        for record in [good, sample(1).encode()] {
+            for byte in 0..WAL_RECORD_SIZE {
+                for bit in 0..8 {
+                    let mut torn = record;
+                    torn[byte] ^= 1 << bit;
+                    assert!(
+                        WalRecord::decode(&torn).is_err(),
+                        "flip of bit {bit} in byte {byte} went undetected"
+                    );
+                }
             }
         }
-        // Bytes 36..40 are reserved and not covered: changing them is not
-        // detected.
-        let mut reserved = good;
-        reserved[36] = 0xFF;
-        assert_eq!(WalRecord::decode(&reserved), Ok(sample(0)));
+    }
+
+    #[test]
+    fn a_record_for_account_zero_keeps_its_version_2_bytes() {
+        // The bytes chapter 9 shows for this record, written by version 2.
+        let version_2 = [
+            0x01, 0x00, 0x00, 0x00, 0x66, 0x00, 0x00, 0x00, // kind, side, type, -, tick
+            0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // order id
+            0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // quantity
+            0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // sequence
+            0x16, 0x08, 0x01, 0x21, 0x00, 0x00, 0x00, 0x00, // checksum, account
+        ];
+        let record = WalRecord::new_order(6, Side::Buy, 102, 14, 5);
+        assert_eq!(record.encode(), version_2);
+        assert_eq!(WalRecord::decode(&version_2), Ok(record));
     }
 
     #[test]
@@ -794,26 +905,33 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn open_append_upgrades_a_version_1_log() {
-        // A version 1 log: limit orders and cancels, byte 2 always zero.
-        let path = TempPath::new("v1");
-        let old: Vec<_> = vec![
-            WalRecord::new_order(1, Side::Buy, 100, 5, 0),
-            WalRecord::cancel(1, 1),
-        ];
-        let mut bytes = image(&old.iter().map(WalRecord::encode).collect::<Vec<_>>());
-        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
-        std::fs::write(&path.0, &bytes).unwrap();
-        assert_eq!(read_all(&path.0).unwrap(), old, "version 1 is still read");
+    fn open_append_upgrades_older_logs() {
+        for old_version in [1u32, 2] {
+            // Limit orders and cancels for account 0: the records an older
+            // log can hold, with every newer byte zero.
+            let path = TempPath::new(&format!("v{old_version}"));
+            let old: Vec<_> = vec![
+                WalRecord::new_order(1, Side::Buy, 100, 5, 0),
+                WalRecord::cancel(1, 1),
+            ];
+            let mut bytes = image(&old.iter().map(WalRecord::encode).collect::<Vec<_>>());
+            bytes[8..12].copy_from_slice(&old_version.to_le_bytes());
+            std::fs::write(&path.0, &bytes).unwrap();
+            assert_eq!(
+                read_all(&path.0).unwrap(),
+                old,
+                "version {old_version} is read"
+            );
 
-        let new = WalRecord::submit(NewOrder::market(2, Side::Sell, 3), 2);
-        let mut writer = WalWriter::open_append(&path.0, 4).unwrap();
-        writer.append(new).unwrap();
-        writer.finalize().unwrap();
+            let new = WalRecord::submit(NewOrder::market(2, Side::Sell, 3).with_account(9), 2);
+            let mut writer = WalWriter::open_append(&path.0, 4).unwrap();
+            writer.append(new).unwrap();
+            writer.finalize().unwrap();
 
-        let bytes = std::fs::read(&path.0).unwrap();
-        assert_eq!(read_u32(&bytes, 8), WAL_FORMAT_VERSION);
-        assert_eq!(read_all(&path.0).unwrap(), [old[0], old[1], new]);
+            let bytes = std::fs::read(&path.0).unwrap();
+            assert_eq!(read_u32(&bytes, 8), WAL_FORMAT_VERSION);
+            assert_eq!(read_all(&path.0).unwrap(), [old[0], old[1], new]);
+        }
     }
 
     #[test]
@@ -835,7 +953,7 @@ mod tests {
         );
 
         let mut bytes = image(&[sample(0).encode()]);
-        bytes[8] = 3;
+        bytes[8] = 4;
         std::fs::write(&path.0, &bytes).unwrap();
         assert!(is_invalid_data(read_all(&path.0)), "future version");
     }

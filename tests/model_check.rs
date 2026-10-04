@@ -366,14 +366,7 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
     let mut events = Vec::new();
 
     for step in 0..ops {
-        // Now and then, a mass cancel of one account or of the whole book.
-        let op = match step % 1_000 {
-            999 if step % 5_000 == 4_999 => Op::CancelAll,
-            999 => Op::CancelAccount {
-                account: (step / 1_000 % 4) as u32,
-            },
-            _ => generator.next_op(),
-        };
+        let op = generator.next_op();
         let context = || format!("seed {seed}, step {step}: {op:?}");
         events.clear();
         let expected = match op {
