@@ -13,6 +13,7 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 
 | Term | Meaning | Ch. |
 |---|---|---|
+| Account | Who placed an order: a trader, a firm, or whatever unit the caller tracks (`NewOrder::account`). Self-trade prevention and mass cancels use it. | [1](01-order-book-basics.md) |
 | Aggressor / aggressor side | The taker of a trade, and its side. A trade is *buyer-initiated* when a buyer crossed the spread. `Trade` reports it as `taker_side`. | [1](01-order-book-basics.md) |
 | Ask / offer | A resting order to **sell**. The best ask is the lowest one. | [1](01-order-book-basics.md) |
 | Bid | A resting order to **buy**. The best bid is the highest one. | [1](01-order-book-basics.md) |
@@ -33,17 +34,19 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | Liquidity | How much can be traded without moving the price much. Resting orders *provide* liquidity; takers *remove* it. | [1](01-order-book-basics.md) |
 | Maker | The resting order in a trade. It was in the book first. | [1](01-order-book-basics.md) |
 | Market data | The public feed of trades and book changes that an exchange publishes. | [2](02-architecture.md) |
+| Mass cancel | Cancelling every resting order of one account (for example when its connection drops: *cancel on disconnect*), or every order in the book (`cancel_account`, `cancel_all`). | [1](01-order-book-basics.md) |
 | Market order | An order with no price of its own: it trades at whatever prices the book offers, and its remainder expires. Real exchanges limit how far it may sweep (a price band); this engine does not (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Matching engine | The component that pairs buy and sell orders and decides the trade price. This whole repository. | [1](01-order-book-basics.md) |
 | Post-only | A limit order that must not trade on arrival: if its price reaches the other side, it is rejected instead. Market makers use it to be sure they only add liquidity. | [1](01-order-book-basics.md) |
 | Price level | All orders resting at one price on one side, kept as a FIFO queue. | [1](01-order-book-basics.md) |
 | Price-time priority | Matching rule: the better price trades first; at the same price, the order that arrived earlier trades first. | [1](01-order-book-basics.md) |
 | Resting order | An order that is waiting in the book because it could not trade (fully) when it arrived. | [1](01-order-book-basics.md) |
-| Self-trade prevention | A rule that stops a trader's buy from matching their own sell. Not implemented here. | [1](01-order-book-basics.md) |
+| Self-trade prevention | A rule that stops a trader's buy from matching their own sell. The incoming order chooses what happens instead: cancel the resting order, cancel the incoming one, or both (`SelfTradePrevention`). | [1](01-order-book-basics.md) |
 | Spread | Best ask minus best bid. | [1](01-order-book-basics.md) |
 | Sweep | One taker trading through several price levels in a row. | [6](06-matching-algorithm.md) |
 | Taker | The incoming order in a trade. It "takes" liquidity that a maker left in the book. | [1](01-order-book-basics.md) |
 | Tick | The smallest price step. This engine works only with integer ticks `0..=4095`; converting to real prices is the caller's job. | [1](01-order-book-basics.md) |
+| Wash trade | A trade between two orders of the same owner. It moves nothing, but looks like real activity to the market; done on purpose it is illegal manipulation. See self-trade prevention. | [1](01-order-book-basics.md) |
 
 ## Data structures and algorithms
 
