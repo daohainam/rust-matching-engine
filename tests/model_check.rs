@@ -148,7 +148,7 @@ impl ReferenceBook {
 
     fn cancel(&mut self, order_id: u64) -> (bool, Vec<Event>) {
         let Some((side, tick)) = self.live.remove(&order_id) else {
-            return (false, Vec::new());
+            return (false, vec![Event::CancelRejected { order_id }]);
         };
         let book = match side {
             Side::Buy => &mut self.bids,

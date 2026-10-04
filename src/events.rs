@@ -92,6 +92,10 @@ pub enum Event {
     /// alone (no `OrderAccepted`); a remainder that cannot rest comes after
     /// `OrderAccepted`. See [`RejectReason`].
     OrderRejected { order_id: u64, reason: RejectReason },
+    /// A cancel request named no resting order: the ID was never accepted,
+    /// or the order has already been filled, cancelled or had its remainder
+    /// rejected. The book is unchanged.
+    CancelRejected { order_id: u64 },
 }
 
 /// Why an order was rejected.

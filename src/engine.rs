@@ -465,12 +465,15 @@ impl Engine {
     /// price-level FIFO queue. If it was the last order at that price, the
     /// price is removed from the active-level bitset. When an order was found
     /// and removed, `OrderCancelled` is emitted to `sink` and `true` is
-    /// returned; otherwise nothing is emitted and the result is `false`.
+    /// returned. Otherwise `CancelRejected` is emitted, the book is
+    /// unchanged and the result is `false`, so the event stream records
+    /// every cancel request either way.
     ///
     /// Lookup and unlink are constant-time in the usual case; hash-table
     /// probing can require additional work when resolving collisions.
     pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
         let Some(idx) = self.id_map.remove(order_id) else {
+            sink.emit(Event::CancelRejected { order_id });
             return false;
         };
         let order = *self.pool.get(idx);
@@ -680,10 +683,11 @@ mod tests {
         assert_eq!(engine.best_bid(), None);
         assert_eq!(engine.live_order_count(), 0);
 
-        // Cancelling again fails cleanly.
+        // Cancelling again fails cleanly, and says so in the event stream.
         let (ok, events) = cancel(&mut engine, 3);
         assert!(!ok);
-        assert!(events.is_empty());
+        assert_eq!(events.as_slice(), &[Event::CancelRejected { order_id: 3 }]);
+        assert_eq!(engine.live_order_count(), 0);
     }
 
     #[test]
@@ -728,6 +732,19 @@ mod tests {
         assert_eq!(engine.resting_order(1), None);
         // The reserved id is never stored, and looking it up is harmless.
         assert_eq!(engine.resting_order(u64::MAX), None);
+    }
+
+    #[test]
+    fn cancelling_a_filled_order_is_rejected_without_touching_the_book() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        place(&mut engine, 2, Side::Sell, 100, 5);
+        place(&mut engine, 3, Side::Buy, 100, 5); // fills #1
+        let (ok, events) = cancel(&mut engine, 1);
+        assert!(!ok);
+        assert_eq!(events.as_slice(), &[Event::CancelRejected { order_id: 1 }]);
+        assert_eq!(engine.depth_at(Side::Sell, 100), 5);
+        assert_eq!(engine.live_order_count(), 1);
     }
 
     #[test]
@@ -940,7 +957,10 @@ mod tests {
         // Cancelling the reserved id must also fail cleanly, never panic.
         let (ok, events) = cancel(&mut engine, u64::MAX);
         assert!(!ok);
-        assert!(events.is_empty());
+        assert_eq!(
+            events.as_slice(),
+            &[Event::CancelRejected { order_id: u64::MAX }]
+        );
     }
 
     #[test]
