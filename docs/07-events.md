@@ -41,8 +41,10 @@ pub enum RejectReason {
     // Found before acceptance: the order is rejected alone, the book unchanged.
     ZeroQuantity,          // qty was 0
     ReservedOrderId,       // order_id was u64::MAX
-    PriceOutOfRange,       // price_tick was 4096 or more
+    PriceOutOfRange,       // price_tick was not below the engine's tick count
     DuplicateOrderId,      // a resting order already has this id
+    QuantityAboveLimit,    // qty was above the risk limit max_order_qty
+    PriceOutsideBand,      // the price reached past the risk limit price_band
     PostOnlyWouldTrade,    // a post-only order's price reaches the other side
     // The remainder could not rest: always after OrderAccepted.
     BookFull,              // every arena slot is in use
@@ -57,14 +59,14 @@ pub enum CancelRejectReason {
 
 | Event | Emitted when | Who it is about |
 |---|---|---|
-| `OrderAccepted` | A new order passed validation. It repeats the order's account, side, type, limit price and quantity (for a market order, the worst limit its side allows). | the incoming order |
+| `OrderAccepted` | A new order passed validation. It repeats the order's account, side, type, limit price and quantity (for a market order, the limit it was given: the edge of the price band, or the worst price its side allows). | the incoming order |
 | `Trade` | Two orders executed against each other. `taker_side` is the aggressor's side; `trade_id` numbers trades 1, 2, 3, ... | maker **and** taker, at the maker's price |
 | `OrderPartiallyFilled` | An order traded but still has quantity left. | a maker (after each partial fill), or the taker (once, at the end) |
 | `OrderFilled` | An order has nothing left. | a maker (when it is consumed), or the taker |
 | `OrderExpired` | The remainder of an immediate-or-cancel or market order was dropped; it never entered the book. | the taker (once, last) |
 | `OrderCancelled` | A resting order was cancelled on request (or reduced by all it had). It says where the order rested and how much quantity left the book. | the cancelled order |
 | `OrderReduced` | A resting order's quantity was lowered on request; it keeps its place in the queue. | the reduced order |
-| `OrderRejected` | An order was refused: bad input, a post-only order that would trade, or no room for it to rest. `reason` says which. | the incoming order |
+| `OrderRejected` | An order was refused: bad input, a broken risk limit, a post-only order that would trade, or no room for it to rest. `reason` says which. | the incoming order |
 | `SelfTradePrevented` | An incoming order met a resting order of its own account, and its self-trade prevention mode blocked the trade. An `OrderCancelled` for the maker, the taker's `OrderExpired`, or both follow, as the mode says. | taker **and** maker |
 | `MassCancelled` | A `cancel_account` (`account: Some(..)`) or `cancel_all` (`None`) finished; `cancelled_orders` counts the `OrderCancelled` events before it. | the request |
 | `CancelRejected` | A cancel or reduce was refused: no resting order has the id, or the reduction was zero. `reason` says which. | the id in the request |
@@ -101,7 +103,7 @@ Key points:
   its `Trade` events.
 - A taker that does not trade at all and simply rests produces **only**
   `OrderAccepted`. There is no separate "order is now resting" event.
-- Rejections found before acceptance (bad input, or a post-only order that
+- Rejections found before acceptance (bad input, a broken risk limit, or a post-only order that
   would trade) come **alone**; rejections caused by capacity
   come **after** `OrderAccepted`, and only for an order that did not trade
   (see [6.4](06-matching-algorithm.md#64-phase-4-resting-the-remainder)).
@@ -147,6 +149,7 @@ These are taken straight from the unit tests in `engine.rs`.
 | Taker bigger than maker; remainder rests | `Accepted`, `Trade`, `Filled(maker)`, `PartiallyFilled(taker, left)` |
 | Taker sweeps several levels | `Accepted`, then `Trade`+maker-event per fill, then the taker's final event |
 | Invalid input / duplicate id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
+| Order above the maximum quantity, or priced past the price band | `Rejected(QuantityAboveLimit / PriceOutsideBand)` |
 | Post-only order whose price reaches the other side | `Rejected(PostOnlyWouldTrade)` |
 | Order can't rest (arena full / overflow) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (no trades happened) |
 | IOC or market order with quantity left | `Accepted`, then `Trade`+maker-event per fill, then `PartiallyFilled(taker, left)` if it traded, then `Expired(left)` |
