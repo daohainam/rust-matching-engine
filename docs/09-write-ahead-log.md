@@ -44,7 +44,7 @@ The header identifies the file and its format:
 | Offset | Size | Field |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
-| 8 | 4 | format version (`2`; version `1` is still read) |
+| 8 | 4 | format version (`3`; versions `1` and `2` are still read) |
 | 12 | 4 | record size in bytes (`40`) |
 | 16 | 16 | reserved, zero |
 
@@ -52,24 +52,32 @@ Each record describes one request:
 
 | Offset | Size | Field |
 |-------:|-----:|---|
-| 0 | 1 | kind: `1` = new order, `2` = cancel, `3` = reduce (`0` is never valid) |
-| 1 | 1 | side: `0` = buy, `1` = sell (`0` for cancels and reduces) |
-| 2 | 1 | order type: `0` = limit, `1` = immediate-or-cancel, `2` = market, `3` = post-only (`0` for cancels and reduces) |
-| 3 | 1 | reserved, zero |
-| 4 | 4 | price tick (`0` for cancels and reduces) |
+| 0 | 1 | kind: `1` = new order, `2` = cancel, `3` = reduce, `4` = cancel an account's orders, `5` = cancel all orders (`0` is never valid) |
+| 1 | 1 | side: `0` = buy, `1` = sell |
+| 2 | 1 | order type: `0` = limit, `1` = immediate-or-cancel, `2` = market, `3` = post-only |
+| 3 | 1 | self-trade prevention: `0` = allow, `1` = cancel resting, `2` = cancel incoming, `3` = cancel both |
+| 4 | 4 | price tick |
 | 8 | 8 | order id |
-| 16 | 8 | quantity; for a reduce, how much to remove (`0` for cancels) |
+| 16 | 8 | quantity; for a reduce, how much to remove |
 | 24 | 8 | caller-provided sequence number |
-| 32 | 4 | checksum of bytes `0..32` |
-| 36 | 4 | reserved, zero |
+| 32 | 4 | checksum of bytes `0..32`, and of the account when it is not zero |
+| 36 | 4 | account (of a new order, or the account a kind `4` record cancels) |
 
-**Two versions.** Version 1 had no order type and no reduce records: byte 2 was
-reserved, and always zero. Zero means "limit", so a version 1 log is also a valid
-version 2 log, and both are read. The reverse is not true: an old reader would
-ignore byte 2 and replay an immediate-or-cancel order as a limit order, leaving
-a different book. That is why the version number exists: `open_append` rewrites
-a version 1 header to version 2 (and flushes it) before it appends anything, and
-an old reader then refuses the file instead of misreading it.
+A field that a kind does not use is zero: a cancel has no side, price or
+account, a mass cancel no order id.
+
+**Three versions.** The format grew twice. Version 1 had no order type and no
+reduce records; version 2 added those, but had no self-trade prevention, no
+account and no mass cancels. In the older versions the bytes for the missing
+fields were reserved, and always zero, and zero means "limit", "allow" and
+"account 0". So **every older record is also a valid version 3 record**, and all
+three versions are read.
+
+The reverse is not true: an old reader would ignore the new bytes and replay, say,
+an immediate-or-cancel order as a limit order, or every order for account 0,
+leaving a different book. That is why the version number exists: `open_append`
+rewrites an older header to version 3 (and flushes it) before it appends
+anything, and an old reader then refuses the file instead of misreading it.
 
 Here are the 40 real bytes that `encode` produces for
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, which is order `#6` from the
@@ -80,11 +88,11 @@ written in hexadecimal:
  offset  bytes                     meaning
  ------  ------------------------  ---------------------------------------------
    0     01 00 00 00 66 00 00 00   kind 1 (new order), side 0 (buy), type 0 (limit),
-                                   1 reserved, price tick 0x66 = 102
+                                   self-trades allowed, price tick 0x66 = 102
    8     06 00 00 00 00 00 00 00   order id 6
   16     0e 00 00 00 00 00 00 00   quantity 0x0e = 14
   24     05 00 00 00 00 00 00 00   sequence 5
-  32     16 08 01 21 00 00 00 00   checksum 0x21010816, then 4 reserved bytes
+  32     16 08 01 21 00 00 00 00   checksum 0x21010816, then account 0
 ```
 
 **Little-endian** means the *lowest* byte comes first. That is why the price 102
@@ -97,12 +105,14 @@ and `decode` know the byte layout:
 
 ```rust
 pub struct WalRecord {
-    pub kind: WalRecordKind,   // NewOrder, Cancel or Reduce
-    pub side: Side,            // Buy for cancels and reduces
-    pub order_type: OrderType, // Limit for cancels and reduces
+    pub kind: WalRecordKind,   // NewOrder, Cancel, Reduce, CancelAccount, CancelAll
+    pub side: Side,            // the zero value (Buy, Limit, Allow, 0) when unused
+    pub order_type: OrderType,
+    pub self_trade_prevention: SelfTradePrevention,
+    pub account: u32,
     pub order_id: u64,
-    pub price_tick: u32,       // 0 for cancels and reduces
-    pub qty: u64,              // the reduction for Reduce; 0 for cancels
+    pub price_tick: u32,
+    pub qty: u64,              // the reduction for Reduce
     pub sequence: u64,         // caller-supplied
 }
 
@@ -114,11 +124,13 @@ pub fn encode(&self) -> [u8; WAL_RECORD_SIZE] {
         OrderType::Limit => 0, OrderType::ImmediateOrCancel => 1,
         OrderType::Market => 2, OrderType::PostOnly => 3,
     };
+    out[3] = /* the self-trade prevention mode, 0 to 3, the same way */;
     out[4..8].copy_from_slice(&self.price_tick.to_le_bytes());
     out[8..16].copy_from_slice(&self.order_id.to_le_bytes());
     out[16..24].copy_from_slice(&self.qty.to_le_bytes());
     out[24..32].copy_from_slice(&self.sequence.to_le_bytes());
-    let checksum = checksum(&out[..CHECKSUMMED_LEN]);
+    out[36..40].copy_from_slice(&self.account.to_le_bytes());
+    let checksum = checksum(&out);                 // reads 0..32 and 36..40
     out[32..36].copy_from_slice(&checksum.to_le_bytes());
     out
 }
@@ -138,17 +150,28 @@ cost:
 
 `decode` reverses `encode` and **validates** as it goes, returning a
 `WalDecodeError` for an unknown kind (`0` marks space that was never written), an
-unknown side or order type, or a **checksum mismatch**. The checksum folds the four 8-byte words
-of the record (bytes `0..32`) through the SplitMix64 mixer from chapter 5, then
-squeezes the 64-bit result into 32 bits. Some honest limits:
+unknown side, order type or self-trade prevention mode, or a **checksum
+mismatch**. The checksum folds the four 8-byte words of the record (bytes `0..32`)
+through the SplitMix64 mixer from chapter 5, then squeezes the 64-bit result into
+32 bits.
+
+The account, in bytes `36..40`, joins the checksum as a **fifth word, but only
+when it is not zero**. That rule looks odd until you see what it buys: in
+versions 1 and 2 those bytes were reserved and always zero, so a record for
+account 0 keeps exactly the checksum it always had, and old records stay valid
+without being rewritten. The unit test
+`a_record_for_account_zero_keeps_its_version_2_bytes` pins the bytes shown above.
+A damaged account is still caught: if a flipped bit makes it non-zero, the fifth
+word appears; if it makes it zero, the fifth word disappears; either way the
+checksum no longer matches.
+
+Some honest limits:
 
 - **It is very likely, not certain, to catch damage.** Two different records can
   share a 32-bit checksum (about a 1 in 4 billion chance for random damage). The
   unit test `decode_rejects_zeroed_and_corrupted_records` flips every single bit
-  of bytes `0..36` one at a time and checks that each flip is caught.
-- **Bytes `36..40` are not covered.** They are reserved, and `decode` does not
-  check that they are zero, so changing them goes unnoticed (the same test pins
-  this down).
+  of a record, all 40 bytes, one at a time, for an account of zero and one that is
+  not, and checks that each flip is caught.
 - **It is not a cryptographic MAC** (message authentication code: a checksum
   that needs a secret key to compute), so anyone who can edit the file can also
   recompute a matching checksum.
@@ -162,9 +185,11 @@ Fixed-size records give two big wins: **appending needs no serialization buffer*
 so you can seek straight to it.
 
 Constructors: `WalRecord::new_order(id, side, tick, qty, sequence)` for a limit
-order, `WalRecord::new_order_with_type(id, side, order_type, tick, qty, sequence)`
-for any type, `WalRecord::cancel(id, sequence)` and
-`WalRecord::reduce(id, reduce_by, sequence)` (the unused fields are zeroed).
+order, `WalRecord::submit(order, sequence)` for any `NewOrder`,
+`WalRecord::cancel(id, sequence)`, `WalRecord::reduce(id, reduce_by, sequence)`,
+`WalRecord::cancel_account(account, sequence)` and `WalRecord::cancel_all(sequence)`
+(the unused fields are zeroed). `record.order()` turns a new-order record back
+into the `NewOrder` it logged, ready for `submit_order`.
 
 **What is `sequence` for?** The engine never looks at it; it is a number *you*
 choose, normally 0, 1, 2, ... in the order requests are logged (the program in 9.7
@@ -268,15 +293,18 @@ replay loop is a plain `match`; there is nothing left to check:
 for record in read_all(&path)? {
     events.clear();
     match record.kind {
-        WalRecordKind::NewOrder => engine.submit_order(
-            record.order_id, record.side, record.order_type, record.price_tick,
-            record.qty, &mut events,
-        ),
+        WalRecordKind::NewOrder => engine.submit_order(record.order(), &mut events),
         WalRecordKind::Cancel => {
             engine.cancel_order(record.order_id, &mut events);
         }
         WalRecordKind::Reduce => {
             engine.reduce_order(record.order_id, record.qty, &mut events);
+        }
+        WalRecordKind::CancelAccount => {
+            engine.cancel_account(record.account, &mut events);
+        }
+        WalRecordKind::CancelAll => {
+            engine.cancel_all(&mut events);
         }
     }
 }
