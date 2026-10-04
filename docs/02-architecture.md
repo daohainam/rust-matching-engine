@@ -61,8 +61,9 @@ Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`,
 but **not** on `ringbuffer` or `wal`. Those two are independent building blocks
 that *you* wire around the engine (chapters 8 and 9 show how).
 
-The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the five names most
-users need: `Engine`, `Event`, `EventSink`, `EventBatch` and `Side`.
+The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the seven names most
+users need: `Engine`, `RestingOrder`, `Event`, `EventSink`, `EventBatch`,
+`RejectReason` and `Side`.
 
 ## 2.3 The `Engine` struct, field by field
 
@@ -75,6 +76,7 @@ pub struct Engine {
     bid_levels: Box<[PriceLevel]>,// bid_levels[tick] = FIFO queue of bids at that tick
     ask_levels: Box<[PriceLevel]>,// ask_levels[tick] = FIFO queue of asks at that tick
     sequence: u64,                // arrival counter; metadata only, never read by matching
+    trades: u64,                  // trades so far; the last trade's trade_id
 }
 ```
 
@@ -87,6 +89,7 @@ Each field has exactly one responsibility:
 | `*_levels`    | "What orders are waiting at price tick T?"                      | `levels[T]`: one array read |
 | `*_bitset`    | "What is the best non-empty price?"                             | two bit-scans |
 | `sequence`    | "How many orders has the engine accepted?" (audit metadata; FIFO order comes from the queue links, not from this number, see [6.10](06-matching-algorithm.md#610-design-notes-worth-noticing)) | one add |
+| `trades`      | "How many trades has the engine executed?" It numbers each `Trade` event (`trade_id`), identically on every replay. | one add per trade |
 
 ### How the pieces point at each other
 
@@ -199,8 +202,8 @@ sequenceDiagram
     participant L as own side levels + bitset
     C->>E: cancel_order(id, sink)
     E->>M: remove(id)
-    M-->>E: arena slot (or not found: return false)
-    E->>P: read order (side, tick)
+    M-->>E: arena slot (or not found: emit CancelRejected, return false)
+    E->>P: read order (side, tick, remaining qty)
     E->>L: unlink from the level queue
     opt queue became empty
         E->>L: clear bit for that tick
@@ -241,11 +244,11 @@ Everything is allocated in `Engine::new(order_capacity)`. For capacity `N`:
 | Free-slot stack | `N × 4 B` | 40,000 B |
 | Hash table | `next_pow2(2 × max(N,16)) × 16 B` | 32,768 × 16 = 524,288 B |
 | Price levels (bid + ask) | `2 × 4096 × 24 B` | 196,608 B |
-| `Engine` struct itself | holds the two bitsets (`2 × 520 B`) plus the pointers, counters and hash seed | 1,160 B |
-| **Total** | | **1,242,056 B ≈ 1.24 MB** |
+| `Engine` struct itself | holds the two bitsets (`2 × 520 B`) plus the pointers, counters and hash seed | 1,168 B |
+| **Total** | | **1,242,064 B ≈ 1.24 MB** |
 
 (Sizes of `Order` = 48 B, `PriceLevel` = 24 B, the 16 B hash slot and
-`Engine` = 1,160 B were measured with `size_of`.)
+`Engine` = 1,168 B were measured with `size_of`.)
 
 That is small enough to live comfortably in a modern CPU's L2/L3 cache, which is
 part of why the design is fast.
