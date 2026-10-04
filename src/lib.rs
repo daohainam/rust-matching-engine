@@ -17,6 +17,8 @@
 //!   queue with separate producer and consumer handles.
 //! - [`wal`]: memory-mapped, checksummed binary write-ahead log for
 //!   deterministic replay.
+//! - [`snapshot`]: the engine's complete state, so recovery can start from
+//!   a snapshot instead of the first logged request.
 //!
 //! All data structures used on the hot path (`Engine::process_order`,
 //! `Engine::cancel_order`) are pre-allocated up front; the engine performs
@@ -31,11 +33,13 @@ pub mod events;
 pub mod hashmap;
 pub mod pool;
 pub mod ringbuffer;
+pub mod snapshot;
 pub mod wal;
 
 pub use engine::{Engine, NewOrder, OrderType, RestingOrder, SelfTradePrevention};
 pub use events::{CancelRejectReason, Event, EventBatch, EventSink, RejectReason};
 pub use pool::Side;
+pub use snapshot::{Snapshot, SnapshotError};
 
 // Compiles and runs every Rust example in README.md as a doctest, so the
 // README cannot drift from the API without failing `cargo test`.

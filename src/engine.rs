@@ -11,6 +11,7 @@ use crate::bitset::{TwoLevelBitset, TICKS};
 use crate::events::{CancelRejectReason, Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side, NIL};
+use crate::snapshot::{Snapshot, SnapshotError};
 
 /// The maximum representable price tick (exclusive), mirroring the dense
 /// tick space tracked by [`TwoLevelBitset`].
@@ -500,55 +501,147 @@ impl Engine {
         }
 
         // Rest the remainder in the book.
-        match self.pool.allocate(
+        let remainder = RestingOrder {
             order_id,
             account,
             side,
             price_tick,
-            remaining,
-            self.sequence,
-        ) {
-            Some(idx) => {
-                self.id_map.insert(order_id, idx);
-                let rested = match side {
-                    Side::Buy => {
-                        let ok =
-                            self.bid_levels[price_tick as usize].push_back(&mut self.pool, idx);
-                        if ok {
-                            self.bid_bitset.set(price_tick as usize);
-                        }
-                        ok
-                    }
-                    Side::Sell => {
-                        let ok =
-                            self.ask_levels[price_tick as usize].push_back(&mut self.pool, idx);
-                        if ok {
-                            self.ask_bitset.set(price_tick as usize);
-                        }
-                        ok
-                    }
-                };
-                if !rested {
-                    // Adversarially large quantity would have overflowed
-                    // this level's `total_qty` accounting; back out the
-                    // allocation entirely rather than resting a corrupt
-                    // level.
-                    self.id_map.remove(order_id);
-                    self.pool.free(idx);
-                    sink.emit(Event::OrderRejected {
-                        order_id,
-                        reason: RejectReason::LevelQuantityOverflow,
-                    });
-                }
-            }
-            None => {
-                sink.emit(Event::OrderRejected {
-                    order_id,
-                    reason: RejectReason::BookFull,
-                });
-            }
+            remaining_qty: remaining,
+        };
+        if let Err(reason) = self.rest(remainder) {
+            sink.emit(Event::OrderRejected { order_id, reason });
         }
         self.sequence = self.sequence.wrapping_add(1);
+    }
+
+    /// Puts `order` at the back of its price level's queue, or says why it
+    /// cannot rest: every slot is in use (`BookFull`), or the level's total
+    /// quantity would overflow (`LevelQuantityOverflow`). Nothing changes
+    /// when it fails.
+    fn rest(&mut self, order: RestingOrder) -> Result<(), RejectReason> {
+        let RestingOrder {
+            order_id,
+            account,
+            side,
+            price_tick,
+            remaining_qty,
+        } = order;
+        let idx = self
+            .pool
+            .allocate(
+                order_id,
+                account,
+                side,
+                price_tick,
+                remaining_qty,
+                self.sequence,
+            )
+            .ok_or(RejectReason::BookFull)?;
+        let (levels, bitset) = match side {
+            Side::Buy => (&mut self.bid_levels, &mut self.bid_bitset),
+            Side::Sell => (&mut self.ask_levels, &mut self.ask_bitset),
+        };
+        if !levels[price_tick as usize].push_back(&mut self.pool, idx) {
+            // An adversarially large quantity would have overflowed this
+            // level's `total_qty`; back out the allocation rather than rest
+            // a corrupt level.
+            self.pool.free(idx);
+            return Err(RejectReason::LevelQuantityOverflow);
+        }
+        bitset.set(price_tick as usize);
+        self.id_map.insert(order_id, idx);
+        Ok(())
+    }
+
+    /// Captures the engine's complete state: its capacity, its counters and
+    /// every resting order in priority order (bids best price first, then
+    /// asks best price first, oldest first at each price).
+    ///
+    /// [`restore`](Self::restore) turns it back into an engine that behaves
+    /// exactly like this one from now on. Each order's arrival stamp, audit
+    /// metadata that nothing reads, is not kept. Walks the book like
+    /// [`depth_snapshot`](Self::depth_snapshot) and allocates the order list,
+    /// so it is not for the hot path.
+    pub fn snapshot(&self) -> Snapshot {
+        let mut orders = Vec::with_capacity(self.live_order_count());
+        for side in [Side::Buy, Side::Sell] {
+            let (levels, mut tick) = match side {
+                Side::Buy => (&self.bid_levels, self.bid_bitset.highest()),
+                Side::Sell => (&self.ask_levels, self.ask_bitset.lowest()),
+            };
+            while let Some(t) = tick {
+                let mut idx = levels[t].head;
+                while idx != NIL {
+                    let order = self.pool.get(idx);
+                    orders.push(RestingOrder {
+                        order_id: order.order_id,
+                        account: order.account,
+                        side: order.side,
+                        price_tick: order.price_tick,
+                        remaining_qty: order.remaining_qty,
+                    });
+                    idx = order.next_idx;
+                }
+                tick = match side {
+                    Side::Buy => self.next_lower_active(&self.bid_bitset, t),
+                    Side::Sell => self.next_higher_active(&self.ask_bitset, t),
+                };
+            }
+        }
+        Snapshot {
+            capacity: self.capacity(),
+            accepted_orders: self.sequence,
+            trades: self.trades,
+            orders,
+        }
+    }
+
+    /// Builds an engine from a [`Snapshot`]: with the same capacity and
+    /// counters, and every order resting at its price in the order the
+    /// snapshot lists it, so time priority is kept.
+    ///
+    /// The new engine emits exactly the events the original would have for
+    /// any later request (its hash seed differs, which never matters).
+    /// A snapshot that could not come from a live book is refused with a
+    /// [`SnapshotError`] instead of becoming a corrupt one: a bad capacity,
+    /// too many orders, an order no engine would rest, or a crossed book.
+    pub fn restore(snapshot: &Snapshot) -> Result<Engine, SnapshotError> {
+        let capacity = snapshot.capacity;
+        if capacity == 0 || capacity >= u32::MAX as usize {
+            return Err(SnapshotError::InvalidCapacity(capacity));
+        }
+        if snapshot.orders.len() > capacity {
+            return Err(SnapshotError::TooManyOrders {
+                orders: snapshot.orders.len(),
+                capacity,
+            });
+        }
+        let mut engine = Engine::new(capacity);
+        engine.sequence = snapshot.accepted_orders;
+        engine.trades = snapshot.trades;
+        for &order in &snapshot.orders {
+            let check = if order.remaining_qty == 0 {
+                Err(RejectReason::ZeroQuantity)
+            } else if order.order_id == crate::hashmap::RESERVED_KEY {
+                Err(RejectReason::ReservedOrderId)
+            } else if order.price_tick as usize >= MAX_TICKS {
+                Err(RejectReason::PriceOutOfRange)
+            } else if engine.id_map.get(order.order_id).is_some() {
+                Err(RejectReason::DuplicateOrderId)
+            } else {
+                engine.rest(order)
+            };
+            check.map_err(|reason| SnapshotError::InvalidOrder {
+                order_id: order.order_id,
+                reason,
+            })?;
+        }
+        if let (Some(best_bid), Some(best_ask)) = (engine.best_bid(), engine.best_ask()) {
+            if best_bid >= best_ask {
+                return Err(SnapshotError::CrossedBook { best_bid, best_ask });
+            }
+        }
+        Ok(engine)
     }
 
     /// Generic crossing loop shared by buy/sell taker orders, operating on
@@ -1576,6 +1669,107 @@ mod tests {
                 account: None,
                 cancelled_orders: 0
             }]
+        );
+    }
+
+    #[test]
+    fn a_restored_engine_keeps_priority_and_counters() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 101, 3);
+        place(&mut engine, 2, Side::Sell, 100, 4);
+        place(&mut engine, 3, Side::Sell, 100, 5); // behind #2
+        place(&mut engine, 4, Side::Buy, 98, 6);
+        place(&mut engine, 5, Side::Buy, 99, 7);
+        place(&mut engine, 6, Side::Buy, 100, 1); // trade 1, with #2
+
+        let snapshot = engine.snapshot();
+        let ids: Vec<_> = snapshot.orders.iter().map(|o| o.order_id).collect();
+        assert_eq!(ids, [5, 4, 2, 3, 1], "bids best first, then asks, FIFO");
+        assert_eq!((snapshot.capacity, snapshot.trades), (16, 1));
+
+        let mut restored = Engine::restore(&snapshot).unwrap();
+        assert_eq!(restored.snapshot(), snapshot);
+        // The same sweep produces the same events: #2 still goes before #3,
+        // and trade ids continue from 2.
+        let original = place(&mut engine, 7, Side::Buy, 101, 12);
+        assert_eq!(place(&mut restored, 7, Side::Buy, 101, 12), original);
+        assert!(matches!(
+            original[1],
+            Event::Trade {
+                trade_id: 2,
+                maker_order_id: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn restore_refuses_snapshots_no_live_book_could_have() {
+        let order = |order_id, side, price_tick, remaining_qty| RestingOrder {
+            order_id,
+            account: 0,
+            side,
+            price_tick,
+            remaining_qty,
+        };
+        let snapshot = |capacity, orders: Vec<RestingOrder>| Snapshot {
+            capacity,
+            accepted_orders: 0,
+            trades: 0,
+            orders,
+        };
+        let restore = |s: &Snapshot| Engine::restore(s).err();
+
+        assert_eq!(
+            restore(&snapshot(0, vec![])),
+            Some(SnapshotError::InvalidCapacity(0))
+        );
+        assert_eq!(
+            restore(&snapshot(
+                1,
+                vec![order(1, Side::Buy, 9, 1), order(2, Side::Buy, 9, 1)]
+            )),
+            Some(SnapshotError::TooManyOrders {
+                orders: 2,
+                capacity: 1
+            })
+        );
+        assert_eq!(
+            restore(&snapshot(
+                4,
+                vec![order(1, Side::Buy, 9, 1), order(1, Side::Sell, 20, 1)]
+            )),
+            Some(SnapshotError::InvalidOrder {
+                order_id: 1,
+                reason: RejectReason::DuplicateOrderId
+            })
+        );
+        assert_eq!(
+            restore(&snapshot(4, vec![order(1, Side::Buy, 9, 0)])),
+            Some(SnapshotError::InvalidOrder {
+                order_id: 1,
+                reason: RejectReason::ZeroQuantity
+            })
+        );
+        assert_eq!(
+            restore(&snapshot(
+                4,
+                vec![order(1, Side::Buy, 9, u64::MAX), order(2, Side::Buy, 9, 1)]
+            )),
+            Some(SnapshotError::InvalidOrder {
+                order_id: 2,
+                reason: RejectReason::LevelQuantityOverflow
+            })
+        );
+        assert_eq!(
+            restore(&snapshot(
+                4,
+                vec![order(1, Side::Buy, 20, 1), order(2, Side::Sell, 20, 1)]
+            )),
+            Some(SnapshotError::CrossedBook {
+                best_bid: 20,
+                best_ask: 20
+            })
         );
     }
 
