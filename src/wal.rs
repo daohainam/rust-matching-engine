@@ -6,7 +6,7 @@
 //! record directly into a memory-mapped file, so appending needs no
 //! serialization allocation and records can be located by arithmetic.
 //!
-//! # File format (version 3)
+//! # File format (version 4)
 //!
 //! All integers are little-endian and every field is encoded explicitly, so
 //! a log is portable across targets and never contains padding bytes.
@@ -16,9 +16,16 @@
 //! | Offset | Size | Field                       |
 //! |-------:|-----:|-----------------------------|
 //! | 0      | 8    | magic `b"MEWALOG\0"`        |
-//! | 8      | 4    | format version (`3`)        |
+//! | 8      | 4    | format version (`4`)        |
 //! | 12     | 4    | record size in bytes (`40`) |
-//! | 16     | 16   | reserved, zero              |
+//! | 16     | 8    | engine capacity, see below  |
+//! | 24     | 8    | reserved, zero              |
+//!
+//! The engine capacity is the `order_capacity` of the [`Engine`](crate::Engine)
+//! the log was written for. It decides which orders can rest, so a replay is
+//! deterministic only into an engine of the same capacity; recording it lets
+//! [`WalWriter::open_append`] and [`read`] check it instead of trusting the
+//! caller. `0` means "unknown": the log was written by an older version.
 //!
 //! followed by 40-byte records:
 //!
@@ -45,12 +52,13 @@
 //! not zero (skipping a zero account keeps older records valid, see
 //! below).
 //!
-//! Version 1 had no order type, and version 2 no self-trade prevention,
-//! account or mass cancels. Their unused bytes were always zero, which
-//! reads as "limit", "allow" and account 0, and a record for account 0 has
-//! the same checksum in every version. So every older record is also a
-//! valid version 3 record: readers accept all three versions, and
-//! [`WalWriter::open_append`] upgrades an older header to version 3 before
+//! Version 1 had no order type, version 2 no self-trade prevention,
+//! account or mass cancels, and version 3 no engine capacity. Their unused
+//! bytes were always zero, which reads as "limit", "allow", account 0 and
+//! "capacity unknown", and a record for account 0 has the same checksum in
+//! every version. So every older record is also a valid version 4 record:
+//! readers accept all four versions, and [`WalWriter::open_append`]
+//! upgrades an older header to version 4, recording the capacity, before
 //! appending, so that an older reader refuses the file instead of
 //! misreading a new record.
 //!
@@ -105,8 +113,8 @@ pub const WAL_HEADER_SIZE: usize = 32;
 /// Size in bytes of one encoded record.
 pub const WAL_RECORD_SIZE: usize = 40;
 /// On-disk format version written by this module. Older logs are
-/// still read; see the [module docs](self#file-format-version-3).
-pub const WAL_FORMAT_VERSION: u32 = 3;
+/// still read; see the [module docs](self#file-format-version-4).
+pub const WAL_FORMAT_VERSION: u32 = 4;
 
 const WAL_MAGIC: [u8; 8] = *b"MEWALOG\0";
 /// Bytes of an encoded record that its checksum always covers.
@@ -385,16 +393,24 @@ fn mix64(x: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-fn encode_header() -> [u8; WAL_HEADER_SIZE] {
+fn encode_header(engine_capacity: usize) -> [u8; WAL_HEADER_SIZE] {
     let mut out = [0u8; WAL_HEADER_SIZE];
     out[..8].copy_from_slice(&WAL_MAGIC);
     out[8..12].copy_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
     out[12..16].copy_from_slice(&(WAL_RECORD_SIZE as u32).to_le_bytes());
+    out[16..24].copy_from_slice(&(engine_capacity as u64).to_le_bytes());
     out
 }
 
-/// Checks the header and returns the log's format version.
-fn validate_header(bytes: &[u8]) -> io::Result<u32> {
+/// What a valid header says about its log.
+struct Header {
+    version: u32,
+    /// `None` for a log written before the capacity was recorded.
+    engine_capacity: Option<usize>,
+}
+
+/// Checks the header and returns what it says.
+fn validate_header(bytes: &[u8]) -> io::Result<Header> {
     if bytes.len() < WAL_HEADER_SIZE {
         return Err(invalid_data("file is shorter than a WAL header".into()));
     }
@@ -413,7 +429,27 @@ fn validate_header(bytes: &[u8]) -> io::Result<u32> {
             "unexpected WAL record size {record_size}"
         )));
     }
-    Ok(version)
+    let engine_capacity = match read_u64(bytes, 16) {
+        0 => None,
+        capacity => Some(usize::try_from(capacity).map_err(|_| {
+            invalid_data(format!("engine capacity {capacity} does not fit in usize"))
+        })?),
+    };
+    Ok(Header {
+        version,
+        engine_capacity,
+    })
+}
+
+/// Rejects a capacity that cannot belong to an [`Engine`](crate::Engine).
+fn check_engine_capacity(engine_capacity: usize) -> io::Result<()> {
+    if engine_capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "engine capacity must be positive",
+        ));
+    }
+    Ok(())
 }
 
 fn invalid_data(message: String) -> io::Error {
@@ -444,8 +480,9 @@ pub struct WalWriter {
 }
 
 impl WalWriter {
-    /// Creates a new WAL file, writes its header, and preallocates room for
-    /// at least `capacity_records` records.
+    /// Creates a new WAL file for an engine of `engine_capacity` orders,
+    /// writes its header, and preallocates room for at least
+    /// `capacity_records` records.
     ///
     /// Fails with [`io::ErrorKind::AlreadyExists`] if `path` already exists,
     /// so a restart can never erase the log it should replay. Continue an
@@ -455,14 +492,19 @@ impl WalWriter {
     /// Creation is not atomic: a crash before the header is flushed leaves a
     /// file with a zeroed header, and on Unix the new directory entry is not
     /// synced. See the [module docs](self#durability-and-its-limits).
-    pub fn create<P: AsRef<Path>>(path: P, capacity_records: usize) -> io::Result<Self> {
+    pub fn create<P: AsRef<Path>>(
+        path: P,
+        engine_capacity: usize,
+        capacity_records: usize,
+    ) -> io::Result<Self> {
+        check_engine_capacity(engine_capacity)?;
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .open(path)?;
         let mut writer = Self::map(file, WAL_HEADER_SIZE, capacity_records)?;
-        writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header());
+        writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header(engine_capacity));
         // The header must be durable before any record can be.
         writer.flush()?;
         Ok(writer)
@@ -471,30 +513,52 @@ impl WalWriter {
     /// Opens an existing WAL to append after its last valid record, with
     /// room for at least `spare_records` more before the file must grow.
     ///
+    /// `engine_capacity` must be the capacity the log was written for: if
+    /// the header records another one, this fails with
+    /// [`io::ErrorKind::InvalidInput`] and leaves the file untouched, because
+    /// replaying the log into that engine would not reproduce the book.
     /// Any bytes after the last valid record (a torn write or stale data)
     /// are discarded, so they can never be mistaken for records later. That
     /// is right after a crash, but it would also discard valid records that
     /// follow a corrupted one. The whole file is read once, with plain I/O,
     /// to find that record. An older log is upgraded to the current
-    /// version first (see the [module docs](self#file-format-version-3)).
+    /// version first, and `engine_capacity` recorded in it (see the
+    /// [module docs](self#file-format-version-4)).
     /// Use one writer per file: opening a log that a live writer is still
     /// using corrupts it.
-    pub fn open_append<P: AsRef<Path>>(path: P, spare_records: usize) -> io::Result<Self> {
+    pub fn open_append<P: AsRef<Path>>(
+        path: P,
+        engine_capacity: usize,
+        spare_records: usize,
+    ) -> io::Result<Self> {
+        check_engine_capacity(engine_capacity)?;
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
-        let version = validate_header(&bytes)?;
+        let header = validate_header(&bytes)?;
+        if let Some(recorded) = header.engine_capacity {
+            if recorded != engine_capacity {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "log was written for an engine of capacity {recorded}, \
+                         not {engine_capacity}"
+                    ),
+                ));
+            }
+        }
         let valid_len =
             WAL_HEADER_SIZE + valid_records(&bytes[WAL_HEADER_SIZE..]).count() * WAL_RECORD_SIZE;
         // Truncating (no view is mapped yet, which Windows requires) and then
         // re-extending in `map` zero-fills everything after the valid prefix.
         file.set_len(valid_len as u64)?;
         let mut writer = Self::map(file, valid_len, spare_records)?;
-        if version != WAL_FORMAT_VERSION {
+        if header.version != WAL_FORMAT_VERSION {
             // Every older record is also valid in the current format, so
-            // only the version field changes. It must be durable before a
+            // only the header changes: the version, and the capacity an
+            // older log could not record. It must be durable before a
             // record that an older reader would misread can be.
-            writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header());
+            writer.mapping()[..WAL_HEADER_SIZE].copy_from_slice(&encode_header(engine_capacity));
             writer.flush()?;
         }
         Ok(writer)
@@ -618,7 +682,18 @@ impl Drop for WalWriter {
     }
 }
 
-/// Reads every valid record from a WAL file for replay.
+/// Everything a WAL file holds: see [`read`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalContents {
+    /// The capacity of the engine the log was written for, or `None` if
+    /// an older version wrote it and nothing has recorded it since.
+    pub engine_capacity: Option<usize>,
+    /// Every valid record, in log order.
+    pub records: Vec<WalRecord>,
+}
+
+/// Reads a WAL file for replay: the engine capacity from its header and
+/// every valid record.
 ///
 /// Reading stops at the first partial or invalid record, which marks the end
 /// of the log (for example the zero-filled preallocated tail left by a crash,
@@ -628,10 +703,19 @@ impl Drop for WalWriter {
 /// The file is read into memory with plain I/O rather than mapped. A copy
 /// cannot race a writer that is appending to the same file: at worst it ends
 /// in a half-written record, which fails its checksum and ends the log.
-pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
+pub fn read<P: AsRef<Path>>(path: P) -> io::Result<WalContents> {
     let bytes = std::fs::read(path)?;
-    validate_header(&bytes)?;
-    Ok(valid_records(&bytes[WAL_HEADER_SIZE..]).collect())
+    let header = validate_header(&bytes)?;
+    Ok(WalContents {
+        engine_capacity: header.engine_capacity,
+        records: valid_records(&bytes[WAL_HEADER_SIZE..]).collect(),
+    })
+}
+
+/// Reads every valid record from a WAL file, like [`read`] without the
+/// header's engine capacity.
+pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>> {
+    read(path).map(|contents| contents.records)
 }
 
 #[cfg(test)]
@@ -694,9 +778,12 @@ mod tests {
         }
     }
 
+    /// The engine capacity the test logs are written for.
+    const TEST_CAPACITY: usize = 64;
+
     /// Builds a raw log image: a valid header followed by the given slots.
     fn image(slots: &[[u8; WAL_RECORD_SIZE]]) -> Vec<u8> {
-        let mut bytes = encode_header().to_vec();
+        let mut bytes = encode_header(TEST_CAPACITY).to_vec();
         for slot in slots {
             bytes.extend_from_slice(slot);
         }
@@ -714,7 +801,7 @@ mod tests {
         let original = image(&[sample(0).encode()]);
         std::fs::write(&path.0, &original).unwrap();
 
-        let err = WalWriter::create(&path.0, 4)
+        let err = WalWriter::create(&path.0, TEST_CAPACITY, 4)
             .err()
             .expect("create must not open an existing file");
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
@@ -798,7 +885,7 @@ mod tests {
     #[cfg_attr(miri, ignore)] // Miri cannot map files.
     fn append_grow_finalize_and_read_back() {
         let path = TempPath::new("roundtrip");
-        let mut writer = WalWriter::create(&path.0, 4).unwrap();
+        let mut writer = WalWriter::create(&path.0, TEST_CAPACITY, 4).unwrap();
         // Force several growths beyond the preallocated capacity.
         for i in 0..10 {
             writer.append(sample(i)).unwrap();
@@ -816,7 +903,7 @@ mod tests {
     fn dropping_a_writer_finalizes_it() {
         let path = TempPath::new("drop");
         {
-            let mut writer = WalWriter::create(&path.0, 8).unwrap();
+            let mut writer = WalWriter::create(&path.0, TEST_CAPACITY, 8).unwrap();
             writer.append(sample(0)).unwrap();
         }
         assert_eq!(file_len(&path), WAL_HEADER_SIZE + WAL_RECORD_SIZE);
@@ -829,13 +916,13 @@ mod tests {
         // The preallocated space is trimmed, but the header stays: an empty
         // log is still a valid log that `open_append` can continue.
         let path = TempPath::new("empty");
-        let writer = WalWriter::create(&path.0, 16).unwrap();
+        let writer = WalWriter::create(&path.0, TEST_CAPACITY, 16).unwrap();
         assert!(writer.is_empty());
         writer.finalize().unwrap();
 
         assert_eq!(file_len(&path), WAL_HEADER_SIZE);
         assert!(read_all(&path.0).unwrap().is_empty());
-        let writer = WalWriter::open_append(&path.0, 1).unwrap();
+        let writer = WalWriter::open_append(&path.0, TEST_CAPACITY, 1).unwrap();
         assert!(writer.is_empty());
     }
 
@@ -891,7 +978,7 @@ mod tests {
         slots.push(sample(3).encode()); // stale data after the tear
         std::fs::write(&path.0, image(&slots)).unwrap();
 
-        let mut writer = WalWriter::open_append(&path.0, 2).unwrap();
+        let mut writer = WalWriter::open_append(&path.0, TEST_CAPACITY, 2).unwrap();
         assert_eq!(writer.len(), 2);
         for i in 10..15 {
             writer.append(sample(i)).unwrap();
@@ -906,7 +993,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn open_append_upgrades_older_logs() {
-        for old_version in [1u32, 2] {
+        for old_version in [1u32, 2, 3] {
             // Limit orders and cancels for account 0: the records an older
             // log can hold, with every newer byte zero.
             let path = TempPath::new(&format!("v{old_version}"));
@@ -916,7 +1003,9 @@ mod tests {
             ];
             let mut bytes = image(&old.iter().map(WalRecord::encode).collect::<Vec<_>>());
             bytes[8..12].copy_from_slice(&old_version.to_le_bytes());
+            bytes[16..24].fill(0); // older versions could not record it
             std::fs::write(&path.0, &bytes).unwrap();
+            assert_eq!(read(&path.0).unwrap().engine_capacity, None);
             assert_eq!(
                 read_all(&path.0).unwrap(),
                 old,
@@ -924,14 +1013,44 @@ mod tests {
             );
 
             let new = WalRecord::submit(NewOrder::market(2, Side::Sell, 3).with_account(9), 2);
-            let mut writer = WalWriter::open_append(&path.0, 4).unwrap();
+            let mut writer = WalWriter::open_append(&path.0, TEST_CAPACITY, 4).unwrap();
             writer.append(new).unwrap();
             writer.finalize().unwrap();
 
             let bytes = std::fs::read(&path.0).unwrap();
             assert_eq!(read_u32(&bytes, 8), WAL_FORMAT_VERSION);
-            assert_eq!(read_all(&path.0).unwrap(), [old[0], old[1], new]);
+            assert_eq!(
+                read(&path.0).unwrap(),
+                WalContents {
+                    engine_capacity: Some(TEST_CAPACITY),
+                    records: vec![old[0], old[1], new],
+                }
+            );
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn open_append_refuses_a_log_written_for_another_capacity() {
+        let path = TempPath::new("capacity");
+        let mut writer = WalWriter::create(&path.0, TEST_CAPACITY, 4).unwrap();
+        writer.append(sample(0)).unwrap();
+        writer.finalize().unwrap();
+        let before = std::fs::read(&path.0).unwrap();
+
+        let err = WalWriter::open_append(&path.0, TEST_CAPACITY + 1, 4)
+            .err()
+            .expect("another capacity must be refused");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(&path.0).unwrap(), before, "log was modified");
+
+        // The right capacity still works, and zero is never one.
+        assert!(WalWriter::open_append(&path.0, TEST_CAPACITY, 4).is_ok());
+        let zero = WalWriter::create(path.0.with_extension("zero"), 0, 4);
+        assert_eq!(
+            zero.err().map(|e| e.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
     }
 
     #[test]
@@ -948,12 +1067,12 @@ mod tests {
         std::fs::write(&path.0, &bytes).unwrap();
         assert!(is_invalid_data(read_all(&path.0)), "bad magic");
         assert!(
-            matches!(WalWriter::open_append(&path.0, 1), Err(e) if e.kind() == io::ErrorKind::InvalidData),
+            matches!(WalWriter::open_append(&path.0, TEST_CAPACITY, 1), Err(e) if e.kind() == io::ErrorKind::InvalidData),
             "open_append must reject a bad magic too"
         );
 
         let mut bytes = image(&[sample(0).encode()]);
-        bytes[8] = 4;
+        bytes[8] = 5;
         std::fs::write(&path.0, &bytes).unwrap();
         assert!(is_invalid_data(read_all(&path.0)), "future version");
     }

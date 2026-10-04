@@ -482,6 +482,8 @@ fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
 
 fn main() -> std::io::Result<()> {
     const N: u64 = 10_000;
+    // The log records this, and refuses to be continued with another.
+    const CAPACITY: usize = 50_000;
     let (mut producer, mut consumer) = spsc_channel::<Command>(1024);
 
     // Gateway: the only producer. `producer` is dropped when the thread
@@ -513,8 +515,8 @@ fn main() -> std::io::Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
-    let mut wal = WalWriter::create(&path, 16_384)?;
-    let mut engine = Engine::new(50_000);
+    let mut wal = WalWriter::create(&path, CAPACITY, 16_384)?;
+    let mut engine = Engine::new(CAPACITY);
     let mut events = Vec::new(); // one sink, reused for every call
     let mut sequence = 0;
     loop {
@@ -553,7 +555,7 @@ fn main() -> std::io::Result<()> {
         sequence,
         "every logged request is read back"
     );
-    let mut replica = Engine::new(50_000);
+    let mut replica = Engine::new(CAPACITY);
     for record in &records {
         events.clear();
         apply(&mut replica, record, &mut events);

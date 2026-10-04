@@ -5,7 +5,7 @@
 mod common;
 
 use common::{Op, OpGenerator, TempFile};
-use matching_engine::wal::{read_all, WalRecord, WalRecordKind, WalWriter};
+use matching_engine::wal::{read, WalRecord, WalRecordKind, WalWriter};
 use matching_engine::{Engine, Event, Side};
 
 fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
@@ -32,10 +32,11 @@ fn replaying_the_wal_reproduces_every_event() {
     const OPS: u64 = 10_000;
     let path = TempFile::new("wal_replay");
 
-    let mut primary = Engine::new(256);
+    const CAPACITY: usize = 256;
+    let mut primary = Engine::new(CAPACITY);
     let mut primary_events = Vec::new();
     // A small preallocation forces the writer to grow several times.
-    let mut writer = WalWriter::create(&path.0, 64).unwrap();
+    let mut writer = WalWriter::create(&path.0, CAPACITY, 64).unwrap();
     let mut generator = OpGenerator::new(42);
     for sequence in 0..OPS {
         let record = match generator.next_op() {
@@ -54,13 +55,15 @@ fn replaying_the_wal_reproduces_every_event() {
     }
     writer.finalize().unwrap();
 
-    let records = read_all(&path.0).unwrap();
+    let contents = read(&path.0).unwrap();
+    assert_eq!(contents.engine_capacity, Some(CAPACITY));
+    let records = contents.records;
     assert_eq!(records.len() as u64, OPS);
     assert!(records.iter().zip(0..).all(|(r, seq)| r.sequence == seq));
 
     // The replica's ID map draws a different random hash seed; the results
     // must not depend on it.
-    let mut replica = Engine::new(256);
+    let mut replica = Engine::new(CAPACITY);
     let mut replayed_events = Vec::new();
     for record in &records {
         apply(&mut replica, record, &mut replayed_events);
