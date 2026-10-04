@@ -32,6 +32,12 @@ Reading them is a good way to learn the behaviour each module promises.
 |---|---|
 | `resting_order_with_no_match` | A non-crossing order rests; best bid and depth are right; only `OrderAccepted` (with the order's side, tick and quantity) is emitted. |
 | `acceptance_repeats_the_order_terms_even_when_it_fills_at_once` | `OrderAccepted` describes the order even when it never rests, so the event stream alone says what was ordered. |
+| `immediate_or_cancel_trades_what_it_can_and_expires_the_rest` | An IOC order trades, then reports its remainder with `OrderExpired`; nothing rests. |
+| `immediate_or_cancel_that_cannot_trade_expires_without_a_slot` | With the arena full, an IOC order that cannot trade expires instead of getting `BookFull`: its remainder never needs a slot. |
+| `market_buy_sweeps_asks_at_every_price_and_never_rests` | A market buy ignores the tick passed in (even an out-of-range one), trades at ticks 0, 2000 and 4095, and expires the rest. |
+| `market_order_on_an_empty_side_only_expires` | A market sell with nothing to trade against emits `Accepted` (with limit 0) and `Expired`. |
+| `post_only_that_would_trade_is_rejected_and_the_book_is_unchanged` | A post-only buy at the best ask, and a post-only sell at the best bid, are rejected with `PostOnlyWouldTrade` before acceptance. |
+| `post_only_that_does_not_cross_rests_like_a_limit_order` | A post-only order below the best ask is accepted and rests. |
 | `full_fill_taker_and_maker` | An exact match emits `Trade`, `Filled(maker)`, `Filled(taker)` and leaves the book empty. |
 | `partial_fill_leaves_maker_resting` | A smaller taker fills completely; the maker stays with reduced quantity. |
 | `partial_fill_leaves_taker_resting_remainder` | A bigger taker consumes the maker, then rests its remainder. |
@@ -39,6 +45,9 @@ Reading them is a good way to learn the behaviour each module promises.
 | `cancel_reports_only_what_is_left_after_a_partial_fill` | `OrderCancelled` carries the side, the tick and the quantity still resting (6 of 10), not the original size. |
 | `resting_order_follows_an_order_through_its_life` | `resting_order` shows an order's remaining quantity after a partial fill, and `None` once it is cancelled, for a taker that never rested, and for the reserved id. |
 | `cancelling_a_filled_order_is_rejected_without_touching_the_book` | A cancel for an order that has already filled emits `CancelRejected` and leaves depth and live count alone. |
+| `reducing_an_order_keeps_its_time_priority` | A reduced order emits `OrderReduced`, lowers the level's depth, and still fills before the order queued behind it. |
+| `reducing_by_the_whole_remainder_cancels_the_order` | Reducing by more than is left cancels the order, with `OrderCancelled` for what was left. |
+| `reduce_rejects_zero_and_orders_that_are_not_resting` | A reduction of 0 and an unknown id get `CancelRejected` with `ZeroQuantity` and `NotResting`; zero is checked first. |
 | `crosses_multiple_ask_price_levels_in_price_time_priority` | A buy sweeps asks from the cheapest level upward. |
 | `trade_names_the_aggressor_side` | A sell taker's `Trade` reports `taker_side: Sell`. |
 | `crosses_multiple_bid_price_levels_for_incoming_sell` | A sell sweeps bids from the highest level downward (the mirror case). |
@@ -65,7 +74,7 @@ Reading them is a good way to learn the behaviour each module promises.
 | `hashmap.rs` | `insert_get_remove`, `update_existing_key`, `survives_many_collisions_and_deletions`, `insert_rejects_reserved_sentinel_key_in_all_build_profiles`, `get_and_remove_are_safe_for_reserved_sentinel_key`, `keys_crafted_for_one_seed_spread_out_under_another`, `seeded_maps_behave_identically`, `insert_refuses_to_fill_the_last_empty_slot`, `absurd_capacity_is_rejected_instead_of_wrapping` | Basic operations and backward-shift deletion under collisions; the reserved key is handled; ids crafted against one seed scatter under another (chapter 5); the seed never changes a result; a full table and an absurd size fail loudly instead of hanging or wrapping. |
 | `events.rs` | `full_batch_counts_dropped_events_until_cleared`, `closures_and_vectors_are_sinks` | A full `EventBatch` counts what it drops until `clear`; closures and `Vec`s work as sinks. |
 | `ringbuffer.rs` | `push_pop_single_thread`, `capacity_rounds_up_to_a_power_of_two`, `zero_capacity_is_rejected`, `spsc_across_threads_preserves_order`, `consumer_reports_disconnect_only_after_draining`, `producer_sees_a_dropped_consumer` | FIFO order, full/empty behaviour and wrap-around; 100,000 values cross two real threads complete and in order (failing fast if the producer stops); disconnection is reported only once nothing is left to read. |
-| `wal.rs` | `encode_decode_roundtrip`, `decode_rejects_zeroed_and_corrupted_records`, `append_grow_finalize_and_read_back`, `dropping_a_writer_finalizes_it`, `finalizing_an_empty_log_keeps_only_the_header`, `create_refuses_to_overwrite_an_existing_log`, `read_stops_at_zeroed_preallocated_tail`, `read_stops_before_a_torn_record`, `read_ignores_a_partial_trailing_record`, `open_append_resumes_after_the_last_valid_record`, `rejects_files_without_a_valid_header` | Records survive encoding; a flipped bit anywhere is caught; growth, `finalize` and `Drop` leave exactly the header plus the records; `create` never touches an existing file; readers stop at the first zeroed, torn or partial record; `open_append` continues after the last valid record; a bad header is `InvalidData`. |
+| `wal.rs` | `encode_decode_roundtrip`, `decode_rejects_zeroed_and_corrupted_records`, `append_grow_finalize_and_read_back`, `dropping_a_writer_finalizes_it`, `finalizing_an_empty_log_keeps_only_the_header`, `create_refuses_to_overwrite_an_existing_log`, `read_stops_at_zeroed_preallocated_tail`, `read_stops_before_a_torn_record`, `read_ignores_a_partial_trailing_record`, `open_append_resumes_after_the_last_valid_record`, `open_append_upgrades_a_version_1_log`, `rejects_files_without_a_valid_header` | Records of every kind and order type survive encoding; an unknown order type and a flipped bit anywhere are caught; growth, `finalize` and `Drop` leave exactly the header plus the records; `create` never touches an existing file; readers stop at the first zeroed, torn or partial record; `open_append` continues after the last valid record, and upgrades a version 1 log it continues; a bad header is `InvalidData`. |
 
 The WAL's crash tests do not crash anything. They write **crash images** by hand
 (a valid header followed by chosen bytes: a zero tail, a torn record, half a
@@ -100,7 +109,11 @@ The request generator (`OpGenerator` in [`tests/common/mod.rs`](../tests/common/
 is seeded, so every run is reproducible. It produces:
 
 - mostly placements in a narrow band of 16 ticks, so orders cross each other often;
-- cancels (about 30%), of live, filled and never-issued ids, and of the reserved id;
+  about three in four are limit orders, the rest immediate-or-cancel, market and
+  post-only orders;
+- cancels and reductions (about 30% together), of live, filled and never-issued
+  ids, and of the reserved id; a reduction is sometimes zero and often the whole
+  remainder or more;
 - occasional edge inputs: zero quantity, out-of-range ticks, reused ids, sweeps
   across the whole book, and oversized quantities at far-away ticks that make a
   level's total overflow.
@@ -117,7 +130,8 @@ Two details make it trustworthy:
 
 - **Coverage counters.** The test counts how often interesting paths were hit
   (input rejections, rejected remainders, maker partial fills, successful cancels,
-  calls producing more than 64 events) and fails if any count is zero. A change to
+  calls producing more than 64 events, expired remainders, post-only rejections,
+  reductions) and fails if any count is zero. A change to
   the generator that silently stops exercising a path cannot go unnoticed.
 - **Reproducible failures.** Every assertion message includes the seed, the step
   and the request, so a failure can be replayed exactly.
@@ -140,7 +154,8 @@ are stored, never what the engine does.
 
 ## 10.4 Proving "zero allocation"
 
-The claim *"`process_order` and `cancel_order` never allocate"* is easy to write
+The claim *"`process_order`, `reduce_order` and `cancel_order` never allocate"*
+is easy to write
 in a comment and easy to break later by accident (one innocent `Vec::new()` or
 `.to_vec()`). So it is **tested**, by `tests/zero_alloc.rs`.
 
@@ -178,6 +193,7 @@ static GLOBAL: CountingAllocator = CountingAllocator;
   2. before = ALLOC_COUNT                                      <- take a snapshot
   3. 5,000 resting buys (no match)                             <- the measured work,
      5,000 buys priced in the ask range                           through one reused EventBatch
+     5,000 reductions by one lot
      5,000 cancellations
      one taker sweeping all 500 makers of the second engine,      through a counting closure
   4. after = ALLOC_COUNT
@@ -188,7 +204,8 @@ Details worth copying when you write your own:
 
 - **Warm up and pre-allocate first**, so one-time setup is not counted.
 - **Exercise every path** you want to prove allocation-free: resting, matching,
-  cancelling and a sweep far deeper than any fixed buffer all take different code.
+  reducing, cancelling and a sweep far deeper than any fixed buffer all take
+  different code.
 - **Choose sinks that do not allocate.** The measurement is about the engine, so
   the test reuses one `EventBatch` (calling `clear` before each call) and uses a
   closure that only counts.
