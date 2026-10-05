@@ -195,9 +195,14 @@ nguyên**. Một *tick* là bước giá nhỏ nhất được phép.
                              tick 4095-> giá 1123.75
 ```
 
-Engine này **chỉ làm việc với tick**: `price_tick` là một `u32` từ `0` đến `4095`
-(gồm cả hai đầu), tức 4096 mức giá khác nhau. Việc đổi qua lại giữa giá thật và
-tick (`price = offset + tick * tick_size`) là **trách nhiệm của bên gọi**.
+Engine này **chỉ làm việc với tick**: `price_tick` là một `u32` từ `0` cho tới
+số tick của engine, mặc định là 4096 trừ khi bạn chọn một số khác bằng
+`Engine::with_ticks` (tối đa khoảng 16.7 triệu). Ví dụ ở trên cần 4096 tick để
+lên tới 1123.75; một cổ phiếu quanh mức 100.00 giao dịch theo bước 0.01 thì cần
+hơn 10,000 tick. Việc đổi qua lại giữa giá thật và tick
+(`price = offset + tick * tick_size`) là **trách nhiệm của bên gọi**.
+
+Các ví dụ trong các chương đều dùng 4096 tick mặc định.
 
 Vì sao điều này quan trọng với thiết kế? Nếu tập các mức giá có thể có vừa nhỏ
 vừa liền nhau, ta có thể dùng **mảng đánh chỉ số theo tick** thay cho cây hay bảng
@@ -215,6 +220,24 @@ kế.
 | Tài khoản, chống tự giao dịch, hủy hàng loạt           | Phiên giao dịch và tạm dừng giao dịch (cho việc này chỉ có `cancel_all`) |
 | Ưu tiên giá, rồi đến thời gian                         | Nhiều mã giao dịch trong một `Engine` (mỗi mã một engine) |
 | Truy vấn độ sâu và tra cứu lệnh                        | Phiên đấu giá, cầu dao ngắt thị trường, phí            |
+| Số tick chọn riêng cho từng engine, tối đa 2^24        | Giá không phải là một số tick nguyên                   |
+| Giới hạn rủi ro trước giao dịch: số lượng tối đa, biên độ giá | Rủi ro theo tài khoản (vị thế, tín dụng)        |
+
+### Giới hạn rủi ro: ngăn lỗi bấm nhầm (fat finger)
+
+Một nhà giao dịch gõ 10000 thay vì 100, hoặc đặt giá mua cao gấp mười lần, có thể
+gây thiệt hại thật chỉ trong vài micro giây: lệnh đó giao dịch với mọi thứ mà nó
+chạm tới. Vì thế các sàn kiểm tra mọi lệnh theo các **giới hạn rủi ro trước giao
+dịch** trước khi cho phép nó giao dịch. Engine này có hai giới hạn:
+
+- **số lượng tối đa của một lệnh**;
+- **biên độ giá (price band)**: một lệnh chỉ được vươn tới tối đa vài tick vượt
+  quá giá tốt nhất ở phía bên kia. Một lệnh mua giới hạn ở 150 khi ask tốt nhất
+  là 100 bị từ chối thẳng, còn một lệnh thị trường dừng lại ở mép của biên độ
+  thay vì quét sạch cả sổ.
+
+Các giới hạn này là một phần trạng thái của engine và có thể thay đổi trong ngày,
+chẳng hạn khi thị trường trở nên biến động mạnh.
 
 ### Các loại lệnh
 
@@ -231,7 +254,8 @@ gì xảy ra với phần số lượng không giao dịch được ngay:
 
 Lệnh **thị trường** nói rằng "mua 10 ngay, giá bao nhiêu cũng được". Nó không có
 giá của riêng mình, nên có thể quét qua nhiều mức giá; đó là lý do các sàn thật
-bảo vệ nó bằng các dải giá (price band), việc mà engine này để lại cho bên gọi.
+bảo vệ nó bằng biên độ giá (price band), và engine này cũng làm vậy khi có đặt
+biên độ (xem *Giới hạn rủi ro* ở trên).
 Lệnh **post-only** dành cho các nhà tạo lập thị trường (market maker), những người
 muốn chắc chắn rằng họ chỉ luôn *thêm* lệnh vào sổ (và thường được hưởng phí thấp
 hơn nhờ vậy): nếu lệnh sắp giao dịch ngay khi vừa đến, nó bị từ chối.
@@ -245,8 +269,10 @@ Một số lệnh bị từ chối trước khi chạm được vào sổ. Engin
 |-----------------------------------------------------------------------------------|----------------------|
 | số lượng bằng 0                                                                   | `ZeroQuantity`       |
 | id là `u64::MAX` (dành riêng cho nội bộ, xem [chương 5](05-hash-map.md))          | `ReservedOrderId`    |
-| tick từ 4096 trở lên                                                              | `PriceOutOfRange`    |
+| tick nằm ngoài phạm vi của engine (mặc định là từ 4096 trở lên)                   | `PriceOutOfRange`    |
 | cùng id với một lệnh vẫn đang chờ                                                 | `DuplicateOrderId`   |
+| số lượng vượt quá số lượng tối đa cho một lệnh của engine                         | `QuantityAboveLimit` |
+| mức giá vượt quá giá tốt nhất phía đối diện xa hơn mức mà biên độ giá cho phép    | `PriceOutsideBand`   |
 | kiểu post-only, và một mức giá sẽ giao dịch ngay                                  | `PostOnlyWouldTrade` |
 
 Một lệnh cũng có thể được chấp nhận và giao dịch bình thường, nhưng rồi **không
@@ -353,13 +379,14 @@ Sự kiện là cách engine nói chuyện với thế giới bên ngoài; xem
 | Post-only       | Một lệnh giới hạn bị từ chối nếu nó sẽ giao dịch ngay khi vừa đến        |
 | Tài khoản (account) | Ai đã đặt một lệnh; chống tự giao dịch và hủy hàng loạt dựa vào nó   |
 | Tự giao dịch (self-trade) | Giao dịch giữa hai lệnh của cùng một tài khoản; có thể được ngăn chặn |
+| Biên độ giá (price band) | Một lệnh được phép vươn xa tới đâu so với giá tốt nhất phía đối diện |
 | Marketable      | Có thể giao dịch ngay với phía đối diện                                  |
 | Maker           | Lệnh đang chờ trong một giao dịch                                        |
 | Taker           | Lệnh vừa đến trong một giao dịch                                         |
 | Mức giá (price level) | Tất cả các lệnh đang chờ ở cùng một giá                            |
 | Độ sâu (depth)  | Tổng số lượng có sẵn ở một mức giá (hoặc qua nhiều mức)                  |
 | Fill            | Một lần khớp; *khớp một phần* nghĩa là vẫn còn số lượng dư               |
-| Tick            | Bước giá nhỏ nhất; engine này dùng tick nguyên từ 0 đến 4095             |
+| Tick            | Bước giá nhỏ nhất; engine này dùng tick nguyên, mặc định từ 0 đến 4095  |
 | Ưu tiên giá-thời gian | Giá tốt hơn trước, rồi đến lệnh đến sớm hơn                        |
 | Arena           | Một mảng lớn cấp phát sẵn, nơi các đối tượng sống (chương 3)             |
 | Hot path        | Đoạn code chạy cho mọi lệnh; phần phải nhanh nhất                        |
