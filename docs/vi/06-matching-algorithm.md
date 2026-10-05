@@ -27,6 +27,7 @@ engine.best_ask();                 // Option<u32>
 engine.depth_at(side, tick);       // u64   total resting qty at one tick
 engine.depth_snapshot(side, n);    // Vec<(tick, qty)>  best n levels, best first
 engine.live_order_count();         // usize number of resting orders
+engine.resting_order(id);          // Option<RestingOrder>  side, tick, remaining qty
 ```
 
 Cả hai phương thức làm thay đổi sổ lệnh đều nhận event sink (nơi nhận sự kiện)
@@ -44,6 +45,7 @@ thẳng vào vòng lặp khớp lệnh. Ràng buộc `?Sized` còn cho phép tru
 | `depth_at` | không | không | O(1) |
 | `depth_snapshot` | không | **có** (`Vec`) | O(số tick phải quét); chỉ dùng để báo cáo |
 | `live_order_count` | không | không | O(1) |
+| `resting_order` | không | không | O(1) kỳ vọng: một lần tra bảng băm |
 
 ## 6.2 `process_order` gồm bốn giai đoạn
 
@@ -100,7 +102,7 @@ if let Err(reason) = self.validate(order_id, price_tick, qty) {
     sink.emit(Event::OrderRejected { order_id, reason });
     return;
 }
-sink.emit(Event::OrderAccepted { order_id });
+sink.emit(Event::OrderAccepted { order_id, side, price_tick, qty });
 ```
 
 | Kiểm tra | `RejectReason` | Lý do |
@@ -122,11 +124,11 @@ chỉ bằng một câu `if let`.
 ```rust
 match side {
     Side::Buy  => Self::match_incoming(&mut self.pool, &mut self.ask_levels,
-                      &mut self.ask_bitset, &mut self.id_map, order_id, price_tick,
-                      &mut remaining, sink, Crossing::TakerBuy),
+                      &mut self.ask_bitset, &mut self.id_map, &mut self.trades,
+                      order_id, price_tick, &mut remaining, sink, Crossing::TakerBuy),
     Side::Sell => Self::match_incoming(&mut self.pool, &mut self.bid_levels,
-                      &mut self.bid_bitset, &mut self.id_map, order_id, price_tick,
-                      &mut remaining, sink, Crossing::TakerSell),
+                      &mut self.bid_bitset, &mut self.id_map, &mut self.trades,
+                      order_id, price_tick, &mut remaining, sink, Crossing::TakerSell),
 }
 ```
 
@@ -138,6 +140,11 @@ trong enum `Crossing`:
 |---|---|---|
 | Giá tốt nhất phía đối diện | `bitset.lowest()` (ask rẻ nhất) | `bitset.highest()` (bid cao nhất) |
 | Có thể khớp ngay khi | `tick <= limit_price` | `tick >= limit_price` |
+| `taker_side` được báo trong `Trade` | `Side::Buy` | `Side::Sell` |
+
+`self.trades` là bộ đếm giao dịch của engine: `match_incoming` tăng nó thêm một
+sau mỗi giao dịch và ghi giá trị mới vào sự kiện làm `trade_id` của giao dịch đó
+(6.10).
 
 ## 6.3 `match_incoming`, trái tim của engine
 
@@ -196,8 +203,9 @@ let maker_qty       = pool.get(maker_idx).remaining_qty;
 let maker_order_id  = pool.get(maker_idx).order_id;
 let trade_qty       = (*remaining).min(maker_qty);     // the smaller of the two
 
-sink.emit(Event::Trade { maker_order_id, taker_order_id,
-                         price_tick: tick as u32, qty: trade_qty });
+*trades += 1;                                          // number this trade
+sink.emit(Event::Trade { trade_id: *trades, maker_order_id, taker_order_id,
+                         taker_side, price_tick: tick as u32, qty: trade_qty });
 *remaining -= trade_qty;
 
 if trade_qty == maker_qty {
@@ -328,14 +336,14 @@ bức tranh đầy đủ):
 
 | # | Điều gì xảy ra | Cấu trúc dữ liệu thay đổi | Sự kiện được phát | `remaining` |
 |---|---|---|---|---|
-| 0 | Kiểm tra hợp lệ: qty>0, id≠MAX, 102<4096, id 6 chưa dùng. | | `OrderAccepted{6}` | 14 |
+| 0 | Kiểm tra hợp lệ: qty>0, id≠MAX, 102<4096, id 6 chưa dùng. | | `OrderAccepted{6, Buy, 102, 14}` | 14 |
 | 1 | `ask_bitset.lowest()` = **101**. `101 <= 102` ✓ có thể khớp ngay. | | | 14 |
-| 2 | Phần tử đầu của `ask[101]` là ô 1 (`#2`, qty 3). `trade_qty = min(14,3) = 3`. | | `Trade{maker 2, taker 6, 101, 3}` | 11 |
+| 2 | Phần tử đầu của `ask[101]` là ô 1 (`#2`, qty 3). `trade_qty = min(14,3) = 3`. | | `Trade{id 1, maker 2, taker 6, Buy, 101, 3}` | 11 |
 | 3 | 3 == 3, nên `#2` khớp hết. | `ask[101]`: head → ô 2, count 1, total 4. `free(slot 1)`. `id_map.remove(2)`. | `OrderFilled{2}` | 11 |
-| 4 | Mức 101 chưa trống. Phần tử đầu là ô 2 (`#3`, qty 4). `trade_qty = min(11,4) = 4`. | | `Trade{maker 3, taker 6, 101, 4}` | 7 |
+| 4 | Mức 101 chưa trống. Phần tử đầu là ô 2 (`#3`, qty 4). `trade_qty = min(11,4) = 4`. | | `Trade{id 2, maker 3, taker 6, Buy, 101, 4}` | 7 |
 | 5 | 4 == 4, nên `#3` khớp hết. Mức giá giờ đã trống, nên bit của nó được xóa trước khi phát sự kiện. | `ask[101]` trống (head = tail = NIL, count 0, total 0). `free(slot 2)`. `id_map.remove(3)`. `ask_bitset.clear(101)`, giờ là `{102}`. | `OrderFilled{3}` | 7 |
 | 6 | Vòng trong kết thúc (mức giá trống, bit đã được xóa). | | | 7 |
-| 7 | Vòng ngoài: `lowest()` = **102**. `102 <= 102` ✓. Phần tử đầu của `ask[102]` là ô 0 (`#1`, qty 5). `trade_qty = min(7,5) = 5`. | | `Trade{maker 1, taker 6, 102, 5}` | 2 |
+| 7 | Vòng ngoài: `lowest()` = **102**. `102 <= 102` ✓. Phần tử đầu của `ask[102]` là ô 0 (`#1`, qty 5). `trade_qty = min(7,5) = 5`. | | `Trade{id 3, maker 1, taker 6, Buy, 102, 5}` | 2 |
 | 8 | 5 == 5, nên `#1` khớp hết; mức giá của nó cũng trống theo. | `ask[102]` trống. `free(slot 0)`. `id_map.remove(1)`. `ask_bitset.clear(102)`, giờ rỗng. | `OrderFilled{1}` | 2 |
 | 9 | Vòng trong kết thúc (mức giá trống, bit đã được xóa). | | | 2 |
 | 10 | Vòng ngoài: `lowest()` = `None` → dừng. | | | 2 |
@@ -361,8 +369,8 @@ gặp một ask ở giá 100 sẽ giao dịch ở giá 100:
 
 ```text
  process_order(1, Sell, 100, 5)
- process_order(2, Buy, 105, 5)   ->  OrderAccepted{2}
-                                     Trade{maker 1, taker 2, price_tick 100, qty 5}
+ process_order(2, Buy, 105, 5)   ->  OrderAccepted{2, Buy, price_tick 105, qty 5}
+                                     Trade{id 1, maker 1, taker 2, Buy, price_tick 100, qty 5}
                                      OrderFilled{1}
                                      OrderFilled{2}
 ```
@@ -376,7 +384,10 @@ tick 100 (`#1` rồi đến `#2`), và một lệnh mua 6. `#1` giao dịch trư
 
 ```rust
 pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
-    let Some(idx) = self.id_map.remove(order_id) else { return false; };
+    let Some(idx) = self.id_map.remove(order_id) else {
+        sink.emit(Event::CancelRejected { order_id });   // nothing to cancel: say so
+        return false;
+    };
     let order = *self.pool.get(idx);                     // copy it out (Order is Copy)
     match order.side {
         Side::Buy => {
@@ -387,7 +398,10 @@ pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut 
         Side::Sell => { /* same on the ask side */ }
     }
     self.pool.free(idx);
-    sink.emit(Event::OrderCancelled { order_id });       // every structure agrees by now
+    sink.emit(Event::OrderCancelled {                    // every structure agrees by now
+        order_id, side: order.side, price_tick: order.price_tick,
+        cancelled_qty: order.remaining_qty,
+    });
     true
 }
 ```
@@ -400,10 +414,17 @@ pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut 
 | Bỏ mức giá khỏi chỉ mục nếu giờ đã trống | `bitset.clear` | O(1) |
 | Trả ô về để dùng lại | `pool.free` | O(1) |
 
-Hủy một id **không tồn tại** hoặc **đã khớp hết** sẽ trả về `false` và không
-phát sự kiện nào. Đây không phải là lỗi. (Hãy thử hủy lệnh 4 hai lần trong ví dụ
-minh họa: lần đầu trả về `true` kèm `OrderCancelled`, lần sau trả về `false` và
-không có sự kiện nào.)
+Hủy một id **không tồn tại** hoặc **đã khớp hết** sẽ không đụng gì đến sổ, phát
+`CancelRejected` và trả về `false`. Việc phát một sự kiện, chứ không chỉ trả về
+`false`, có ý nghĩa với bất kỳ ai theo dõi engine chỉ qua các sự kiện của nó: mọi
+yêu cầu hủy đều để lại đúng một sự kiện. (Hãy thử hủy lệnh 4 hai lần trong ví dụ
+minh họa: lần đầu trả về `true` kèm `OrderCancelled`, lần sau trả về `false` kèm
+`CancelRejected`.)
+
+`OrderCancelled` sao chép phía, tick và số lượng còn lại ra khỏi bản ghi lệnh
+trước khi ô được free, nhờ vậy bên tiêu thụ biết mức giá nào bị mất bao nhiêu. Để
+đọc chính các field đó *mà không* hủy lệnh, hãy dùng `resting_order(id)`: cùng
+một lần tra `id_map`, rồi sao chép các field của lệnh vào một `RestingOrder`.
 
 ## 6.7 Các trường hợp biên, đã được kiểm chứng
 
@@ -418,7 +439,7 @@ không có sự kiện nào.)
 | Lệnh phải nằm chờ nhưng arena đã đầy | `[OrderAccepted, OrderRejected(BookFull)]` (không bao giờ có giao dịch đi trước, xem 6.4) | không có gì được đưa vào sổ |
 | Lệnh phải nằm chờ nhưng tổng số lượng của mức giá sẽ tràn `u64` | `[OrderAccepted, OrderRejected(LevelQuantityOverflow)]` | không có gì được đưa vào sổ; trạng thái không đổi |
 | Lệnh khớp hết hoàn toàn khi arena đã đầy | các lần khớp bình thường | không cần ô nào, nên vẫn thành công |
-| `cancel_order` với id không tồn tại | không có (trả về `false`) | không có |
+| `cancel_order` với một id không nằm chờ trong sổ | `[CancelRejected]` (trả về `false`) | không có |
 
 ## 6.8 Độ phức tạp
 
@@ -492,6 +513,14 @@ không bao giờ *đọc lại* giá trị này: ưu tiên về thời gian đ�
 danh sách liên kết**, chứ không phải từ việc so sánh các số sequence. Nó chỉ là
 metadata phục vụ kiểm toán (audit) hoặc gỡ lỗi. (Nó dùng `wrapping_add` nên
 không bao giờ panic.)
+
+**Bộ đếm `trades`.** Khác với `sequence`, bộ đếm này có được đọc: nó *chính là*
+`trade_id` của giao dịch gần nhất. Nó chỉ thay đổi bên trong vòng lặp khớp lệnh,
+vốn có tính tất định (deterministic), nên khi chạy lại (replay) cùng các yêu cầu
+đó thì mọi giao dịch đều được đánh số y như cũ, và phía sau có thể dùng các id
+này để phát hiện bản trùng lặp và chỗ bị hụt (chương 7). Một số `u64` tăng thêm
+một cho mỗi giao dịch thì trên thực tế không bao giờ tràn, nên nó dùng `+= 1`
+bình thường.
 
 **`#[inline(always)]` trên các accessor nhỏ xíu** (`best_bid`, `best_ask`,
 `live_order_count`, các accessor của bitset và pool) loại bỏ chi phí gọi hàm
