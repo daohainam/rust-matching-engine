@@ -7,12 +7,12 @@
 
 Đây là dự án học tập; nhìn thẳng vào những điểm còn hạn chế sẽ hữu ích hơn việc
 giả vờ rằng mọi thứ đều hoàn hảo. Các điểm dưới đây được xác định qua việc đọc
-code; những điểm có ghi chú đã được kiểm chứng bằng cách chạy chương trình.
+mã nguồn; những điểm được ghi chú đã được kiểm chứng bằng cách chạy chương trình.
 
-Chương này có ba phần. **11.1** liệt kê những gì còn thô ráp. **11.2** là một bộ
-bài tập xếp theo độ khó để bạn tự thử sức. **11.3** lần lại những lỗi mà các phiên
-bản trước từng có: mỗi lỗi được sửa trong một commit nhỏ mà bạn có thể đọc, và một
-số lỗi tự nó đã là bài tập hay.
+Chương này có ba phần. **11.1** liệt kê những điểm còn chưa hoàn thiện. **11.2**
+gồm các bài tập được xếp theo độ khó để bạn tự thử sức. **11.3** điểm lại những
+lỗi từng xuất hiện trong các phiên bản trước: mỗi lỗi đều được sửa trong một
+commit nhỏ mà bạn có thể xem lại, và một số lỗi cũng là những bài tập hay.
 
 ## 11.1 Giới hạn đã biết và những điểm dễ vấp
 
@@ -20,56 +20,56 @@ số lỗi tự nó đã là bài tập hay.
 
 | Ở đâu | Vấn đề | Mức độ | Chương |
 |---|---|---|---|
-| `wal.rs` | Các giới hạn về độ bền vững (durability): một lần flush thất bại là kết thúc, không cứu lại được; mục thư mục (directory entry) của tệp mới không được sync trên Unix; đĩa đầy biến thành `SIGBUS` trên Linux; `create` không atomic; hư hỏng ở giữa log bị coi như một đuôi bị ghi dở; và khóa writer chỉ chặn được các `WalWriter` khác, không chặn được các chương trình khác. | Trung bình nếu triển khai thật; ổn khi dùng để học, miễn là bạn biết chúng. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
-| `wal.rs` | Một log được ghi trước định dạng phiên bản 4 không ghi lại sức chứa của engine cho đến khi `open_append` ghi tiếp vào nó; tự tay phát lại (replay) nó với sức chứa sai thì vẫn cho ra một sổ lệnh khác. | Thấp: `replay` từ chối một log như vậy thay vì đoán. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
-| `events.rs` | Một `EventBatch` chỉ giữ 64 sự kiện cho mỗi lần gọi. Phần còn lại được đếm, nên việc mất sự kiện không còn âm thầm nữa, nhưng bạn phải kiểm tra `is_truncated()`. | Thấp: hãy kiểm tra nó, hoặc dùng một sink không giới hạn. | [7.4](07-events.md#74-chuyện-gì-xảy-ra-khi-có-quá-nhiều-sự-kiện) |
-| `engine.rs` | Một sink bị panic (và panic đó bị bắt lại) để lại sổ lệnh nhất quán nhưng yêu cầu chỉ được **áp dụng một phần**. | Thấp: dựng lại từ WAL; một binary build với `panic = "abort"` thì dừng hẳn (profile của chính bạn quyết định, [10.5](10-testing-and-performance.md#105-các-build-profile)). | [7.5](07-events.md#75-khi-sink-bị-panic) |
-| `ringbuffer.rs` | Thứ tự bộ nhớ (memory ordering) của nó được kiểm tra trên phần cứng ARM và bằng Miri, nhưng chỉ với những kịch bản xen kẽ giữa các luồng tình cờ xảy ra. | Thấp | [10.8](10-testing-and-performance.md#108-những-gì-test-không-bao-phủ) |
-| `hashmap.rs` | Seed chỉ bảo vệ khỏi các id được tạo cố ý để gây va chạm chừng nào nó còn bí mật; dùng `with_capacity_and_seed` với một seed đoán được thì mất luôn lớp bảo vệ này. | Thấp: engine luôn dùng seed ngẫu nhiên. | [5.7](05-hash-map.md#57-độ-phức-tạp) |
+| `wal.rs` | Các giới hạn về độ bền vững (durability): khi flush thất bại thì không thể khôi phục; mục ghi trong thư mục của tệp mới không được sync trên Unix; đĩa đầy có thể khiến tiến trình gặp `SIGBUS` trên Linux; `create` không bảo đảm tính nguyên tử; hư hỏng giữa log bị xử lý như đuôi log ghi dở; và khóa writer chỉ chặn các `WalWriter` khác, không chặn chương trình khác. | Trung bình nếu triển khai thực tế; có thể chấp nhận được khi dùng để học, miễn là bạn hiểu rõ các giới hạn này. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
+| `wal.rs` | Log theo định dạng trước phiên bản 4 không ghi lại sức chứa của engine cho đến khi `open_append` ghi tiếp vào log; nếu tự phát lại log với sức chứa không đúng, kết quả vẫn là một sổ lệnh khác. | Thấp: `replay` từ chối log như vậy thay vì đoán. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
+| `events.rs` | Một `EventBatch` chỉ giữ tối đa 64 sự kiện trong mỗi lần gọi. Số sự kiện còn lại vẫn được đếm, nên việc sự kiện bị loại bỏ không còn âm thầm, nhưng bạn phải kiểm tra `is_truncated()`. | Thấp: hãy kiểm tra giá trị này hoặc dùng một sink không giới hạn. | [7.4](07-events.md#74-chuyện-gì-xảy-ra-khi-có-quá-nhiều-sự-kiện) |
+| `engine.rs` | Nếu sink phát sinh panic (và panic đó được bắt lại), sổ lệnh vẫn nhất quán nhưng yêu cầu chỉ được **áp dụng một phần**. | Thấp: dựng lại từ WAL; binary được build với `panic = "abort"` sẽ dừng hẳn (điều này phụ thuộc vào profile của bạn, [10.5](10-testing-and-performance.md#105-các-build-profile)). | [7.5](07-events.md#75-khi-sink-bị-panic) |
+| `ringbuffer.rs` | Thứ tự bộ nhớ (memory ordering) của nó được kiểm tra trên phần cứng ARM và bằng Miri, nhưng phạm vi kiểm tra chỉ gồm những cách xen kẽ giữa các luồng thực sự xảy ra. | Thấp | [10.8](10-testing-and-performance.md#108-những-gì-test-không-bao-phủ) |
+| `hashmap.rs` | Seed chỉ bảo vệ khỏi các id được tạo có chủ đích để gây va chạm khi nó còn bí mật; dùng `with_capacity_and_seed` với seed có thể đoán được sẽ làm mất lớp bảo vệ này. | Thấp: engine luôn dùng seed ngẫu nhiên. | [5.7](05-hash-map.md#57-độ-phức-tạp) |
 
 ### Giới hạn do thiết kế (chủ ý, không phải lỗi)
 
 | Giới hạn | Chi tiết |
 |---|---|
-| **Số tick giá được chọn theo từng engine** | Mặc định là 4096, tối đa 2^24 với `Engine::with_ticks`; bộ nhớ tăng thêm khoảng 48 byte cho mỗi tick. Không có logic về kích thước tick hay độ lệch giá; phía gọi tự quy đổi. |
+| **Số tick giá cấu hình cho từng engine** | Mặc định là 4096, tối đa 2^24 với `Engine::with_ticks`; bộ nhớ tăng thêm khoảng 48 byte cho mỗi tick. Không có logic về kích thước tick hay độ lệch giá; phía gọi tự quy đổi. |
 | **Sức chứa lệnh cố định** | Được chọn trong `Engine::new`. Khi arena đầy, những lệnh cần nằm chờ trong sổ sẽ bị từ chối (lệnh khớp hết ngay thì vẫn thành công). |
 | **Bốn loại lệnh** | Lệnh giới hạn (limit), immediate-or-cancel, lệnh thị trường (market) và post-only. Không có fill-or-kill, stop, iceberg hay lệnh trong ngày. Có thể giảm số lượng ngay tại chỗ, nhưng tăng số lượng hay đổi giá thì phải hủy rồi đặt lệnh mới, và như vậy mất ưu tiên. Lệnh thị trường chỉ được bảo vệ khi có đặt biên độ giá (price band). |
 | **Giới hạn rủi ro áp dụng chung cho cả engine** | Một số lượng tối đa và một biên độ giá cho mọi lệnh. Biên độ được đo từ giá tốt nhất phía đối diện, nên nó không có tác dụng khi phía đó trống; không có giới hạn theo tài khoản, không có giá tham chiếu như giá của giao dịch gần nhất. |
-| **Tài khoản chỉ là nhãn** | Mỗi lệnh có một tài khoản, dùng cho việc chống tự giao dịch (self-trade prevention) và hủy hàng loạt. Không có giới hạn theo tài khoản (số lệnh đang mở, vị thế, hạn mức tín dụng), và engine không giữ danh sách lệnh của từng tài khoản, nên `cancel_account` phải duyệt qua cả sổ lệnh. |
+| **Tài khoản chỉ là nhãn** | Mỗi lệnh gắn với một tài khoản, được dùng để chống tự giao dịch (self-trade prevention) và hủy hàng loạt. Không có giới hạn theo tài khoản (số lệnh đang mở, vị thế, hạn mức tín dụng), và engine không lưu danh sách lệnh của từng tài khoản, nên `cancel_account` phải duyệt toàn bộ sổ lệnh. |
 | **Mỗi `Engine` chỉ có một mã giao dịch** | Muốn nhiều mã (symbol) thì chạy nhiều engine. |
-| **`Engine` không được nối sẵn với WAL hay bộ đệm vòng** | Phía gọi tự nối; [`examples/pipeline.rs`](../../examples/pipeline.rs) cho thấy cách làm, còn `WalRecord::apply_to`, `wal::replay` và `wal::replay_from` lo phần phát lại. `sequence` của WAL do phía gọi cấp và độc lập với bộ đếm riêng của engine. |
-| **Định dạng WAL còn nhỏ gọn** | Phiên bản 4 có header chứa sức chứa của engine, các trường little-endian tường minh, checksum cho từng bản ghi và một khóa writer, nhưng không có chính sách fsync riêng và không xoay vòng log (log rotation) ([9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal)). |
+| **`Engine` không tự kết nối với WAL hay bộ đệm vòng** | Việc kết nối do phía gọi đảm nhận; [`examples/pipeline.rs`](../../examples/pipeline.rs) minh họa cách làm, còn `WalRecord::apply_to`, `wal::replay` và `wal::replay_from` đảm nhiệm việc phát lại. `sequence` của WAL do phía gọi cấp và độc lập với bộ đếm riêng của engine. |
+| **Định dạng WAL còn tối giản** | Phiên bản 4 có header chứa sức chứa của engine, các trường little-endian được ghi tường minh, checksum cho từng bản ghi và khóa writer, nhưng không có chính sách fsync riêng hay cơ chế xoay vòng log (log rotation) ([9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal)). |
 | **Snapshot làm tạm dừng việc khớp lệnh** | `Engine::snapshot` duyệt qua cả sổ lệnh trên luồng khớp lệnh, nên một checkpoint làm chậm các yêu cầu xếp sau nó. Hãy chụp chúng giữa các yêu cầu, và đừng chụp quá thường xuyên (bài tập 17). |
-| **Lỗi thì phải kêu to** | `assert!`/`expect` trên các bất biến sẽ panic khi có lỗi sổ sách, ở mọi build profile. Với `panic = "abort"` (đã đặt trong release profile của repo này, và cũng cần đặt trong profile của binary *của bạn*, vì Cargo bỏ qua profile của dependency) thì tiến trình bị dừng hẳn. Đây là chủ ý, vì đây là một thành phần tài chính. |
+| **Lỗi phải được báo rõ ràng** | `assert!`/`expect` để kiểm tra các bất biến sẽ panic nếu phát hiện lỗi trong việc duy trì trạng thái sổ lệnh, ở mọi build profile. Với `panic = "abort"` (đã đặt trong release profile của repo này; binary *của bạn* cũng cần đặt profile tương tự vì Cargo bỏ qua profile của dependency), tiến trình sẽ dừng hẳn. Đây là chủ ý đối với một thành phần tài chính. |
 | **`depth_snapshot` khá chậm** | Nó cấp phát một `Vec` và quét tuyến tính qua các tick (đã ghi trong mã nguồn). Chỉ dùng cho báo cáo. |
 
 ### Ghi chú về hiệu năng (không phải khiếm khuyết)
 
-- `Order` nặng **48 byte**: không bằng một cache line, cũng không phải ước số của
-  64, nên nhiều bản ghi nằm vắt ngang hai cache line
+- `Order` chiếm **48 byte**: không vừa một cache line và cũng không phải ước số
+  của 64, nên nhiều bản ghi nằm vắt ngang hai cache line
   ([chương 3](03-order-pool.md#33-bản-ghi-order)).
 - `Order.sequence` được lưu nhưng không bao giờ được đọc. `Order.in_use` chỉ được
-  đọc bởi bước kiểm tra double free trong `OrderPool::free`. Cả hai đều tốn byte,
-  nhưng giúp ích cho việc gỡ lỗi và kiểm toán.
+  đọc trong bước kiểm tra double free của `OrderPool::free`. Cả hai trường đều
+  chiếm thêm bộ nhớ, nhưng hữu ích khi gỡ lỗi và kiểm toán.
 
 ## 11.2 Bài tập
 
-Độ khó: 🟢 khởi động · 🟡 một buổi chiều chắc tay · 🔴 một dự án thực thụ. Bài tập
-được xếp theo chủ đề; trong mỗi nhóm, bài đi từ dễ đến khó. Gợi ý cố ý viết ngắn,
-vì nguyên liệu đã nằm sẵn trong các chương.
+Độ khó: 🟢 khởi động · 🟡 cần một buổi chiều tập trung · 🔴 một dự án thực thụ.
+Bài tập được xếp theo chủ đề; trong mỗi nhóm, bài đi từ dễ đến khó. Gợi ý được
+giữ ngắn gọn vì các chương đã trình bày đủ kiến thức cần thiết.
 
-Hãy làm trên một branch (`git switch -c my-exercise`) để `main` giữ nguyên như các
-chương mô tả, và chạy `cargo test` thường xuyên. Bài nào cũng kết thúc bằng một
-dòng **Hoàn thành khi**: một test cần viết hoặc một kết quả cần thấy, để bạn biết
-mình đã xong.
+Hãy làm việc trên một nhánh riêng (`git switch -c my-exercise`) để nhánh `main`
+giữ nguyên trạng thái được mô tả trong các chương, và chạy `cargo test` thường
+xuyên. Bài nào cũng kết thúc bằng dòng **Hoàn thành khi** nêu một test cần viết
+hoặc một kết quả cần thấy, để bạn biết mình đã xong.
 
 ### Làm quen
 
-🟢 **1. `Engine::spread()`.** Hãy trả về `Option<u32>`: ask tốt nhất trừ bid tốt
-nhất, hoặc `None` nếu một trong hai phía trống. Hãy kiểm thử nó trên ví dụ minh
-họa ở chương 1.
+🟢 **1. `Engine::spread()`.** Hãy trả về `Option<u32>`: giá ask tốt nhất trừ giá
+bid tốt nhất, hoặc `None` nếu một trong hai phía trống. Hãy kiểm thử phương thức
+này trên ví dụ minh họa ở chương 1.
 
-**Hoàn thành khi:** một test chạy lại các bước 1 đến 5 của ví dụ minh họa và nhận
+**Hoàn thành khi:** một test phát lại các bước 1 đến 5 của ví dụ minh họa và nhận
 được `Some(1)` (ask 101, bid 100), đồng thời nhận được `None` cả với sổ lệnh trống
 lẫn sau bước 6, khi không còn ask nào.
 
@@ -81,17 +81,17 @@ lẫn sau bước 6, khi không còn ask nào.
 1, và một tick từ 4096 trở lên trả về 0 thay vì panic.
 
 🟢 **3. Vẽ các hàng đợi.** [`examples/walkthrough.rs`](../../examples/walkthrough.rs)
-in ra tổng số lượng ở mỗi mức giá. Hãy mở rộng nó để in hàng đợi lệnh của từng mức,
-giống các sơ đồ ở chương 1 (`[#2:3] -> [#3:4]`). *Gợi ý: đi từ `head -> next_idx`
-cho đến `NIL`; bạn sẽ cần mở quyền đọc các lệnh của một mức giá ra ngoài, ví dụ
-bằng một phương thức trả về iterator trên `Engine`.*
+in tổng số lượng ở mỗi mức giá. Hãy mở rộng ví dụ để nó in hàng đợi lệnh ở từng
+mức, như trong các sơ đồ ở chương 1 (`[#2:3] -> [#3:4]`). *Gợi ý: lần theo
+`head -> next_idx` cho đến `NIL`; bạn sẽ cần cung cấp quyền truy cập chỉ đọc vào
+các lệnh ở một mức giá, chẳng hạn bằng một phương thức iterator trên `Engine`.*
 
 **Hoàn thành khi:** sau bước 5, `cargo run --example walkthrough` in mức 101 dưới
 dạng `[#2:3] -> [#3:4]`, và `cargo test` vẫn qua.
 
-🟢 **4. Tận mắt xem sự kiện bị cắt bớt.** Hãy cho 40 lệnh bán, mỗi lệnh số lượng 1,
-nằm chờ ở cùng một mức giá, rồi quét sạch chúng bằng một lệnh mua số lượng 40 vào
-một `EventBatch`, và in ra `len()` và `dropped()`. Sau đó lặp lại với một
+🟢 **4. Tận mắt xem sự kiện bị cắt bớt.** Hãy để 40 lệnh bán, mỗi lệnh số lượng 1,
+nằm chờ ở cùng một mức giá, rồi dùng một lệnh mua số lượng 40 quét sạch chúng và
+ghi sự kiện vào một `EventBatch`. In `len()` và `dropped()`, sau đó lặp lại với một
 `Vec<Event>`. *So sánh với các unit test `bounded_batch_sink_reports_truncation`
 và `deep_sweep_reports_every_execution`.*
 
@@ -101,12 +101,13 @@ khớp của taker).
 
 ### Hiểu sâu phần bên trong
 
-🟡 **5. Thu nhỏ `Order`.** `Order` nặng 48 byte, còn các trường của nó cộng lại là
-42 byte, nên sắp xếp lại thứ tự trường chẳng giúp được gì: 48 là bội số kế tiếp của
-8 (xem [3.3](03-order-pool.md#33-bản-ghi-order)). Phải bỏ bớt một thứ gì đó. Ứng
-viên hiển nhiên là `sequence`, trường mà không ai đọc: hãy bỏ nó (cùng bộ đếm của
-engine vốn chỉ để cấp giá trị cho nó), và sửa test kích thước trong `pool.rs` thành
-40. Sau đó thử `#[repr(C, align(64))]` trên bản gốc, và benchmark cả hai cách so
+🟡 **5. Thu nhỏ `Order`.** `Order` chiếm 48 byte, còn các trường của nó cộng lại
+là 42 byte, nên sắp xếp lại thứ tự trường cũng không giúp được gì: 48 là bội số
+kế tiếp của 8 (xem [3.3](03-order-pool.md#33-bản-ghi-order)). Cần loại bỏ một
+trường; ứng viên rõ nhất là `sequence`, vì không có chỗ nào đọc đến nó. Hãy bỏ
+trường đó (cùng bộ đếm của engine vốn chỉ dùng để cấp giá trị cho nó), rồi sửa
+test kích thước trong `pool.rs` thành 40. Sau đó thử `#[repr(C, align(64))]` trên
+bản gốc, và benchmark cả hai cách so
 với bản gốc. *Cách nào thắng, và kết quả có phụ thuộc vào kích thước của sổ lệnh
 không?*
 
@@ -126,7 +127,8 @@ tuyến tính cũ bằng các bitset ngẫu nhiên.
 trên hàng nghìn bitset ngẫu nhiên, và `cargo test --test model_check` vẫn qua.
 
 🟡 **7. Seed tốn bao nhiêu?** Bảng băm trộn một seed bí mật vào mọi giá trị băm
-(chương 5). Hãy viết một benchmark criterion cho `get` trên một bảng khá đầy, rồi
+(chương 5). Hãy viết benchmark Criterion cho `get` trên một bảng băm đã được lấp
+khá đầy, rồi
 làm một bản sao của `FlatHashMap` không có seed, và so sánh hai bên. *Gợi ý: đặt
 bản sao trong tệp benchmark, không đặt trong `src/`, để engine vẫn giữ được lớp
 bảo vệ.*
@@ -136,10 +138,11 @@ lệch có lớn hơn độ nhiễu giữa các lần chạy mà criterion báo 
 
 ### Tính năng mới
 
-🟡 **8. Lệnh fill-or-kill.** Hãy thêm `OrderType::FillOrKill`: lệnh giao dịch toàn
-bộ số lượng của nó ngay một lần, hoặc không giao dịch gì cả. "Không gì cả" nghĩa là
-sổ lệnh phải còn nguyên, nên engine phải biết *trước giao dịch đầu tiên* rằng có đủ
-số lượng đang nằm chờ ở những mức giá mà lệnh chấp nhận hay không. Sau đó hãy quyết
+🟡 **8. Lệnh fill-or-kill.** Hãy thêm `OrderType::FillOrKill`: lệnh phải khớp
+toàn bộ số lượng ngay lập tức, nếu không thì không khớp gì cả. Trong trường hợp
+không khớp, sổ lệnh phải còn nguyên, nên engine cần biết *trước giao dịch đầu tiên*
+rằng tổng khối lượng đang chờ ở các mức giá mà lệnh chấp nhận có đủ hay không. Sau
+đó, hãy quyết
 định một lệnh bị hủy bỏ (killed) được báo cáo thế nào: bị từ chối trước khi được
 chấp nhận (giống lệnh post-only), hay được chấp nhận rồi hết hạn (giống lệnh IOC)?
 *Gợi ý: đi qua các mức giá phía đối diện, từ mức tốt nhất, cộng dồn `total_qty`, và
@@ -148,41 +151,42 @@ dừng ngay khi tổng đạt `qty` hoặc khi mức giá kế tiếp không cò
 nhanh hơn. Nhớ rằng byte loại lệnh trong WAL cần một giá trị mới.*
 
 **Hoàn thành khi:** các test cho thấy một lệnh fill-or-kill khớp hết khi có đủ số
-lượng, và một lệnh bị hủy bỏ mà không có giao dịch nào và độ sâu không đổi khi
-không đủ, đồng thời `model_check` vẫn qua khi bộ sinh dữ liệu có cả lệnh
+lượng; nếu không đủ, lệnh bị hủy mà không phát sinh giao dịch và độ sâu không đổi.
+Đồng thời, `model_check` vẫn qua khi bộ sinh dữ liệu có cả lệnh
 fill-or-kill.
 
 🟡 **9. Biên độ quanh giao dịch gần nhất.** Biên độ giá được đo từ giá tốt nhất
 phía đối diện, nên nó biến mất khi phía đó trống, và nó dịch chuyển mỗi khi chỉ một
 lệnh làm thay đổi giá tốt nhất. Các sàn giao dịch thường đo nó từ một **giá tham
 chiếu** (reference price), chẳng hạn giá của giao dịch gần nhất. Hãy thêm lựa chọn
-đó. *Gợi ý: engine cần thêm một trạng thái nữa, giá của giao dịch gần nhất, mà
-`match_incoming` biết mỗi khi nó phát ra một `Trade`. Đã là trạng thái thì nó phải
-được đưa vào snapshot, kéo theo cả định dạng checkpoint; WAL không cần gì mới, vì
-một lần phát lại sẽ tự tính lại giao dịch gần nhất.*
+đó. *Gợi ý: engine cần lưu thêm giá giao dịch gần nhất; `match_incoming` biết giá
+này mỗi khi phát ra một `Trade`. Vì đây là trạng thái của engine, nó cũng phải
+được đưa vào snapshot, đồng nghĩa định dạng checkpoint cần thay đổi. WAL không cần
+thêm gì, vì phát lại sẽ tự tính lại giá giao dịch gần nhất.*
 
 **Hoàn thành khi:** với biên độ 5 quanh giao dịch gần nhất ở 100, một lệnh mua ở
 106 bị từ chối ngay cả khi phía ask trống, và `tests/snapshot.rs` vẫn qua.
 
 🟡 **10. Sửa lệnh (amend): đổi giá hoặc tăng số lượng.** `reduce_order` giữ được ưu
-tiên vì lệnh nhỏ đi. Hãy thêm `amend_order(id, new_price_tick, new_qty)` cho mọi
-thay đổi khác: nó giữ nguyên vị trí của lệnh khi chỉ có số lượng giảm xuống ở cùng
-mức giá, còn lại thì hoạt động như hủy rồi đặt lệnh mới, đứng cuối hàng đợi, và
-thậm chí có thể giao dịch nếu giá mới khớp được. *Gợi ý: giao trường hợp đầu tiên
-cho `reduce_order`. Về sự kiện, hãy giữ quy tắc ở mục 7.2 rằng một consumer có thể
-theo dõi sổ lệnh chỉ từ các sự kiện: `OrderCancelled` rồi `OrderAccepted` đã đủ
-chưa, hay việc sửa lệnh xứng đáng có một sự kiện riêng? WAL cần một loại bản ghi
-mới.*
+tiên vì lệnh giảm số lượng. Hãy thêm `amend_order(id, new_price_tick, new_qty)` để
+xử lý mọi thay đổi khác: lệnh giữ nguyên vị trí nếu chỉ giảm số lượng ở cùng mức
+giá; trong các trường hợp còn lại, thao tác tương đương với hủy lệnh cũ rồi đặt
+lệnh mới ở cuối hàng đợi, và lệnh mới thậm chí có thể khớp nếu giá thay đổi khiến
+nó vượt spread. *Gợi ý: dùng `reduce_order` để xử lý trường hợp đầu tiên. Về sự kiện, hãy tuân
+theo quy tắc ở mục 7.2: consumer phải có thể dựng lại sổ lệnh chỉ từ các sự kiện.
+Liệu `OrderCancelled` rồi `OrderAccepted` đã đủ, hay việc sửa lệnh xứng đáng có
+một sự kiện riêng? WAL cần một loại bản ghi mới.*
 
 **Hoàn thành khi:** các test cho thấy giảm số lượng thì giữ ưu tiên, tăng số lượng
 thì mất ưu tiên, và dời giá sang bên kia spread thì có giao dịch; `model_check`
 cũng gửi cả các yêu cầu sửa lệnh.
 
-🔴 **11. Danh sách lệnh theo từng tài khoản.** `cancel_account` duyệt qua cả sổ
-lệnh, nên việc hủy hai lệnh của một trader có thể đồng nghĩa với quét hàng nghìn
-tick. Hãy cho mỗi tài khoản một danh sách liên kết đôi intrusive riêng xuyên qua
-arena, giống hệt hàng đợi của một mức giá, để `cancel_account` chỉ chạm vào các
-lệnh của tài khoản đó. *Gợi ý: mỗi `Order` cần thêm hai liên kết `u32` (hãy để ý
+🔴 **11. Danh sách lệnh theo từng tài khoản.** `cancel_account` duyệt toàn bộ sổ
+lệnh, nên hủy hai lệnh của một trader cũng có thể phải quét hàng nghìn tick. Hãy
+dùng các liên kết của từng lệnh trong arena để tạo một danh sách liên kết đôi
+intrusive riêng cho mỗi tài khoản, tương tự hàng đợi của một mức giá, để `cancel_account`
+chỉ duyệt các lệnh của tài khoản đó. *Gợi ý: mỗi `Order` cần thêm hai liên kết
+`u32` (hãy để ý
 điều đó ảnh hưởng thế nào đến kích thước của nó, chương 3), và engine cần một bảng
 kích thước cố định ánh xạ từ tài khoản đến đầu danh sách; bảng băm phẳng ở chương
 5 có thể chứa nó. Mọi chỗ mà một lệnh đi vào hay rời khỏi sổ lệnh đều phải cập nhật
@@ -190,9 +194,9 @@ danh sách: nằm chờ, khớp lệnh, hủy lệnh, giảm số lượng về 
 Hãy giữ nguyên thứ tự của các lần hủy, hoặc sửa sổ lệnh tham chiếu trong
 `model_check` cho khớp.*
 
-**Hoàn thành khi:** `model_check` vẫn qua, và một benchmark cho thấy
-`cancel_account` trên một tài khoản có vài lệnh tốn khoảng như nhau trong một sổ
-lệnh có 100 hay 100,000 lệnh.
+**Hoàn thành khi:** `model_check` vẫn qua, và benchmark cho thấy thời gian
+`cancel_account` của một tài khoản có vài lệnh gần như không đổi giữa sổ lệnh có
+100 và 100,000 lệnh.
 
 ### Kỹ thuật và kiểm chứng
 
@@ -221,9 +225,9 @@ thang giá, và nói được trong hai câu rằng bao nhiêu phần của kho�
 cache miss.
 
 🔴 **14. Chia shard theo mã giao dịch.** Hãy chạy bốn `Engine` trên bốn luồng, mỗi
-engine được nuôi bởi bộ đệm vòng riêng, định tuyến yêu cầu theo id của mã giao dịch
-(symbol id). Hãy kiểm chứng rằng các sổ lệnh độc lập với nhau và thông lượng tăng
-theo số shard. *Gợi ý: bắt đầu từ
+engine nhận yêu cầu từ một bộ đệm vòng riêng, định tuyến yêu cầu theo id của mã
+giao dịch (symbol id). Hãy kiểm chứng rằng các sổ lệnh độc lập với nhau và thông
+lượng tăng theo số shard. *Gợi ý: bắt đầu từ
 [`examples/pipeline.rs`](../../examples/pipeline.rs). Cho gateway mỗi shard một
 `Producer` và chọn nó bằng `symbol % 4`; mỗi luồng khớp lệnh giữ `Engine` riêng và
 tệp WAL riêng. Để kiểm tra tính độc lập, hãy phát lại log của từng shard riêng rẽ
@@ -254,11 +258,12 @@ tệp log mới ở mỗi checkpoint, để các tệp cũ có thể được l�
 ý: đặt tên mỗi log theo số thứ tự đầu tiên mà nó chứa, ví dụ
 `wal-00000000000000005001.log`; khi một checkpoint được ghi với `next_sequence` là
 N, hãy finalize log hiện tại và `create` `wal-N`. Quá trình phục hồi đọc checkpoint
-mới nhất và phát lại các log từ đó trở đi bằng `replay_from`. Chỉ xóa một log khi
-phía downstream đã nhận đủ mọi sự kiện mà nó sinh ra (9.5).*
+mới nhất rồi dùng `replay_from` để phát lại các log tiếp theo. Chỉ xóa log khi hệ
+thống downstream đã nhận đủ mọi sự kiện do log đó tạo ra (9.5).*
 
-**Hoàn thành khi:** một test ghi ba checkpoint, sập (drop mọi thứ) rồi phục hồi,
-đạt đúng sổ lệnh đang chạy trong khi chỉ đọc checkpoint mới nhất và các log sau nó.
+**Hoàn thành khi:** một test ghi ba checkpoint, sập (drop mọi thứ) rồi phục hồi
+đúng trạng thái sổ lệnh hiện tại, trong khi chỉ đọc checkpoint mới nhất và các
+log sau checkpoint đó.
 
 🔴 **17. Checkpoint mà không tạm dừng việc khớp lệnh.** `Engine::snapshot` chạy trên
 luồng khớp lệnh và duyệt qua cả sổ lệnh. Thay vào đó, hãy chụp snapshot trên một
@@ -270,7 +275,7 @@ thoảng, ghi một checkpoint kèm số thứ tự mà nó đã đạt tới.*
 
 **Hoàn thành khi:** một benchmark cho thấy độ trễ của luồng khớp lệnh không đổi
 trong khi engine bóng ghi checkpoint, và việc phục hồi từ checkpoint của engine
-bóng đạt đúng sổ lệnh của engine chính.
+bóng tái tạo được sổ lệnh của engine chính.
 
 🔴 **18. `create` atomic.** Hãy ghi header vào `path.tmp`, sync, đổi tên thành
 `path`, rồi sync thư mục cha (trên Unix). Với từng bước, hãy giải thích nếu máy sập
@@ -297,21 +302,21 @@ thường sau một vụ sập) với hư hỏng ở giữa (có những bản g
 bản ghi hỏng), và quyết định mỗi trường hợp nên xử lý thế nào. *Gợi ý: hãy nhìn vào
 các số thứ tự (sequence number).*
 
-**Hoàn thành khi:** một test có một bản ghi hỏng theo sau bởi các bản ghi hợp lệ
-nhận được kết quả theo chính sách của bạn (ví dụ một lỗi) thay vì lặng lẽ mất các
-bản ghi hợp lệ, trong khi đuôi bị ghi dở vẫn được phục hồi như trước.
+**Hoàn thành khi:** một test có bản ghi hỏng theo sau bởi các bản ghi hợp lệ cho
+kết quả đúng theo chính sách của bạn (ví dụ trả về lỗi), thay vì âm thầm loại bỏ
+các bản ghi hợp lệ; trong khi đó, đuôi bị ghi dở vẫn được phục hồi như trước.
 
 ## 11.3 Lần theo các bản sửa lỗi
 
 Các phiên bản trước của repo này từng có lỗi thật. Mỗi lỗi được sửa trong một
-commit nhỏ, tập trung, và đọc các commit đó là một trong những bài học hay nhất mà
-repo mang lại: chạy `git show` trên một bản sửa sẽ cho bạn thấy lỗi, thay đổi và
+commit nhỏ, tập trung; đọc các commit đó là một trong những bài học hay nhất mà
+repo mang lại. Chạy `git show` trên một bản sửa sẽ cho bạn thấy lỗi, thay đổi và
 test chứng minh thay đổi đó đúng.
 
 ### Bài tập đã có lời giải: hãy thử trước khi đọc bản sửa
 
-Những bài này ban đầu là bài tập, và về sau đã được làm xong trong code. Để tự thử
-một bài, hãy quay về phiên bản trước các bản sửa, giải bài ở đó, rồi so sánh với
+Những bài này ban đầu là bài tập và về sau đã được hoàn thành trong mã nguồn. Để
+tự thử một bài, hãy quay về phiên bản trước các bản sửa, giải bài ở đó, rồi so sánh với
 commit được nêu tên:
 
 ```sh
@@ -322,13 +327,13 @@ git show <hash>                                      # compare with your solutio
 git switch main                                      # come back (stash or commit your work first)
 ```
 
-`a192ebc` có **API cũ**, nên các chương (vốn mô tả code hiện tại) sẽ không khớp
+`a192ebc` có **API cũ**, nên các chương (vốn mô tả mã nguồn hiện tại) sẽ không khớp
 hoàn toàn với nó; hãy dùng các chương để lấy ý tưởng. Các bài R7 đến R14 được giải
 muộn hơn nhiều: hãy bắt đầu chúng từ commit ngay trước commit được nêu tên
 (`git switch --detach <hash>~1`).
 
 🟢 **R1. Cờ báo tràn.** Hãy làm cho batch sự kiện kích thước cố định ngày xưa ghi
-nhận việc có sự kiện nào bị bỏ rơi hay không. *Đã được giải bằng
+nhận xem có sự kiện nào bị loại bỏ hay không. *Đã được giải bằng
 `fix(events)!: stream execution reports through a caller-supplied sink`, dưới dạng
 `dropped()` và `is_truncated()`.*
 
@@ -348,14 +353,14 @@ riêng cho mỗi instance. *Đã được giải bằng
 `fix(ringbuffer)!: enforce SPSC roles with Producer/Consumer handles`; hãy để ý cách
 các doctest `compile_fail` kiểm tra sự bảo đảm này.*
 
-🔴 **R5. Kiểm thử đối chiếu (differential testing).** Hãy so sánh engine với một sổ
-lệnh tham chiếu chậm nhưng hiển nhiên đúng, trên các chuỗi yêu cầu ngẫu nhiên dài.
+🔴 **R5. Kiểm thử đối chiếu (differential testing).** Hãy so sánh engine với một
+bản cài đặt tham chiếu đơn giản, chậm nhưng rõ ràng đúng, trên các chuỗi yêu cầu ngẫu nhiên dài.
 *Đã được giải bằng `test: model-based engine check and WAL replay determinism`
 (mục 10.2). Bài tập 12 là bước tiếp theo.*
 
-🔴 **R6. Gia cố WAL.** Một header có magic number và phiên bản, một checksum cho
-mỗi bản ghi, các trường little-endian để chạy được trên mọi nền tảng, và một hàm
-khởi tạo mở log để ghi nối tiếp. *Đã được giải bằng
+🔴 **R6. Gia cố WAL.** Một header có magic number và phiên bản, checksum cho từng
+bản ghi, các trường được mã hóa theo thứ tự byte little-endian để log dùng được
+trên mọi nền tảng, và hàm khởi tạo để mở log ghi nối tiếp. *Đã được giải bằng
 `fix(wal)!: sound, portable, crash-safe log format`. Các giới hạn còn lại đã trở
 thành R11, R12 và các bài tập 18 đến 20.*
 
@@ -383,8 +388,8 @@ giao dịch với lệnh đang chờ của chính tài khoản đó, hãy áp d�
 lệnh đang chờ, hủy lệnh mới đến, hoặc hủy cả hai) và phát ra các sự kiện tương ứng.
 *Đã được giải bằng `feat(engine): give every order an account` và
 `feat(engine): add self-trade prevention`. Hãy xem phần kiểm tra nằm ở đâu trong
-vòng lặp trong của `match_incoming`, và maker bị hủy rời khỏi sổ lệnh theo đúng các
-bước của một lần khớp hết như thế nào. Hủy hàng loạt, tính năng cũng cần đến tài
+vòng lặp bên trong của `match_incoming`, và cách maker bị hủy được loại khỏi sổ
+bằng đúng các bước như khi khớp hết. Hủy hàng loạt, tính năng cũng cần đến tài
 khoản, đến ngay sau đó trong
 `feat(engine): cancel every order of an account, or the whole book`; bài tập 11 làm
 cho nó nhanh hơn.*
@@ -399,8 +404,8 @@ thông tin đó, nên quá trình phục hồi không thể chọn nhầm sức 
 🟡 **R12. Mỗi tệp một writer.** Hãy lấy khóa độc quyền bằng `File::try_lock`, và
 kiểm thử rằng writer thứ hai nhận một lỗi rõ ràng thay vì làm hỏng log. *Đã được
 giải bằng `feat(wal): refuse a second writer with a lock file`. Commit này khóa một
-tệp đi kèm chứ không khóa chính log: commit message của nó giải thích Windows sẽ
-làm gì nếu khác đi. Checkpoint, nửa còn lại của câu chuyện phục hồi, đến ngay sau
+tệp đi kèm chứ không khóa chính log: commit message giải thích vì sao trên Windows
+không khóa trực tiếp tệp log. Checkpoint, nửa còn lại của câu chuyện phục hồi, đến ngay sau
 đó, trong `feat(engine): snapshot and restore the book` và hai commit theo sau nó;
 các bài tập 16 và 17 xây dựng trên nền đó.*
 

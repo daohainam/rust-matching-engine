@@ -9,17 +9,17 @@ Nguồn: [`src/hashmap.rs`](../../src/hashmap.rs)
 
 ## 5.1 Vì sao ta cần nó?
 
-Khi khớp lệnh, engine không cần bảng này để *tìm* một lệnh: nó lấy lệnh thẳng từ
-đầu hàng đợi của mức giá (chỉ đến sau đó mới xóa từng maker đã khớp hết khỏi
-bảng). **Hủy lệnh thì cần đến nó.** Một client nói *"hủy lệnh 12345"*, và engine
-phải tìm ra lệnh 12345 đang nằm ở đâu trong arena mà không được quét cả sổ lệnh.
+Khi khớp lệnh, engine không cần bảng này để *tìm* lệnh: nó lấy lệnh trực tiếp từ
+đầu hàng đợi của mức giá (chỉ sau đó mới xóa từng maker đã khớp hết khỏi bảng).
+**Hủy lệnh thì cần đến bảng này.** Client có thể gửi yêu cầu *"hủy lệnh 12345"*,
+khi đó engine phải tìm lệnh 12345 trong arena mà không quét toàn bộ sổ lệnh.
 
 ```text
    cancel_order(12345)  ->  id_map.remove(12345)  ->  ô arena 987  ->  gỡ nó khỏi danh sách
 ```
 
-Cũng chính bảng này lo việc **phát hiện lệnh trùng id**: trước khi nhận một lệnh,
-engine hỏi `id_map.get(order_id).is_some()` và từ chối id đã được dùng rồi.
+Bảng này còn giúp **phát hiện lệnh trùng id**: trước khi nhận một lệnh, engine
+kiểm tra `id_map.get(order_id).is_some()` và từ chối nếu id đó đang được dùng.
 
 ## 5.2 Vì sao không dùng `std::collections::HashMap`?
 
@@ -40,9 +40,9 @@ của ta.
 ## 5.3 Địa chỉ mở với dò tuyến tính
 
 Bảng băm kiểu *nối chuỗi riêng* (separate chaining) giữ một danh sách cho mỗi
-bucket. Bảng **địa chỉ mở** (open addressing) thì lưu mọi thứ **thẳng trong một
-mảng phẳng**; nếu một ô (slot) đã có người, nó nhìn sang ô kế tiếp. Biến thể này
-gọi là **dò tuyến tính** (linear probing).
+bucket. Bảng **địa chỉ mở** (open addressing) lưu mọi phần tử **trực tiếp trong
+một mảng phẳng**; nếu một ô (slot) đã bị chiếm, nó thử ô kế tiếp. Biến thể này
+được gọi là **dò tuyến tính** (linear probing).
 
 ```rust
 struct Slot { key: u64, value: u32 }       // 16 bytes (with padding)
@@ -55,12 +55,12 @@ pub struct FlatHashMap {
 }
 ```
 
-Một ô chưa có ai dùng có `key == u64::MAX` (gọi là `EMPTY` / `RESERVED_KEY`).
+Một ô trống có `key == u64::MAX` (gọi là `EMPTY` / `RESERVED_KEY`).
 Nghĩa là `u64::MAX` không bao giờ được làm id của một lệnh thật (xem thêm ở 5.8).
 
 ### Chèn và tra cứu qua ví dụ
 
-> Bốn khóa dưới đây là bịa ra, và "ô lý tưởng" (ideal slot) của chúng được chọn
+> Bốn khóa dưới đây là giả lập; "ô lý tưởng" (ideal slot) của chúng được chọn
 > để cố tình *va chạm*. Hàm băm thật rải các khóa theo kiểu khác, nhưng cơ chế
 > thì y hệt.
 
@@ -75,9 +75,9 @@ lượt là `A→2`, `B→2`, `C→3`, `D→2`.
           [   ][   ][ A ][ B ][ C ][ D ][   ][   ]     chèn D: ô 2, 3, 4 đã bị chiếm, thử 5    -> ô 5
 ```
 
-**Tra cứu** lặp lại đúng hành trình đó: bắt đầu ở ô lý tưởng rồi bước tiếp về
-phía trước, cho đến khi tìm thấy khóa (**hit**) hoặc gặp một ô `EMPTY` (**miss**:
-khóa không thể nằm xa hơn nữa, vì nếu có thì nó đã được đặt vào chính ô trống
+**Tra cứu** lặp lại đúng hành trình đó: bắt đầu ở ô lý tưởng rồi lần lượt tiến
+qua các ô kế tiếp cho đến khi tìm thấy khóa (**hit**) hoặc gặp một ô `EMPTY`
+(**miss**: khóa không thể nằm xa hơn, vì nếu có thì nó đã được đặt vào ô trống
 đó).
 
 ```text
@@ -102,9 +102,10 @@ pub fn get(&self, key: u64) -> Option<u32> {
 > [!WARNING]
 > Vòng lặp này chỉ dừng được nếu bảng luôn có **ít nhất một ô `EMPTY`**. Một
 > bảng đầy hoàn toàn sẽ khiến việc tra một khóa không tồn tại quay vòng mãi mãi.
-> Cách định cỡ của engine chừa rất nhiều ô trống (5.5), và `insert` bắt buộc mức
+> Cách định cỡ của engine chừa nhiều ô trống (5.5), và `insert` bắt buộc mức
 > tối thiểu đó cho *bất kỳ ai* dùng bảng: nó panic thay vì lấp ô trống cuối
-> cùng. Một lần panic ồn ào dễ gỡ lỗi hơn nhiều so với một vụ treo im lặng.
+> cùng. Panic rõ ràng dễ gỡ lỗi hơn nhiều so với một vòng lặp treo mà không báo
+> lỗi.
 
 ## 5.4 Hai mẹo: kích thước lũy thừa của hai và hàm băm tốt
 
@@ -153,9 +154,10 @@ let capacity = (capacity_hint.max(16) * 2).next_power_of_two();
 ```
 
 Bảng có **số ô ít nhất gấp đôi số phần tử tối đa** (làm tròn lên thành lũy thừa
-của hai). Vì vậy hệ số tải (load factor), tức số phần tử ÷ số ô, không bao giờ
-vượt quá **50%**. Và khi engine có sức chứa từ 16 lệnh trở lên, hệ số này vẫn
-trên 25% lúc sổ đầy hoàn toàn (còn khi sổ mới đầy một phần thì thấp hơn):
+của hai). Vì vậy hệ số tải (load factor), tức số phần tử chia cho số ô, không
+bao giờ vượt quá **50%**. Khi engine có sức chứa từ 16 lệnh trở lên, hệ số tải
+vẫn trên 25% ngay cả khi sổ đầy hoàn toàn (nếu sổ mới đầy một phần thì hệ số
+này còn thấp hơn):
 
 | `order_capacity` | `slots` | hệ số tải khi đầy |
 |---|---|---|
@@ -163,21 +165,22 @@ trên 25% lúc sổ đầy hoàn toàn (còn khi sổ mới đầy một phần 
 | 16,384 | 32,768 | 50% |
 | 16,385 | 65,536 | 25% |
 
-Số phần tử cũng không bao giờ vượt quá `order_capacity`, vì engine chỉ chèn vào
+Số phần tử không bao giờ vượt quá `order_capacity`, vì engine chỉ chèn vào
 `id_map` **sau khi** `pool.allocate` thành công, mà pool chứa tối đa
-`order_capacity` lệnh. Cho nên bảng luôn có thật nhiều ô trống.
+`order_capacity` lệnh. Vì vậy bảng luôn có nhiều ô trống.
 
-Có hai chốt chặn giúp bảng an toàn ngay cả khi được dùng riêng lẻ:
+Có hai cơ chế bảo vệ bảng ngay cả khi nó được dùng riêng lẻ:
 
 - Phép tính kích thước dùng số học có kiểm tra (`checked_mul(2)`, rồi
-  `checked_next_power_of_two()`). Một gợi ý (hint) vô lý sẽ panic với thông báo
-  "hash map capacity overflows usize", thay vì tràn số rồi thành một bảng bé tí
-  trong bản release, nơi các kiểm tra tràn số bị tắt.
+  `checked_next_power_of_two()`). Giá trị gợi ý (hint) không hợp lệ sẽ gây panic
+  với thông báo "hash map capacity overflows usize", thay vì tràn số rồi tạo ra
+  một bảng quá nhỏ trong bản build release, nơi kiểm tra tràn số bị tắt.
 - `insert` panic với thông báo "FlatHashMap is full" thay vì lấp ô trống cuối
   cùng, nên các vòng dò ở 5.3 luôn dừng được.
 
-Vì sao phải để bảng thưa như vậy? Dò tuyến tính xuống cấp rất nhanh khi bảng đầy
-dần. Ước lượng kinh điển (của Knuth) về số lần dò trung bình ở hệ số tải `α`:
+Vì sao phải để bảng thưa như vậy? Dò tuyến tính chậm đi nhanh chóng khi bảng đầy
+dần. Dưới đây là ước lượng kinh điển (của Knuth) về số lần dò trung bình ở hệ
+số tải `α`:
 
 | Hệ số tải `α` | Hit (tìm thấy) | Miss (không thấy) |
 |---|---|---|
@@ -185,16 +188,17 @@ dần. Ước lượng kinh điển (của Knuth) về số lần dò trung bìn
 | 50% | 1.5 | 2.5 |
 | 90% | 5.5 | 50.5 |
 
-Để trống một nửa là sự đánh đổi tốt giữa bộ nhớ và tốc độ: một lần hủy lệnh
-thường chỉ tốn một hoặc hai lần dò, trong một hoặc hai cache line liền kề.
+Để trống một nửa là sự đánh đổi hợp lý giữa bộ nhớ và tốc độ: một lần hủy lệnh
+thường chỉ cần một hoặc hai lần dò trong một hoặc hai cache line liền kề.
 
 ## 5.6 Xóa: phần khó
 
-Chèn và tra cứu thì dễ. **Xóa** mới là chỗ địa chỉ mở trở nên rắc rối.
+Chèn và tra cứu khá đơn giản. **Xóa** mới là thao tác khiến địa chỉ mở trở nên
+phức tạp.
 
 ### Cách ngây thơ là sai
 
-Lấy bảng ở ví dụ trên và cứ đánh dấu ô của `B` là trống:
+Xét bảng trong ví dụ trên. Nếu chỉ đánh dấu ô của `B` là trống:
 
 ```text
  ô:         0    1    2    3    4    5    6    7
@@ -206,20 +210,20 @@ Lấy bảng ở ví dụ trên và cứ đánh dấu ô của `B` là trống:
    get(C): bắt đầu ở ô lý tưởng 3 -> EMPTY -> "KHÔNG THẤY"      SAI! C nằm ở ô 4.
 ```
 
-Một lần tra cứu dừng ngay ở ô trống đầu tiên, nên lỗ trống (hole) ta vừa tạo ra
-**cắt đứt chuỗi dò** và che mất `C` lẫn `D`.
+Tra cứu dừng ngay ở ô trống đầu tiên, nên lỗ trống (hole) vừa tạo ra sẽ
+**cắt đứt chuỗi dò** và khiến `C` lẫn `D` không còn tìm thấy được.
 
 ### Cách 1: tombstone (không dùng)
 
-Đánh dấu ô là `DELETED` thay vì `EMPTY`; khi tra cứu thì bỏ qua các tombstone.
-Cách này chạy được, nhưng tombstone cứ tích tụ dần, chuỗi dò dài ra, và cuối
-cùng cả bảng phải được xây lại (một đợt tăng vọt độ trễ rất lớn). Chú thích
-trong mã nguồn nêu đích danh đây là thứ cần tránh.
+Đánh dấu ô là `DELETED` thay vì `EMPTY`, rồi bỏ qua các tombstone khi tra cứu.
+Cách này hoạt động, nhưng tombstone tích tụ dần khiến chuỗi dò dài ra; cuối cùng
+cả bảng phải được xây dựng lại, gây ra một đợt tăng vọt độ trễ. Chú thích trong
+mã nguồn nêu rõ đây là điều cần tránh.
 
 ### Cách 2: xóa bằng cách dịch lùi (dùng ở đây)
 
-Sau khi tạo ra lỗ trống, **ta đi tiếp về phía trước và kéo lùi mọi phần tử mà
-nếu không sẽ trở nên không tới được**, nhờ đó không để lại tombstone nào.
+Sau khi tạo lỗ trống, **ta tiếp tục dò về phía trước và dịch lùi mọi phần tử
+không thì sẽ không còn tìm thấy được**, nhờ đó không cần để lại tombstone.
 
 Quy tắc cho một phần tử đang nằm ở `probe`, có ô lý tưởng là `ideal`:
 
@@ -230,20 +234,21 @@ Quy tắc cho một phần tử đang nằm ở `probe`, có ô lý tưởng là
 Chuyển nó vào đó luôn an toàn: vị trí mới vẫn nằm trên đường dò của chính nó, và
 còn gần ô lý tưởng hơn.
 
-"Tại hoặc trước" cần được hiểu cẩn thận, vì bảng là một **vòng tròn**: sau ô
-cuối cùng lại là ô 0. Phiên bản chính xác của quy tắc nói khi nào một phần tử
-phải **ở lại**:
+"Tại hoặc trước" cần được hiểu cẩn thận vì bảng là một **vòng tròn**: sau ô
+cuối cùng là ô 0. Quy tắc chính xác để xác định khi nào một phần tử phải **ở
+lại** là:
 
-> Đi tiến vòng quanh từ lỗ trống (không tính lỗ trống) tới ô `probe` của chính
-> phần tử (có tính ô đó). Nếu ô `ideal` của phần tử là một trong các ô trên đường
-> đi đó, phần tử **ở lại**: một lần tra cứu nó bắt đầu *sau* lỗ trống và không
-> bao giờ đi qua lỗ. Ngược lại, nó **chuyển** vào lỗ trống.
+> Xét đường đi vòng từ sau lỗ trống đến ô `probe` của phần tử, có tính ô
+> đó. Nếu ô `ideal` nằm trên đường đi đó, phần tử **ở lại**: phép tra cứu
+> bắt đầu *sau* lỗ trống nên sẽ không đi qua lỗ. Ngược lại, phần tử **chuyển**
+> vào lỗ trống.
 
 Hai chi tiết nữa để hoàn chỉnh thuật toán:
 
-- Một phần tử ở lại **không** kết thúc việc quét. Các phần tử phía sau vẫn có thể
-  có ô lý tưởng nằm trước lỗ trống, nên ta đi tiếp (`F` trong ví dụ bên dưới).
-- Việc quét kết thúc ở ô `EMPTY` đầu tiên: không chuỗi dò nào đi tiếp qua một ô
+- Một phần tử ở lại **không** kết thúc lượt quét. Các phần tử phía sau vẫn có
+  thể có ô lý tưởng nằm trước lỗ trống, nên ta tiếp tục (`F` trong ví dụ bên
+  dưới).
+- Lượt quét kết thúc ở ô `EMPTY` đầu tiên: không chuỗi dò nào đi tiếp qua một ô
   trống, nên không có gì phía sau nó phụ thuộc vào lỗ trống. (Mã nguồn cũng dừng
   nếu `probe` đi trọn một vòng quay lại `hole`. Điều đó không thể xảy ra khi bảng
   luôn giữ ít nhất một ô trống, mà 5.5 đã đảm bảo, nhưng nó làm cho vòng lặp hiển
@@ -324,8 +329,8 @@ ghi là "O(1) kỳ vọng" (expected O(1)).
 
 ### Id được dựng sẵn, và seed bí mật
 
-Trường hợp xấu nhất có thể bị kích hoạt bởi bất kỳ ai **chọn được id lệnh** và
-đoán trước được hàm băm. Khi không có seed, finalizer của SplitMix64 hoàn toàn
+Bất kỳ ai **chọn được id lệnh** và đoán trước hàm băm đều có thể gây ra trường
+hợp xấu nhất. Khi không có seed, finalizer của SplitMix64 hoàn toàn
 **khả nghịch** (invertible): phép cộng một hằng số, `z ^ (z >> k)` và phép nhân
 với một hằng số lẻ đều có thể được đảo ngược. Vì thế kẻ tấn công có thể tính ra
 hàng nghìn id đều băm về ô 0, và khi đó mọi lần tra cứu phải đi qua một chuỗi dò
@@ -333,22 +338,20 @@ rất dài: một kiểu tấn công từ chối dịch vụ (denial of service)
 độ trễ.
 
 Cách phòng thủ chỉ tốn một chỉ thị: XOR một **seed ngẫu nhiên, bí mật** vào khóa
-trước khi trộn. `FlatHashMap::with_capacity` lấy nó từ `RandomState` của thư
-viện chuẩn, chính là nguồn ngẫu nhiên dùng làm khóa cho SipHash của `std`. Không
-có seed thì kẻ tấn công không thể chạy phép đảo ngược, nên cũng không thể nhắm id
-vào một ô.
+trước khi trộn. `FlatHashMap::with_capacity` lấy seed từ `RandomState` của thư
+viện chuẩn; đây cũng là nguồn ngẫu nhiên mà `std` dùng làm khóa cho SipHash. Nếu
+không biết seed, kẻ tấn công không thể đảo ngược hàm băm để nhắm id vào một ô.
 
-Test `keys_crafted_for_one_seed_spread_out_under_another` cho thấy cả hai vế.
-Hàm `craft_key` của nó đảo ngược finalizer để dựng ra 1,000 id cùng nhắm vào ô 0
-dưới seed `0`, và kiểm tra xem chúng có thật sự như vậy không. Dưới bất kỳ seed
-nào khác, cũng những id ấy lại tản ra như các khóa bình thường (test yêu cầu
-bucket đầy nhất chứa ít hơn 32 id trong số đó).
+Test `keys_crafted_for_one_seed_spread_out_under_another` minh họa cả hai trường
+hợp. Hàm `craft_key` đảo ngược finalizer để tạo 1,000 id cùng nhắm vào ô 0 với
+seed `0`, rồi xác nhận điều đó. Với seed khác, các id ấy phân bố như những khóa
+bình thường; test yêu cầu bucket đông nhất chứa ít hơn 32 id.
 
 > [!NOTE]
-> **Ngẫu nhiên mà không mất tính tất định.** Seed chỉ thay đổi *nơi* các phần tử
-> được lưu, không bao giờ thay đổi giá trị mà `get`, `insert` hay `remove` trả
-> về. Vì vậy engine vẫn **tất định** (deterministic): cùng các yêu cầu luôn cho
-> ra cùng các sự kiện và cùng một sổ lệnh, bất kể seed là gì.
+> **Ngẫu nhiên mà không mất tính tất định.** Seed chỉ thay đổi *vị trí* lưu các
+> phần tử, không làm thay đổi giá trị mà `get`, `insert` hay `remove` trả về.
+> Vì vậy engine vẫn **tất định** (deterministic): cùng một chuỗi yêu cầu luôn
+> tạo ra cùng các sự kiện và cùng trạng thái sổ lệnh, bất kể seed là gì.
 > `tests/wal_replay.rs` dựa đúng vào điều này: nó phát lại một log vào engine thứ
 > hai, engine này bốc một seed khác, và yêu cầu kết quả giống hệt. Những test cần
 > một *cách bố trí* tái lập được thì dùng `FlatHashMap::with_capacity_and_seed`.
@@ -391,9 +394,9 @@ Chạy các unit test của bảng băm:
 cargo test hashmap::
 ```
 
-Có hai test đáng đọc kỹ. `survives_many_collisions_and_deletions` thử sức phép
-xóa dịch lùi ở 5.6, còn `keys_crafted_for_one_seed_spread_out_under_another`
-dựng ra cuộc tấn công ở 5.7 và cho thấy seed đánh bại nó:
+Có hai test đáng đọc kỹ. `survives_many_collisions_and_deletions` kiểm tra cơ
+chế xóa dịch lùi ở 5.6, còn `keys_crafted_for_one_seed_spread_out_under_another`
+mô phỏng cuộc tấn công ở 5.7 và cho thấy seed ngăn chặn được nó:
 
 ```sh
 cargo test keys_crafted_for_one_seed_spread_out_under_another

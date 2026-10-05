@@ -114,12 +114,13 @@ Doctest `compile_fail` là cách để kiểm thử một đảm bảo *ở mứ
 
 ## 10.2 Kiểm thử đối chiếu (differential testing): `tests/model_check.rs`
 
-Test viết tay chỉ bao phủ những trường hợp mà tác giả nghĩ ra được; bug thì ẩn
-trong các tổ hợp. Vì vậy, test mạnh nhất của repo này so sánh engine với một sổ
+Test viết tay chỉ bao phủ những trường hợp tác giả nghĩ ra; bug thường ẩn trong
+các tổ hợp. Vì vậy, test mạnh nhất của repo này so sánh engine với một sổ
 lệnh thứ hai, **được cố tình giữ đơn giản**, trên những luồng yêu cầu ngẫu nhiên
 rất dài, và đòi hai bên phải khớp nhau ở mọi thứ quan sát được.
 
-Sổ lệnh tham chiếu được viết sao cho dễ thấy là đúng, chứ không phải cho nhanh:
+Sổ lệnh tham chiếu được viết để dễ kiểm tra tính đúng đắn, chứ không phải để chạy
+nhanh:
 một `BTreeMap` chứa các mức giá của mỗi phía, một `VecDeque` chứa
 `(order_id, qty)` cho mỗi mức giá, một `HashMap` chứa các lệnh còn sống và một
 bộ đếm giao dịch. Nó đủ ngắn để kiểm tra bằng mắt.
@@ -144,64 +145,62 @@ dùng seed cố định, nên mỗi lần chạy đều tái lập được. Nó
   tick rất xa khiến tổng của một mức giá bị tràn.
 
 Sau **mỗi** yêu cầu, test so sánh chính xác luồng sự kiện (kể cả trade id), bid
-tốt nhất và ask tốt nhất, số lệnh còn sống, độ sâu tại mọi tick mà bộ sinh có thể
-dùng, và `resting_order` của lệnh mà yêu cầu nhắc tới cùng mọi maker đã giao dịch
-với nó. Cứ mỗi 1,000 yêu cầu, nó còn so sánh toàn bộ `depth_snapshot`. Test chạy 4 seed ×
-20,000 yêu cầu với arena chật (64 lệnh, nên phần còn lại của lệnh thường bị từ
-chối) và thêm 4 seed với arena rộng rãi (8,192 lệnh, nên sổ trở nên sâu), tất cả
-đều với 4096 tick mặc định, và thêm 2 seed trên một **thang giá 300,000 tick**
-(bốn tầng bitset), nơi các cú quét và các lệnh quá cỡ chạm tới cả hai đầu của
-thang giá.
+tốt nhất và ask tốt nhất, số lệnh còn sống, độ sâu tại mọi tick bộ sinh có thể
+dùng, cùng `resting_order` của lệnh được yêu cầu và mọi maker đã giao dịch với
+nó. Cứ mỗi 1,000 yêu cầu, test còn so sánh toàn bộ `depth_snapshot`. Test chạy
+4 seed × 20,000 yêu cầu với arena nhỏ (64 lệnh, nên phần còn lại của lệnh thường
+bị từ chối), thêm 4 seed với arena lớn (8,192 lệnh, nên sổ sâu hơn), tất cả đều
+dùng 4096 tick mặc định; ngoài ra còn chạy 2 seed trên **thang giá 300,000 tick**
+(bitset bốn tầng), nơi các lệnh quét và lệnh quá cỡ chạm tới cả hai đầu thang giá.
 
 Hai chi tiết khiến test này đáng tin:
 
-- **Bộ đếm độ phủ (coverage counter).** Test đếm xem những đường đi thú vị được
-  chạm tới bao nhiêu lần (đầu vào bị từ chối, phần còn lại bị từ chối, maker bị
+- **Bộ đếm độ phủ (coverage counter).** Test đếm số lần đi qua các nhánh quan
+  trọng (đầu vào bị từ chối, phần còn lại bị từ chối, maker bị
   khớp một phần, hủy lệnh thành công, lời gọi tạo ra hơn 64 sự kiện, phần còn lại
   bị hết hạn, lệnh post-only bị từ chối, lần giảm số lượng, lần tự giao dịch bị
   ngăn chặn, lệnh bị gỡ bởi một lần hủy hàng loạt, lần từ chối do giới hạn rủi
-  ro) và fail nếu có bộ đếm nào bằng 0. Nếu ai đó sửa bộ sinh khiến một đường đi lặng lẽ không
-  còn được chạy tới, thay đổi đó không thể lọt qua mà không ai hay biết.
+  ro) và thất bại nếu có bộ đếm nào bằng 0. Nếu sửa bộ sinh khiến một nhánh không
+  còn được chạy tới, thay đổi đó sẽ bị phát hiện.
 - **Lỗi tái lập được.** Mọi thông báo assertion đều kèm seed, bước và yêu cầu,
   nên có thể phát lại chính xác một lần fail.
 
-Đây là cách tốt nhất để có niềm tin vào một cấu trúc dữ liệu đã được tối ưu: bản
-cài đặt nhanh và bản cài đặt hiển nhiên đúng không bao giờ được phép bất đồng với
-nhau.
+Đây là cách đáng tin cậy để kiểm tra một cấu trúc dữ liệu đã được tối ưu: bản
+cài đặt nhanh và bản cài đặt hiển nhiên đúng không bao giờ được phép cho kết quả
+khác nhau.
 
 ## 10.3 Tính tất định khi phát lại (replay): `tests/wal_replay.rs`
 
-Test này cho 10,000 yêu cầu được sinh ra chạy qua một engine chính, đồng thời ghi
-từng yêu cầu vào một WAL *trước khi* áp dụng nó (với phần cấp phát trước nhỏ, nên
-tệp phải lớn lên nhiều lần). Sau đó nó finalize log, đọc lại, kiểm tra các số thứ
-tự chạy từ 0 đến 9,999, rồi phát lại các bản ghi vào một engine **thứ hai**. Bản
-sao (replica) này phải cho ra đúng cùng các sự kiện (nên mỗi giao dịch có cùng
+Test này đưa 10,000 yêu cầu được sinh ra qua engine chính, đồng thời ghi từng yêu
+cầu vào WAL *trước khi* áp dụng (dung lượng cấp phát trước nhỏ khiến tệp phải
+mở rộng nhiều lần). Sau đó, test finalize log, đọc lại, kiểm tra dãy số thứ tự từ
+0 đến 9,999 rồi phát lại các bản ghi vào engine **thứ hai**. Bản sao (replica)
+này phải tạo ra đúng cùng các sự kiện (nên mỗi giao dịch có cùng
 `trade_id`), cùng số lệnh còn sống và cùng độ sâu.
 
-Bản sao tự dựng bảng băm của mình, với **seed ngẫu nhiên** riêng. Vì vậy test này
-cũng chứng minh luôn điều đã nói ở chương 5: seed chỉ đổi chỗ các phần tử được
-lưu, không bao giờ đổi việc engine làm. Bản sao được dựng bởi `wal::replay`, từ
-dung lượng mà log ghi lại, nên test này cũng kiểm tra rằng header có mang theo
-thông tin đó.
+Bản sao tự dựng bảng băm với **seed ngẫu nhiên** riêng. Vì vậy, test này cũng
+chứng minh điều đã nêu ở chương 5: seed chỉ thay đổi vị trí lưu phần tử, không
+làm thay đổi hành vi của engine. `wal::replay` dựng bản sao theo dung lượng ghi
+trong log, nên test cũng xác nhận header lưu thông tin đó.
 
-`tests/snapshot.rs` đưa ra cùng kiểu khẳng định đó cho snapshot (mục 9.8). Nó
-chạy 10,000 yêu cầu được sinh ra, khôi phục một engine thứ hai từ snapshot của
-engine thứ nhất, rồi cho cả hai chạy 10,000 yêu cầu kế tiếp: mỗi lời gọi phải tạo
-ra đúng cùng các sự kiện, và cuối cùng hai sổ lệnh phải giống hệt nhau. Test chạy
-một lần với arena chật và một lần với arena rộng rãi.
+`tests/snapshot.rs` kiểm tra điều tương tự với snapshot (mục 9.8). Test chạy
+10,000 yêu cầu được sinh ra, khôi phục engine thứ hai từ snapshot của engine thứ
+nhất, rồi cho cả hai xử lý 10,000 yêu cầu tiếp theo. Mỗi lời gọi phải tạo ra
+cùng các sự kiện, và cuối cùng hai sổ lệnh phải giống hệt nhau. Test chạy một
+lần với arena nhỏ và một lần với arena lớn.
 
 ## 10.4 Chứng minh "không cấp phát" (zero allocation)
 
 Lời khẳng định *"`process_order`, `reduce_order` và `cancel_order` không bao giờ
-cấp phát"* rất dễ viết trong một comment, và cũng dễ vô tình phá vỡ về sau (chỉ cần một
-`Vec::new()` hay `.to_vec()` vô tội). Vì thế nó được **kiểm thử**, bởi
-`tests/zero_alloc.rs`.
+cấp phát"* rất dễ viết trong comment nhưng cũng dễ vô tình phá vỡ về sau (chỉ
+cần thêm một `Vec::new()` hay `.to_vec()` tưởng như vô hại). Vì vậy, điều này
+được **kiểm thử** trong `tests/zero_alloc.rs`.
 
 ### Kỹ thuật: global allocator có đếm
 
-Rust cho phép một chương trình thay thế bộ cấp phát toàn cục (global allocator)
-của nó. Bài test cài một lớp bọc đếm mọi lần cấp phát, rồi chuyển tiếp công việc
-sang bộ cấp phát của hệ thống:
+Rust cho phép chương trình thay thế bộ cấp phát toàn cục (global allocator).
+Bài test cài một lớp bọc để đếm mọi lần cấp phát, rồi chuyển tiếp yêu cầu sang
+bộ cấp phát của hệ thống:
 
 ```rust
 struct CountingAllocator;
@@ -245,8 +244,8 @@ Những chi tiết đáng bắt chước khi bạn tự viết test kiểu này:
 - **Khởi động (warm up) và cấp phát sẵn trước**, để phần chuẩn bị chỉ chạy một
   lần không bị đếm vào.
 - **Chạy qua mọi đường đi** mà bạn muốn chứng minh là không cấp phát: nằm chờ,
-  khớp lệnh, giảm số lượng, hủy lệnh, hủy hàng loạt, và một cú quét sâu hơn xa
-  mọi bộ đệm cố định đều chạy những đoạn code khác nhau.
+  khớp lệnh, giảm số lượng, hủy lệnh, hủy hàng loạt, và một lần quét sâu vượt xa
+  sức chứa của mọi bộ đệm cố định đều chạy các đoạn code khác nhau.
 - **Chọn các sink không cấp phát.** Vì mục tiêu là đo riêng engine, bài test tái
   sử dụng một `EventBatch` (gọi `clear` trước mỗi lần) cùng một closure chỉ đếm.
 - **`std::hint::black_box`** bọc quanh kết quả để trình tối ưu không xóa mất
@@ -264,7 +263,7 @@ Những gì nó **không** chứng minh:
   các đường từ chối lệnh).
 - `depth_snapshot` *có* cấp phát và cố tình bị loại ra.
 
-Nếu muốn, bạn có thể chạy ở cả hai profile; ở profile nào nó cũng pass:
+Có thể chạy test ở cả hai profile; test đều đạt:
 
 ```sh
 cargo test --test zero_alloc
@@ -329,7 +328,7 @@ trên một engine mới:
 |---|---|---|---|
 | `place_10k_resting_orders` | engine rỗng, dung lượng 20,000 | 10,000 lệnh mua, mỗi lệnh ở tick `i % 4000`; không lệnh nào vượt spread nên lệnh nào cũng nằm chờ | 10,000 |
 | `place_10k_resting_orders_300k_ticks` | như trên, với 300,000 tick | như trên, ở các tick `i × 29 % 300,000`, trải khắp toàn bộ thang giá | 10,000 |
-| `cross_spread_matching` | 5,000 ask cỡ 1 ở tick 100 | 5,000 lệnh mua cỡ 1 ở tick 100; mỗi lệnh ăn đúng một maker | 5,000 |
+| `cross_spread_matching` | 5,000 ask cỡ 1 ở tick 100 | 5,000 lệnh mua cỡ 1 ở tick 100; mỗi lệnh khớp với đúng một maker | 5,000 |
 | `cancel_orders` | 10,000 lệnh mua đang chờ | hủy cả 10,000 lệnh theo id | 10,000 |
 
 ### Criterion đo như thế nào
@@ -365,7 +364,7 @@ Muốn có con số cho mỗi lệnh, hãy **chia cho số lệnh**.
 ### Một lần chạy mẫu (chỉ để tham khảo)
 
 Đo trên chiếc máy dùng để viết các tài liệu này: Intel Core i9-12900H, Windows
-11, Rust 1.98.1, `cargo bench`, chạy một lần, không cố làm cho máy yên tĩnh.
+11, Rust 1.98.1, `cargo bench`, chạy một lần, không cố giảm tải nền của máy.
 
 | Benchmark | Thời gian báo cáo (estimate) | Số lệnh | ≈ mỗi lệnh |
 |---|---|---|---|
@@ -375,12 +374,12 @@ Muốn có con số cho mỗi lệnh, hãy **chia cho số lệnh**.
 
 Phiên bản trước của chương này ghi nhận 746, 390 và 734 µs trên cùng chiếc máy
 đó, với API cũ trả về một `EventBatch` 2 KiB mới tinh từ mỗi lời gọi. Criterion
-so sánh mỗi lần chạy với lần trước và báo các con số mới là cải thiện khoảng 36%,
-13% và 46%. Các thao tác rẻ nhất được lợi nhiều nhất, đúng như điều ta mong đợi
-nếu việc khởi tạo và sao chép batch đó chiếm một phần lớn chi phí của chúng: đây
-là một bằng chứng đo được cho điểm đã nói ở chương 7, rằng "không cấp phát" không
-có nghĩa là "không tốn chi phí". Vì chỉ có một lần chạy trên laptop, hãy hiểu đây
-là "nhanh hơn rõ rệt", đừng coi các tỷ lệ phần trăm là chính xác.
+so sánh mỗi lần chạy với lần trước và báo các con số mới cải thiện khoảng 36%,
+13% và 46%. Các thao tác rẻ nhất được lợi nhiều nhất, đúng như dự đoán nếu việc
+khởi tạo và sao chép batch đó chiếm phần đáng kể trong chi phí của chúng. Đây là
+minh chứng bằng số liệu cho ý ở chương 7: "không cấp phát" không có nghĩa là
+"không tốn chi phí". Vì chỉ có một lần chạy trên laptop, hãy hiểu kết quả là
+"nhanh hơn rõ rệt", đừng coi các tỷ lệ phần trăm là chính xác.
 
 Khi thang giá được mở rộng để có số tầng bất kỳ (mục 4.6), một lần chạy trên cùng
 chiếc máy đó cho kết quả:
@@ -392,26 +391,27 @@ chiếc máy đó cho kết quả:
 | `cross_spread_matching` | 381 µs | 5,000 | ≈ 76 ns |
 | `cancel_orders` | 127 µs | 10,000 | ≈ 13 ns |
 
-Có hai bài học ẩn trong các con số này. Thứ nhất, criterion đã so sánh bitset
+Có thể rút ra hai điều từ các con số này. Thứ nhất, criterion đã so sánh bitset
 tổng quát hóa với bitset hai tầng cố định (`cargo bench -- --save-baseline before`,
-rồi `-- --baseline before`) và **không thấy thay đổi nào** ở việc đặt lệnh và
+rồi `-- --baseline before`) và **không ghi nhận thay đổi nào** ở việc đặt lệnh và
 khớp lệnh: với 4096 tick, vòng lặp chạy đúng hai bước như trước. Thứ hai, thang
 giá rộng tốn thêm khoảng 45 ns cho mỗi lệnh, và có lẽ không phải vì hai lần quét
-bit thêm của nó: các lệnh của nó trải trên 14 MB mức giá, nên phần lớn chúng bị
-trượt cache (cache miss). (`cancel_orders` cũng trông nhanh hơn trước nhiều,
-nhưng nhiều khả năng đó là nhờ benchmark chứ không phải nhờ engine: `Engine` thu
-nhỏ từ 1,168 xuống 272 byte khi các bitset chuyển lên heap, và bộ khung chạy
-(harness) của criterion di chuyển engine giữa bước setup và routine.)
+bit thêm: các lệnh được phân tán trên vùng mức giá chiếm 14 MB, nên phần lớn
+không tìm thấy dữ liệu trong cache (cache miss). (`cancel_orders` cũng có vẻ
+nhanh hơn trước nhiều, nhưng nhiều khả năng là nhờ benchmark chứ không phải nhờ
+engine: `Engine` thu nhỏ từ 1,168 xuống 272 byte khi các bitset chuyển lên heap,
+và harness của criterion chuyển engine giữa bước setup và routine.)
 
 > [!IMPORTANT]
-> Hãy coi các số này là bản phác thảo về bậc độ lớn, **không phải một lời hứa**.
+> Hãy coi các số này là ước lượng sơ bộ để hình dung bậc độ lớn, **không phải
+> một lời hứa**.
 > Phần cứng, hệ điều hành, thiết lập nguồn điện và tải nền của bạn đều làm các
 > con số thay đổi, và không nên đem chúng so sánh giữa các máy.
 
 ### Những con số này nói được và không nói được gì
 
 - Đây là **giá trị trung bình trên cả lô**, tức *thông lượng*. Chúng không nói gì
-  về **đuôi**: 1 lệnh chậm nhất trong 1,000 lệnh. Với một hệ thống nhạy cảm về
+  về **đuôi**: 1 lệnh chậm nhất trong mỗi 1,000 lệnh. Với một hệ thống nhạy cảm về
   độ trễ, đuôi mới là thứ quan trọng nhất; muốn đo nó cần một bộ đếm giờ cho từng
   lời gọi, ghi kết quả vào một histogram (ví dụ crate `hdrhistogram`).
 - Khối lượng công việc là **tổng hợp** (synthetic): các lệnh xoay vòng qua vài
@@ -438,32 +438,32 @@ Mỗi lần push và pull request đều chạy
 | **MSRV** (phiên bản Rust tối thiểu được hỗ trợ) | `ubuntu-latest`, Rust 1.89 | `cargo check --lib`: lời hứa `rust-version` trong `Cargo.toml` |
 | **Miri** | `ubuntu-latest`, nightly | `cargo miri test --lib`: tìm hành vi không xác định (undefined behavior) trong code `unsafe` (các test có ánh xạ tệp thì bị bỏ qua) |
 
-Mỗi lựa chọn tồn tại để bắt một loại lỗi cụ thể:
+Mỗi lựa chọn nhằm phát hiện một loại lỗi cụ thể:
 
 - **Windows** ánh xạ tệp vào bộ nhớ theo cách khác (nó từ chối thu nhỏ một tệp
   đang được ánh xạ), nên WAL được kiểm thử ở đó cũng như trên Linux.
-- **ARM** sắp xếp lại các truy cập bộ nhớ thoải mái hơn x86 rất nhiều. Một bộ
+- **ARM** có thể sắp xếp lại các truy cập bộ nhớ tự do hơn x86 rất nhiều. Một bộ
   đệm vòng thiếu `Acquire` thường vẫn pass trên x86 mà có thể fail trên ARM, nên
   test SPSC đa luồng cũng chạy trên phần cứng ARM thật. Cách đó vẫn chỉ mang tính
   xác suất; `loom` (chương 11) mới là kiểm tra vét cạn.
-- **Một toolchain được ghim phiên bản, một `Cargo.lock` được commit, và
+- **Một toolchain cố định phiên bản, một `Cargo.lock` được commit, và
   `--locked`** giúp CI tái lập được: một lint mới của trình biên dịch hay một bản
   phát hành dependency mới không thể khiến build chuyển đỏ nếu không có thay đổi
   nào trong repo này. Việc nâng cấp trở thành những commit có chủ đích.
-- **Timeout** khiến một test bị treo sẽ fail sau vài phút, thay vì vài giờ.
+- **Timeout** khiến một test bị treo thất bại sau vài phút, thay vì vài giờ.
 - **Doctest của README và `tests/docs_sync.rs`** giữ cho tài liệu luôn trung
   thực: các ví dụ trong README và chương trình hoàn chỉnh ở chương 9 đều được
   biên dịch và chạy, nên chúng không thể lặng lẽ lỗi thời.
 
 ## 10.8 Những gì test *không* bao phủ
 
-Biết những lỗ hổng là một phần của việc đọc test một cách có phê phán.
+Nhận biết các lỗ hổng cũng là một phần của việc đọc test có phê phán.
 
 | Lỗ hổng | Vì sao quan trọng | Cách lấp |
 |---|---|---|
 | **Bug về thứ tự bộ nhớ chỉ bị bắt theo xác suất** | Job ARM chạy test bộ đệm vòng đa luồng trên một CPU có thứ tự bộ nhớ yếu, và Miri kiểm tra code `unsafe`, nhưng cả hai chỉ thấy những cách đan xen giữa các luồng tình cờ xảy ra. | Trình kiểm tra mô hình [`loom`](https://docs.rs/loom) vét cạn mọi cách đan xen (một bài tập ở chương 11). |
 | **Sự cố thật và mất điện** | Các test WAL dùng crash image dựng tay; không có gì giết tiến trình giữa lúc đang ghi hay cắt điện. | Một harness chạy writer trong tiến trình con rồi giết nó ở những thời điểm ngẫu nhiên; kiểm thử mất điện cần một máy ảo hoặc một thiết bị khối có chèn lỗi (fault-injecting block device). |
-| **Suy giảm hiệu năng (performance regression)** | CI chỉ *biên dịch* các benchmark, nên một sự chậm đi sẽ không ai hay biết. | Baseline của Criterion (`cargo bench -- --save-baseline before`, về sau dùng `--baseline before`), hoặc một job benchmark chạy trên một máy chuyên dụng, ít tải. |
+| **Suy giảm hiệu năng (performance regression)** | CI chỉ *biên dịch* các benchmark, nên hiệu năng giảm sẽ không ai hay biết. | Baseline của Criterion (`cargo bench -- --save-baseline before`, về sau dùng `--baseline before`), hoặc một job benchmark chạy trên một máy chuyên dụng, ít tải. |
 | **Các trường hợp biên của `depth_snapshot`** | `model_check` so sánh toàn bộ snapshot và một unit test phủ `usize::MAX`, nhưng `levels = 0` và "ít mức giá hơn số mức hiện có" thì chưa được test. | Hai unit test nhỏ. |
 | **Hai writer trên cùng một tệp WAL** | Tài liệu ghi là không được hỗ trợ, nhưng không có gì thực thi hay kiểm thử điều đó. | Một khóa tệp (`File::try_lock`) và một test cho nó (chương 11). |
 

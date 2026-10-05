@@ -10,7 +10,7 @@ Mã nguồn: [`src/ringbuffer.rs`](../../src/ringbuffer.rs)
 `Engine` cố ý chỉ là một cấu trúc dữ liệu. Một hệ thống thực tế cần thêm hai thứ
 bao quanh nó:
 
-1. Một cách **đưa yêu cầu vào** từ các thread (luồng) khác mà không dùng khóa:
+1. Một cách **đưa yêu cầu vào** từ các thread (luồng) khác mà không cần khóa:
    **bộ đệm vòng** (ring buffer), trong chương này.
 2. Một cách **sống sót qua sự cố** và dựng lại trạng thái: **nhật ký ghi trước**
    (write-ahead log), trong [chương 9](09-write-ahead-log.md).
@@ -34,11 +34,11 @@ producer, thứ mà crate này không cung cấp.)
 
 ## 8.1 Nó giải quyết bài toán gì?
 
-Yêu cầu đến từ các thread mạng, nhưng `Engine` chỉ được phép bị **một** thread
-chạm vào. Ta cần một hàng đợi nằm giữa chúng. `Mutex<VecDeque<_>>` thì chạy được,
-nhưng khóa có thể chặn (thread bị hệ điều hành gạt ra khỏi CPU trong lúc đang giữ
-khóa) và `VecDeque` có thể cấp phát bộ nhớ. Cả hai đều làm hại độ trễ đuôi (tail
-latency).
+Yêu cầu đến từ các thread mạng, nhưng chỉ **một** thread được phép truy cập
+`Engine`. Ta cần một hàng đợi nằm giữa chúng. `Mutex<VecDeque<_>>` có thể dùng
+được, nhưng khóa có thể chặn (thread đang giữ khóa phải nhường CPU cho thread
+khác), còn `VecDeque` có thể cấp phát bộ nhớ. Cả hai đều làm tăng độ trễ đuôi
+(tail latency).
 
 Lời giải là một **bộ đệm vòng** (ring buffer) **lock-free** (không dùng khóa), kích
 thước cố định, **một producer một consumer** (single-producer single-consumer, viết
@@ -54,7 +54,7 @@ thể vô tình phá vỡ giới hạn đó.
 
 ## 8.2 Cấu trúc dữ liệu
 
-Một mảng cố định được dùng như một vòng tròn, cộng với hai bộ đếm, mà ta sẽ gọi là
+Một mảng cố định được dùng như một vòng tròn, cùng với hai bộ đếm gọi là
 **cursor**:
 
 ```text
@@ -73,7 +73,7 @@ Một mảng cố định được dùng như một vòng tròn, cộng với ha
    đầy                 : tail - head == capacity
 ```
 
-`spsc_channel` cấp phát các ô một lần duy nhất và trả về hai đầu của hàng đợi:
+`spsc_channel` cấp phát các ô đúng một lần rồi trả về hai đầu của hàng đợi:
 
 ```rust
 pub fn spsc_channel<T: Copy + Send>(capacity: usize) -> (Producer<T>, Consumer<T>)
@@ -92,7 +92,7 @@ pub struct Producer<T> { shared: Arc<Shared<T>>, tail: usize, cached_head: usize
 pub struct Consumer<T> { shared: Arc<Shared<T>>, head: usize, cached_tail: usize }
 ```
 
-Trong đoạn code này có hai chi tiết nhỏ sẽ được giải thích kỹ ở phần sau.
+Trong đoạn code này có hai chi tiết sẽ được giải thích kỹ hơn ở phần sau.
 `CachePadded<T>` là một wrapper cho giá trị bên trong một cache line riêng cho
 chính nó (mục 8.4 giải thích vì sao điều đó quan trọng), và `.0` là cách bạn lấy
 giá trị nằm trong nó, như trong `self.shared.head.0`. Một **cache line** là khối
@@ -103,9 +103,9 @@ Mỗi handle giữ một bản sao riêng của cursor **của chính nó** (ch�
 đó, nên bản sao của nó luôn chính xác) và một bản sao **lưu tạm** (cached) của
 cursor phía bên kia (mục 8.3 giải thích vì sao).
 
-Các ô là `MaybeUninit<T>`: vùng nhớ có thể đã hoặc chưa chứa giá trị. Các ô nằm
-giữa `head` và `tail` chứa giá trị; những ô còn lại chưa được khởi tạo. Không cần
-tag `Option`, vì các cursor đã cho biết ô nào đang có dữ liệu.
+Các ô dùng `MaybeUninit<T>`: vùng nhớ có thể đã hoặc chưa chứa giá trị. Những ô
+nằm giữa `head` và `tail` có giá trị; các ô còn lại chưa được khởi tạo. Không cần
+tag `Option`, vì cursor cho biết ô nào đang có dữ liệu.
 
 **Các cursor chỉ tăng mãi** (dùng phép tính wrapping khi tràn số); chúng không bao
 giờ bị đặt lại về 0. Ô vật lý là `cursor & mask`.
@@ -119,8 +119,8 @@ biết chính xác có bao nhiêu phần tử đang nằm trong hàng đợi.
 trong các ô `6, 7, 0, 1` (vì `6 & 7 = 6`, `7 & 7 = 7`, `8 & 7 = 0`, `9 & 7 = 1`).
 Lần ghi tiếp theo sẽ vào ô `10 & 7 = 2`.
 
-Capacity được làm tròn lên thành lũy thừa của 2 để `% capacity` trở thành
-`& mask`, cùng mẹo mà bảng băm đã dùng.
+Dung lượng được làm tròn lên thành lũy thừa của 2 để `% capacity` có thể thay
+bằng `& mask`, theo cùng mẹo mà bảng băm sử dụng.
 
 ## 8.3 `push` và `pop`
 
@@ -166,29 +166,29 @@ pub fn pop(&mut self) -> Option<T> {
 }
 ```
 
-`push` trả về `Err(value)` khi đầy, đưa giá trị trở lại để bên gọi thử lại hoặc bỏ
-nó đi. Không có gì bao giờ bị chặn hay phải cấp phát.
+Khi hàng đợi đầy, push trả về `Err(value)` để bên gọi có thể thử lại hoặc bỏ
+giá trị đó. Thao tác này không chặn và không cấp phát.
 
-**Đọc các khối `unsafe`.** Ghi vào một ô thông qua một `Arc` dùng chung, và đọc một
-`MaybeUninit` như thể nó đã chứa giá trị, là những việc trình biên dịch không kiểm
-tra được, nên cần `unsafe`. Từ khóa đó không tắt các quy tắc đi; nó có nghĩa là
-*lập trình viên* hứa rằng các quy tắc vẫn được giữ. Quy ước của Rust là viết lời
-hứa đó ra trong một comment `// SAFETY:` ngay phía trên khối, như ở đây: mỗi
-comment nói rõ những sự thật nào (việc kiểm tra cursor, cặp Acquire/Release bên
-dưới, chỉ có một producer) khiến thao tác này đúng. Nếu bạn sửa code xung quanh một
-khối `unsafe`, hãy kiểm tra lại comment `SAFETY` của nó trước tiên.
+**Đọc các khối `unsafe`.** Ghi vào một ô thông qua `Arc` dùng chung và đọc một
+`MaybeUninit` như thể nó đã chứa giá trị là những thao tác trình biên dịch không
+thể kiểm tra, nên cần dùng `unsafe`. Từ khóa này không vô hiệu hóa các quy tắc an
+toàn; nó có nghĩa là *lập trình viên* cam kết bảo đảm các quy tắc đó được giữ.
+Theo quy ước của Rust, lời cam kết được ghi trong comment `// SAFETY:` ngay phía
+trên khối lệnh. Ở đây, mỗi comment nêu các điều kiện (kiểm tra cursor, cặp
+Acquire/Release bên dưới, chỉ có một producer) giúp thao tác an toàn. Nếu sửa
+code quanh một khối `unsafe`, hãy kiểm tra lại comment `SAFETY` của nó trước tiên.
 
-**Các cursor lưu tạm (cached)** đóng góp rất nhiều vào tốc độ. Đọc cursor của phía
-bên kia nghĩa là chạm vào một cache line mà nhân CPU kia liên tục ghi vào, và việc
-đó rất đắt. Một producer có `cached_head` vẫn cho thấy còn chỗ trống thì không cần
-nhìn vào `head` chút nào; nó chỉ đọc lại `head` khi vòng *trông có vẻ* đầy. Tương
-tự, consumer chỉ đọc lại `tail` khi vòng trông có vẻ rỗng. Trong trường hợp thường
-gặp, mỗi bên chỉ truy cập vào cache line của chính mình.
+**Các cursor lưu tạm (cached)** góp phần đáng kể vào tốc độ. Đọc cursor của phía
+bên kia đồng nghĩa với việc truy cập cache line mà nhân CPU kia liên tục ghi vào,
+đây là thao tác tốn kém. Nếu `cached_head` cho thấy vẫn còn chỗ, producer không
+cần đọc `head`; nó chỉ đọc lại `head` khi vòng *có vẻ* đầy. Tương tự, consumer
+chỉ đọc lại `tail` khi vòng có vẻ rỗng. Trong trường hợp thường gặp, mỗi bên chỉ
+truy cập cache line của chính mình.
 
 ### Tại sao lại dùng những thứ tự bộ nhớ (memory ordering) này? (bản giải thích dễ hiểu)
 
-Hai thread chạy trên hai nhân CPU khác nhau không tự động thấy các lần ghi bộ nhớ
-của nhau theo đúng thứ tự chúng đã xảy ra. Cặp **Release/Acquire** sửa điều đó:
+Hai thread chạy trên hai nhân CPU khác nhau không tự động quan sát các lần ghi bộ
+nhớ của nhau theo đúng thứ tự xảy ra. Cặp **Release/Acquire** giải quyết vấn đề đó:
 
 > Mọi thứ một thread đã ghi **trước** một lần store `Release` đều được đảm bảo là
 > nhìn thấy được bởi thread khác **`Acquire`-load đúng giá trị mà lần store đó đã
@@ -217,9 +217,9 @@ sequenceDiagram
 | Consumer đọc `tail` (khi vòng trông có vẻ rỗng) | `Acquire` | Ghép cặp với `Release` của producer: làm cho nội dung ô nhìn thấy được. |
 | Consumer ghi `head` | `Release` | Chỉ trả ô lại sau khi giá trị đã được đọc ra. |
 
-**Điều gì sẽ hỏng nếu dùng `Relaxed`?** `Relaxed` làm mỗi thao tác atomic
-(nguyên tử) tự nó an toàn, nhưng không hứa gì về thứ tự mà các lần ghi *khác* trở
-nên nhìn thấy được. Giả sử producer store `tail` bằng `Relaxed`:
+**Điều gì sẽ hỏng nếu dùng `Relaxed`?** `Relaxed` bảo đảm từng thao tác atomic
+(nguyên tử) an toàn, nhưng không bảo đảm thứ tự các lần ghi *khác* trở nên nhìn
+thấy được. Giả sử producer store `tail` bằng `Relaxed`:
 
 ```text
    producer (nhân 1)                       consumer (nhân 2)
@@ -274,14 +274,14 @@ unsafe impl<T: Send> Send for Shared<T> {}
 unsafe impl<T: Send> Sync for Shared<T> {}
 ```
 
-Các `unsafe impl` này là lời tác giả hứa với trình biên dịch rằng việc chia sẻ là
-ổn **với điều kiện** chỉ có một bên ghi và một bên đọc. Một phiên bản đầu của crate
-này không giữ được lời hứa đó: `push` và `pop` nhận `&self` trên một buffer dùng
-chung, nên không gì ngăn hai thread push cùng lúc, mà đó là data race và hành vi
-không xác định. API hiện tại làm cho lỗi đó không thể viết ra được:
+Các `unsafe impl` này là cam kết với trình biên dịch rằng việc chia sẻ an toàn
+**với điều kiện** chỉ có một bên ghi và một bên đọc. Phiên bản đầu của crate này
+không bảo đảm được điều đó: `push` và `pop` nhận `&self` trên buffer dùng chung,
+nên không có gì ngăn hai thread cùng gọi `push`, gây ra data race và hành vi
+không xác định. API hiện tại khiến lỗi này không thể biểu đạt:
 
-- `spsc_channel` trả về **một** `Producer` và **một** `Consumer`. Cả hai đều không
-  cài `Clone`, nên bạn không thể tạo producer thứ hai.
+- `spsc_channel` trả về **một** `Producer` và **một** `Consumer`. Hai kiểu này
+  không triển khai `Clone`, nên bạn không thể tạo producer thứ hai.
 - `push` và `pop` nhận **`&mut self`**. Kể cả khi bạn bọc một producer trong `Arc`
   rồi chia sẻ nó, một tham chiếu dùng chung (`&Producer`) không đủ để push, và
   borrow checker (bộ kiểm tra mượn của trình biên dịch) chỉ cho phép một `&mut`
@@ -305,14 +305,14 @@ let shared = &producer;
 shared.push(1).unwrap();                  // error[E0596]: cannot borrow as mutable
 ```
 
-`cargo test` kiểm tra rằng mỗi ví dụ vẫn thất bại đúng với mã lỗi đó. Đây là một
-pattern rất mạnh: mã hóa quy tắc sử dụng vào trong các kiểu, rồi kiểm thử rằng việc
-phá quy tắc thì không biên dịch được.
+`cargo test` xác nhận mỗi ví dụ vẫn thất bại với đúng mã lỗi đó. Đây là một mẫu
+rất hữu ích: mã hóa quy tắc sử dụng vào kiểu dữ liệu, rồi kiểm thử rằng vi phạm
+quy tắc sẽ khiến code không biên dịch được.
 
 Một số chi tiết khác:
 
-- `T: Copy`, nên một ô có thể bị ghi đè mà không phải chạy destructor, và các giá
-  trị còn nằm trong hàng đợi khi ring bị drop không cần dọn dẹp.
+- `T: Copy`, nên có thể ghi đè một ô mà không cần chạy destructor; các giá trị
+  còn trong hàng đợi cũng không cần dọn dẹp khi ring bị hủy.
 - `len()` và `is_empty()` chỉ là **ảnh chụp tức thời** (snapshot). Ở phía producer,
   `len()` kết hợp `tail` chính xác của nó với một `head` mới đọc, nên số đếm thật
   chỉ có thể *thấp hơn* vào lúc bạn nhìn (consumer vẫn tiếp tục lấy ra); ở phía
@@ -367,9 +367,9 @@ loop {
 }
 ```
 
-Test nhiều thread dùng cùng cách kiểm tra này để **thất bại nhanh**: nếu producer
-của nó dừng sớm, assertion của consumer sẽ nổ ra thay vì để test treo cho đến khi
-CI hết thời gian chờ (timeout).
+Test nhiều thread cũng dùng cách kiểm tra này để **thất bại nhanh**: nếu producer
+dừng sớm, assertion của consumer sẽ báo lỗi thay vì để test treo đến khi CI hết
+thời gian chờ (timeout).
 
 ## 8.6 Tự thực hành
 
@@ -380,8 +380,8 @@ cargo test ringbuffer::
 ```
 
 Tài liệu module trong [`src/ringbuffer.rs`](../../src/ringbuffer.rs) cũng có hai ví
-dụ `compile_fail`: code **không được** biên dịch, vì nó sẽ phá quy tắc một
-producer. `cargo test` kiểm tra rằng nó vẫn thất bại. Hãy tự thử một cái: trong
+dụ `compile_fail`: code **không được** biên dịch vì sẽ vi phạm quy tắc một
+producer. `cargo test` xác nhận chúng vẫn thất bại. Hãy tự thử một ví dụ: trong
 [`examples/walkthrough.rs`](../../examples/walkthrough.rs), tạo một channel bằng
 `matching_engine::ringbuffer::spsc_channel::<u64>(8)` rồi thử gọi `clone()` trên
 `Producer`. Đọc thông báo lỗi của trình biên dịch, rồi xóa dòng đó đi.

@@ -7,7 +7,7 @@
 
 Nguồn: [`src/bitset.rs`](../../src/bitset.rs)
 
-Module này liên tục trả lời một câu hỏi, và mỗi lần đều chỉ tốn O(1):
+Module này liên tục trả lời một câu hỏi, mỗi lần chỉ tốn O(1):
 
 > **"Hiện giờ, mức giá tốt nhất có ít nhất một lệnh là mức nào?"**
 
@@ -21,15 +21,15 @@ cách làm:
 
 | Cách làm | Chi phí để tìm giá tốt nhất | Ghi chú |
 |---|---|---|
-| Duyệt `levels[0..ticks]` để tìm mức không rỗng đầu tiên | tối đa mỗi tick một bước | Đơn giản, nhưng quá chậm và khó đoán trước. |
+| Duyệt `levels[0..ticks]` để tìm mức không rỗng đầu tiên | tối đa một bước cho mỗi tick | Đơn giản, nhưng quá chậm và khó đoán trước. |
 | Cây có thứ tự (`BTreeMap`) | O(log n) | Phải lần theo con trỏ; có cấp phát khi chèn/xóa. |
-| Lưu sẵn giá trị "tốt nhất", tính lại khi mức đó hết lệnh | thường O(1), đôi khi O(n) | Những lần quét lại thỉnh thoảng này chính là đợt tăng vọt độ trễ mà ta muốn tránh. |
+| Lưu sẵn giá trị "tốt nhất", tính lại khi mức đó hết lệnh | thường O(1), đôi khi O(n) | Chính những lần quét lại hiếm hoi này tạo ra các đợt tăng vọt độ trễ mà ta muốn tránh. |
 | **Bitset kèm quét bit** | **O(1), luôn luôn** | Mỗi tick một bit; CPU tìm một bit bật chỉ bằng một chỉ thị (instruction). |
 
 ## 4.2 Ý tưởng 1: mỗi tick một bit
 
 Ta giữ một bit cho mỗi tick: `1` = "có ít nhất một lệnh đang nằm chờ ở đây",
-`0` = trống. Chương này trước hết đi theo một engine với 4096 tick mặc định (4.2
+`0` = trống. Chương này trước hết xét một engine có 4096 tick mặc định (4.2
 đến 4.5), rồi cho thấy cùng ý tưởng đó mở rộng ra số tick bất kỳ như thế nào
 (4.6). 4096 tick cần 4096 bit = 64 word, mỗi word 64 bit.
 
@@ -48,7 +48,7 @@ thì vẫn tốn tới 64 bước. Ý tưởng 2 sẽ loại bỏ chỗ này.
 
 ### Quét bit trong 30 giây
 
-Ta dùng số 8 bit cho ngắn:
+Dùng số 8 bit để minh họa cho gọn:
 
 ```text
    value = 0b0010_1000
@@ -116,8 +116,8 @@ Ví dụ với `tick = 1234`: `1234 >> 6 = 19` (vì 19 × 64 = 1216) và
 
 ## 4.4 Các thao tác
 
-> Các đoạn code trích trong phần này viết tường minh trường hợp hai tầng, để từng
-> bước đều hiện rõ. [`src/bitset.rs`](../../src/bitset.rs) chạy đúng các bước đó
+> Các đoạn code trích trong phần này trình bày tường minh trường hợp hai tầng để
+> từng bước đều rõ ràng. [`src/bitset.rs`](../../src/bitset.rs) thực hiện đúng các bước đó
 > trong một vòng lặp ngắn qua các tầng (4.6); với 4096 tick, tức là có hai tầng,
 > vòng lặp làm đúng y như những gì trình bày ở đây.
 
@@ -150,8 +150,8 @@ let bit_idx  = 63 - self.words[word_idx].leading_zeros() as usize; // last set b
 Some(word_idx * 64 + bit_idx)
 ```
 
-Cả hai hàm đều trả về `None` ngay nếu `summary == 0`. **Hai lần quét bit**, bất
-kể sổ có 2 mức giá hay 4000.
+Cả hai hàm đều trả về `None` ngay nếu `summary == 0`. Mỗi lần gọi chỉ cần
+**hai lần quét bit**, dù sổ có 2 hay 4000 mức giá.
 
 ### `clear(tick)`: đánh dấu một tick đã trống
 
@@ -206,15 +206,15 @@ Summary giờ là `{31}`, và `lowest()` trả về 2000.
 ## 4.6 Vì sao là 4096 tick, và làm sao để có nhiều hơn
 
 `4096 = 64 × 64`. Một word summary có đúng 64 bit, mỗi bit ứng với một word, nên
-hai tầng phủ được 64 × 64 tick. Đó là lý do 4096 là giá trị mặc định
+hai tầng bao phủ được 64 × 64 tick. Vì thế, 4096 là giá trị mặc định
 (`DEFAULT_TICKS`), và trong một thời gian dài đó cũng là kích thước duy nhất:
 bitset từng là một struct hai tầng cố định, và một phép kiểm tra lúc biên dịch
 ngăn không cho ai làm nó lớn hơn.
 
 Các mã giao dịch (instrument) thật cần nhiều hơn thế. Một cổ phiếu có giá quanh
 100.00 với bước giá (tick size) 0.01 đã cần 10,000 tick chỉ để lên tới 100.00.
-Lối thoát chính là con đường mà word tóm tắt đã đi: **thêm một tầng ở trên mỗi
-khi tầng bên dưới có nhiều hơn một word.**
+Có thể mở rộng bằng cách **thêm một tầng phía trên mỗi khi tầng bên dưới có hơn
+một word**, giống như cách thêm word summary ban đầu.
 
 | Số tick (tối đa) | Số tầng | Số word mỗi tầng, từ dưới lên trên | Số lần quét bit mỗi lần tra cứu |
 |---|---|---|---|
@@ -224,13 +224,14 @@ khi tầng bên dưới có nhiều hơn một word.**
 | 16,777,216 (`64⁴`, giới hạn) | 4 | 262,144, 4096, 64, 1 | 4 |
 
 `Engine::with_ticks(capacity, ticks)` chọn số tick; `TickBitset::new(ticks)`
-tính xem số đó cần bao nhiêu tầng và lưu toàn bộ word của các tầng trong **một
-mảng phẳng duy nhất**, tầng dưới cùng trước, với vị trí bắt đầu của mỗi tầng nằm
-trong `offsets`. Chỉ một lần cấp phát, lúc khởi tạo, giống như mọi thứ khác.
+tính số tầng cần thiết rồi lưu toàn bộ word của các tầng trong **một mảng phẳng
+duy nhất**. Các word của tầng dưới cùng được lưu trước, còn vị trí bắt đầu của
+mỗi tầng nằm trong `offsets`. Bitset chỉ cấp phát một lần khi khởi tạo, giống
+như các cấu trúc khác.
 
-Khi đó mỗi thao tác trở thành một vòng lặp ngắn qua các tầng. `lowest()` đi
-xuống từ word duy nhất ở tầng trên cùng, mỗi lần quét bit chọn ra word cần đọc ở
-tầng bên dưới:
+Khi đó, mỗi thao tác trở thành một vòng lặp ngắn qua các tầng. `lowest()` bắt đầu
+từ word duy nhất ở tầng trên cùng rồi đi xuống; mỗi lần quét bit, nó chọn word
+cần đọc ở tầng bên dưới:
 
 ```rust
 let mut index = 0;
@@ -255,21 +256,21 @@ for level in 0..self.levels {                         // bottom level first
 }
 ```
 
-`clear(tick)` làm ngược lại và dừng ở word đầu tiên *vẫn còn* không rỗng: đúng
-quy tắc ở 4.4, áp dụng cho mọi tầng. `highest()` chính là `lowest()` nhưng dùng
+`clear(tick)` làm ngược lại và dừng ở word đầu tiên *vẫn còn* không rỗng, theo
+quy tắc ở 4.4 áp dụng cho mọi tầng. `highest()` giống `lowest()` nhưng dùng
 `63 - leading_zeros`.
 
-Với hai tầng, các vòng lặp chạy đúng những bước ở 4.4, và các benchmark
-(chương 10) không cho thấy chi phí nào đo được cho tính tổng quát này. Một thang
-giá rộng hơn tốn thêm một lần quét bit cho mỗi tầng tăng thêm, vẫn là O(1), cùng
-với bộ nhớ: mỗi tick cần hai mức giá, mỗi mức 24 byte, nên 4096 tick tốn 196 KB
-và 262,144 tick tốn 12.6 MB. Chính bộ nhớ đó, hơn là các lần quét bit, mới là lý
-do thật sự để chọn số tick riêng cho từng mã giao dịch thay vì làm sổ lệnh nào
-cũng thật lớn.
+Với hai tầng, các vòng lặp thực hiện đúng những bước ở 4.4; benchmark (chương
+10) không cho thấy chi phí đo được do tính tổng quát này. Mỗi tầng bổ sung làm
+tăng thêm một lần quét bit, nhưng độ phức tạp vẫn là O(1); dung lượng bộ nhớ
+cũng tăng theo. Mỗi tick cần hai mức giá, mỗi mức 24 byte, nên 4096 tick tốn
+196 KB và 262,144 tick tốn 12.6 MB. Bộ nhớ, chứ không phải số lần quét bit, mới
+là lý do chính để chọn số tick riêng cho từng mã giao dịch thay vì cấp một
+thang giá thật lớn cho mọi sổ lệnh.
 
-Giới hạn kích thước giờ được kiểm tra lúc tạo bitset, chứ không phải lúc biên
-dịch chương trình, vì phải đến lúc đó mới biết kích thước: `TickBitset::new`
-panic khi số tick bằng 0 hoặc lớn hơn `MAX_LADDER_TICKS` (2^24, bốn tầng).
+Giờ đây, giới hạn kích thước được kiểm tra khi tạo bitset thay vì lúc biên dịch,
+vì chỉ khi đó mới biết kích thước cần dùng: `TickBitset::new` panic nếu số tick
+bằng 0 hoặc lớn hơn `MAX_LADDER_TICKS` (2^24, bốn tầng).
 
 ## 4.7 Engine dùng nó như thế nào
 
@@ -280,7 +281,7 @@ panic khi số tick bằng 0 hoặc lớn hơn `MAX_LADDER_TICKS` (2^24, bốn t
 | `bid_bitset` | một bid nằm chờ ở tick đó | tick được bật **cao nhất** | `highest()` (`Engine::best_bid`) |
 | `ask_bitset` | một ask nằm chờ ở tick đó | tick được bật **thấp nhất** | `lowest()` (`Engine::best_ask`) |
 
-Bit được cập nhật ở đúng ba chỗ:
+Bit được cập nhật tại đúng ba chỗ:
 
 1. **Lệnh nằm chờ trong sổ** (`rest`, được `submit_order` và `restore` dùng,
    sau khi `push_back` thành công): `set(tick)`.
@@ -296,12 +297,12 @@ một *chỉ mục* (index) đặt trên mảng các mức giá: một cách nha
 tử không rỗng.
 
 > [!NOTE]
-> `Engine::depth_snapshot` cần mức không rỗng *kế tiếp* sau mức tốt nhất. Code
-> hiện tại làm việc đó bằng cách gọi `test(t)` lần lượt trên từng tick
-> (`next_lower_active` / `next_higher_active`), tức là một lần quét tuyến tính,
-> dù bitset có thể trả lời nhanh hơn: che đi (mask) các bit từ `t` trở xuống
-> (với ask, vì ask quét lên) hoặc từ `t` trở lên (với bid, vì bid quét xuống),
-> rồi quét bit phần còn lại. Đây là một tối ưu dễ làm và có nhiều điều để học
+> `Engine::depth_snapshot` cần tìm mức không rỗng *kế tiếp* sau mức tốt nhất.
+> Code hiện tại làm việc đó bằng cách gọi `test(t)` lần lượt trên từng tick
+> (`next_lower_active` / `next_higher_active`), tức là quét tuyến tính, dù
+> bitset có thể trả lời nhanh hơn: che (mask) các bit từ `t` trở xuống (với ask,
+> vì ask quét lên) hoặc từ `t` trở lên (với bid, vì bid quét xuống), rồi quét
+> phần bit còn lại. Đây là một tối ưu khá đơn giản nhưng có nhiều điều để học
 > (xem phần bài tập). Nó không nằm trên hot path xử lý lệnh.
 
 ## 4.8 Tóm tắt

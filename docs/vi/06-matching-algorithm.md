@@ -7,11 +7,11 @@
 
 Mã nguồn: [`src/engine.rs`](../../src/engine.rs)
 
-Đây là chương mà mọi thứ ghép lại với nhau. Nếu chưa đọc chương 1 đến chương 5,
-bạn nên đọc trước: các cấu trúc dữ liệu được mô tả ở đó chính là công cụ mà ta
-dùng ở đây. Các đoạn code trích dẫn được rút gọn nhẹ (bỏ bớt chỗ xuống dòng và
-comment, và chỉ hiện một phía khi phía còn lại là bản đối xứng), nhưng hành vi
-giống hệt mã nguồn.
+Chương này ghép các phần đã giới thiệu lại với nhau. Nếu chưa đọc chương 1 đến
+chương 5, bạn nên đọc trước: các cấu trúc dữ liệu ở đó chính là công cụ được
+dùng ở đây. Các đoạn code trích dẫn đã được rút gọn đôi chút (lược bớt xuống
+dòng và comment, đồng thời chỉ trình bày một phía nếu phía còn lại đối xứng),
+nhưng hành vi vẫn giống hệt mã nguồn.
 
 ## 6.1 API công khai
 
@@ -38,9 +38,8 @@ engine.tick_count();               // usize valid ticks are 0..tick_count()
 engine.risk_limits();              // RiskLimits
 ```
 
-`submit_order` nhận một `NewOrder`, một struct `Copy` nhỏ chứa mọi điều khoản
-của một lệnh. Các hàm khởi tạo và các phương thức `with_*` của nó đọc lên như một
-câu văn:
+`submit_order` nhận một `NewOrder`, một struct `Copy` nhỏ chứa mọi thông tin của
+lệnh. Các hàm khởi tạo và phương thức `with_*` của nó ghép lại thành một câu:
 
 ```rust
 let order = NewOrder::limit(42, Side::Buy, 100, 10)     // id, side, tick, qty
@@ -50,13 +49,13 @@ let order = NewOrder::limit(42, Side::Buy, 100, 10)     // id, side, tick, qty
 ```
 
 `process_order(id, side, tick, qty, sink)` là cách viết tắt của
-`submit_order(NewOrder::limit(id, side, tick, qty), sink)`: tài khoản 0, cho phép
-tự giao dịch. Chương này đi theo `submit_order`. Mọi phương thức làm thay đổi sổ
-lệnh đều nhận event sink (nơi nhận sự kiện) dưới dạng `sink: &mut S` với
-`S: EventSink + ?Sized`. Vì là generic nên trình
-biên dịch tạo một bản riêng cho từng kiểu sink, và lời gọi `emit` được inline
-thẳng vào vòng lặp khớp lệnh. Ràng buộc `?Sized` còn cho phép truyền
-`&mut dyn EventSink` khi bạn muốn chỉ có một bản code được biên dịch.
+`submit_order(NewOrder::limit(id, side, tick, qty), sink)`: dùng tài khoản 0 và
+cho phép tự giao dịch. Chương này tập trung vào `submit_order`. Mọi phương thức
+làm thay đổi sổ lệnh đều nhận sink sự kiện qua tham số `sink: &mut S`, với
+`S: EventSink + ?Sized`. Vì đây là kiểu generic, trình biên dịch tạo một bản
+riêng cho mỗi kiểu sink và inline lời gọi `emit` vào vòng lặp khớp lệnh. Ràng
+buộc `?Sized` cũng cho phép truyền `&mut dyn EventSink` nếu bạn muốn chỉ biên
+dịch một bản code.
 
 | Phương thức | Thay đổi sổ? | Cấp phát? | Chi phí |
 |---|---|---|---|
@@ -100,7 +99,7 @@ flowchart TD
     O --> P
 ```
 
-Tóm tắt bằng lời:
+Tóm tắt quy trình:
 
 1. **Kiểm tra hợp lệ (validate).** Đầu vào sai, lệnh vi phạm một giới hạn rủi
    ro, và lệnh post-only sẽ gây ra giao dịch, đều bị từ chối trước khi có bất cứ
@@ -112,8 +111,8 @@ Tóm tắt bằng lời:
 4. **Cho nằm chờ (rest).** Đưa phần số lượng còn lại vào sổ, hoặc để nó hết hạn
    (expire) nếu loại lệnh đó không được phép nằm chờ.
 
-Loại lệnh chỉ làm thay đổi bước 1 và bước 4: việc khớp lệnh thì như nhau với mọi
-loại.
+Loại lệnh chỉ ảnh hưởng đến bước 1 và bước 4; bước khớp lệnh giống nhau với mọi
+loại lệnh.
 
 ### Giai đoạn 1 và 2: kiểm tra hợp lệ và chấp nhận lệnh
 
@@ -161,22 +160,21 @@ sink.emit(Event::OrderAccepted { order_id, account, side, order_type, price_tick
 | `is_outside_band(side, tick)` | `PriceOutsideBand` | Giới hạn rủi ro còn lại: một lệnh mua chỉ được đặt giá cao hơn ask tốt nhất tối đa `band` tick, một lệnh bán chỉ được đặt giá thấp hơn bid tốt nhất tối đa `band` tick. Khi phía bên kia không có lệnh nào thì không có giá tham chiếu, và không áp dụng biên độ nào. |
 | post-only và `is_marketable(side, tick)` | `PostOnlyWouldTrade` | Lệnh post-only cam kết không bao giờ lấy thanh khoản. `is_marketable` đặt đúng câu hỏi mở đầu việc khớp lệnh (giá tốt nhất phía đối diện có chạm tới giới hạn này không?) chỉ với một lần quét bit và không thay đổi gì trong sổ. |
 
-Khi kiểm tra thất bại, chỉ có **một** sự kiện `OrderRejected` được phát ra,
-không có `OrderAccepted` đứng trước. Các bước kiểm tra chạy theo thứ tự trong
-bảng và dừng ở lỗi đầu tiên, nên một lệnh mắc hai lỗi (ví dụ số lượng bằng 0
-*và* tick sai) luôn nhận cùng một lý do là `ZeroQuantity`. Lệnh thị trường không
-bao giờ trượt các bước kiểm tra giá: tick của nó đã được `market_limit` thay
-trước khi các bước đó chạy, bằng mép của biên độ giá (ask tốt nhất + band với
-lệnh mua, bid tốt nhất − band với lệnh bán) hoặc, nếu không có biên độ, bằng đầu
-mút của thang giá. `OrderAccepted` báo lại mức giới hạn đó, nên bên tiêu thụ biết
-lệnh được phép giao dịch xa tới đâu, và biên độ giá trở thành **lớp bảo vệ cho
-lệnh thị trường**: chúng dừng lại ở mép biên độ, và phần còn lại của chúng hết
-hạn.
+Nếu kiểm tra thất bại, engine chỉ phát **một** sự kiện `OrderRejected`, không
+phát `OrderAccepted` trước đó. Các bước kiểm tra chạy theo thứ tự trong bảng và
+dừng ở lỗi đầu tiên, nên một lệnh vi phạm hai điều kiện (ví dụ số lượng bằng 0
+*và* tick sai) luôn nhận cùng một lý do: `ZeroQuantity`. Lệnh thị trường không
+bị từ chối ở các bước kiểm tra giá vì `market_limit` thay tick của nó trước khi
+các bước đó chạy: bằng ranh giới biên độ giá (ask tốt nhất + band với lệnh mua,
+bid tốt nhất − band với lệnh bán), hoặc bằng đầu mút của thang giá nếu không có
+biên độ. `OrderAccepted` báo lại mức giới hạn đó để bên tiêu thụ biết lệnh được
+phép giao dịch xa tới đâu. Như vậy, biên độ giá trở thành **lớp bảo vệ cho lệnh
+thị trường**: lệnh dừng ở mép biên độ, còn phần số lượng dư hết hạn.
 
-Các giới hạn rủi ro là trạng thái của engine, được thay đổi bằng
-`set_risk_limits`. Cũng như một lệnh, lời gọi đó làm thay đổi các kết quả về sau,
-nên nó được ghi vào log giống như một lệnh (chương 9). Trả về `Result` từ một hàm nhỏ giúp thứ tự đó dễ đọc, và để nơi gọi xử lý mọi trường hợp từ chối
-chỉ bằng một câu `if let`.
+Các giới hạn rủi ro là trạng thái của engine và được thay đổi bằng
+`set_risk_limits`. Giống như lệnh, lời gọi này ảnh hưởng đến kết quả về sau nên cũng được ghi vào
+log (chương 9). Việc trả về `Result` từ hàm nhỏ này giúp thứ tự kiểm tra rõ
+ràng; bên gọi có thể xử lý mọi trường hợp từ chối chỉ bằng một câu `if let`.
 
 ### Giai đoạn 3: `match_incoming`, chọn phía
 
@@ -191,9 +189,9 @@ match side {
 }
 ```
 
-Một taker **mua** tấn công phía **ask**; một taker **bán** tấn công phía
-**bid**. Cùng một hàm phục vụ cả hai, và chỉ có hai điểm khác nhau, được gói
-trong enum `Crossing`:
+Taker **mua** khớp với phía **ask**, còn taker **bán** khớp với phía **bid**.
+Cùng một hàm xử lý cả hai phía; hai điểm khác biệt được gói trong enum
+`Crossing`:
 
 | | `TakerBuy` | `TakerSell` |
 |---|---|---|
@@ -201,8 +199,8 @@ trong enum `Crossing`:
 | Có thể khớp ngay khi | `tick <= limit_price` | `tick >= limit_price` |
 | `taker_side` được báo trong `Trade` | `Side::Buy` | `Side::Sell` |
 
-`self.trades` là bộ đếm giao dịch của engine: `match_incoming` tăng nó thêm một
-sau mỗi giao dịch và ghi giá trị mới vào sự kiện làm `trade_id` của giao dịch đó
+`self.trades` là bộ đếm giao dịch của engine: `match_incoming` tăng bộ đếm sau
+mỗi giao dịch, rồi ghi giá trị mới vào sự kiện làm `trade_id` của giao dịch đó
 (6.10).
 
 ## 6.3 `match_incoming`, trái tim của engine
@@ -249,10 +247,10 @@ let marketable = match direction {
 if !marketable { break; }
 ```
 
-Câu `break` sớm khi giá tốt nhất không thể khớp ngay vừa là một tối ưu quan
-trọng, vừa là một lập luận chứng minh tính đúng đắn: nếu giá *tốt nhất* phía đối
-diện còn không chạm tới giới hạn, thì **mọi giá khác phía đối diện đều tệ hơn**,
-nên không thể có thêm giao dịch nào. Không cần quét thêm.
+Lệnh `break` khi mức giá tốt nhất không thể khớp vừa là một tối ưu quan trọng,
+vừa giúp chứng minh tính đúng đắn: nếu giá *tốt nhất* phía đối diện còn không
+chạm tới giới hạn thì **mọi mức giá khác phía đối diện đều kém hơn**, nên không
+thể có thêm giao dịch nào. Không cần quét tiếp.
 
 ### Vòng trong: khớp với lệnh ở đầu hàng đợi
 
@@ -293,9 +291,9 @@ Mỗi bước có ba kết quả có thể xảy ra, tùy theo
 | taker_left **<** maker_qty | Taker khớp hết (`remaining` về 0). Maker vẫn ở lại, với số lượng đã giảm. |
 | taker_left **==** maker_qty | Cả hai cùng khớp hết. |
 
-Hãy để ý: **giá giao dịch là `tick`, tức mức giá của maker**, chứ không phải
-giới hạn của taker. Nhờ vậy giá tốt hơn mong đợi (price improvement, chương 1)
-có sẵn mà không tốn thêm công sức.
+Lưu ý rằng **giá giao dịch là `tick`, tức mức giá của maker**, chứ không phải
+giới hạn của taker. Nhờ vậy, taker có thể được giá tốt hơn mong đợi (price
+improvement, chương 1) mà không cần xử lý thêm.
 
 ### Sau vòng lặp trong
 
@@ -306,26 +304,25 @@ if !levels[tick].is_empty() {
 // The level drained; its bit was cleared with its last maker. Loop for the next price.
 ```
 
-Nếu mức giá vẫn còn lệnh, thì taker chắc chắn đã hết số lượng, nên ta dừng.
-Nếu mức giá đã cạn, quyền điều khiển quay về vòng ngoài, và vòng ngoài hỏi
-bitset về mức giá tốt nhất *tiếp theo*.
+Nếu mức giá vẫn còn lệnh thì taker chắc chắn đã hết số lượng, nên vòng lặp dừng.
+Nếu mức giá đã cạn, quyền điều khiển trở về vòng ngoài để bitset tìm mức giá tốt
+nhất *tiếp theo*.
 
 > [!NOTE]
 > **Tại sao phải xóa bit ngay trong vòng lặp trong, trước khi báo lệnh khớp?**
-> Nếu xóa sau vòng lặp thì việc khớp lệnh vẫn đúng như nhau. Nhưng engine đưa
-> sự kiện `OrderFilled` của maker cho sink của nơi gọi, và đó là code mà engine
-> không kiểm soát. Quy tắc là: **chỉ gọi ra sink khi mọi cấu trúc dữ liệu đã
-> nhất quán với nhau** (bất biến 6 ở mục 6.9). Nếu bit vẫn đang bật, `best_ask()`
-> sẽ báo một mức giá mà thực ra không còn lệnh nào. Lỗi này chỉ lộ ra khi một
-> sink bị panic và panic đó bị bắt lại, nhưng chính những quy tắc như thế giúp
-> codebase không có các lỗi kiểu "chỉ lộ ra khi...". Unit test
-> `panicking_sink_leaves_the_book_consistent` khóa chặt hành vi này.
+> Nếu xóa sau vòng lặp thì kết quả khớp lệnh vẫn đúng. Tuy nhiên, engine gửi sự
+> kiện `OrderFilled` của maker đến sink do bên gọi cung cấp, tức là gửi đến code
+> nằm ngoài tầm kiểm soát của engine. Quy tắc là: **chỉ gọi sink khi mọi cấu
+> trúc dữ liệu đã nhất quán với nhau** (bất biến 6 ở mục 6.9). Nếu bit vẫn bật,
+> `best_ask()` sẽ trả về một mức giá không còn lệnh nào. Lỗi này chỉ lộ ra khi
+> sink panic và panic đó được bắt lại, nhưng những quy tắc như vậy giúp codebase
+> tránh các lỗi chỉ xuất hiện trong tình huống đặc biệt. Unit test
+> `panicking_sink_leaves_the_book_consistent` kiểm tra chặt chẽ hành vi này.
 
 ### Chống tự giao dịch
 
-Ngay sau khi chọn maker ở đầu hàng đợi, và trước khi tính giao dịch, vòng lặp
-trong kiểm tra xem maker có thuộc chính tài khoản của taker hay không (đoạn
-trích):
+Ngay sau khi chọn maker ở đầu hàng đợi và trước khi tính giao dịch, vòng lặp
+trong kiểm tra xem maker có thuộc cùng tài khoản với taker hay không (đoạn trích):
 
 ```rust
 let maker = *pool.get(maker_idx);
@@ -355,13 +352,13 @@ gì thay đổi. Còn lại thì:
 | `CancelIncoming` | giữ nguyên | dừng lại; phần còn lại của nó hết hạn, kể cả khi là lệnh giới hạn |
 | `CancelBoth` | bị hủy | dừng lại; phần còn lại của nó hết hạn |
 
-Có ba chi tiết đáng xem kỹ. Sự kiện `SelfTradePrevented` được phát **trước
-tiên**, khi chưa có gì thay đổi, nên sink nhìn thấy một sổ nhất quán (6.9). Lệnh
-đang chờ rời khỏi sổ qua **đúng các bước của một maker khớp hết**, và theo cùng
-thứ tự: bitset được cập nhật trước khi `OrderCancelled` được báo. Và giờ
-`match_incoming` **trả về một `bool`**: `submit_order` cần biết taker đã bị
-dừng, vì một lệnh giới hạn bị dừng thì không được nằm chờ. Các giao dịch mà taker
-đã thực hiện trước khi gặp lệnh của chính nó vẫn giữ nguyên hiệu lực.
+Có ba chi tiết đáng chú ý. Sự kiện `SelfTradePrevented` được phát **trước khi
+có thay đổi nào**, nên sink luôn thấy một sổ nhất quán (6.9). Lệnh đang chờ được
+gỡ khỏi sổ qua **đúng các bước như khi maker khớp hết**, theo cùng thứ tự: bitset
+được cập nhật trước khi phát `OrderCancelled`. Ngoài ra, `match_incoming`
+**trả về một `bool`** để `submit_order` biết taker đã bị dừng hay chưa; lệnh giới
+hạn bị dừng không được nằm chờ. Các giao dịch taker đã thực hiện trước khi gặp
+lệnh của chính tài khoản mình vẫn giữ nguyên hiệu lực.
 
 ## 6.4 Giai đoạn 4: cho phần còn lại nằm chờ trong sổ
 
@@ -419,9 +416,9 @@ ra `OrderRejected` **sau** `OrderAccepted`:
 
 ### Phần còn lại không được nằm chờ
 
-Lệnh immediate-or-cancel và lệnh thị trường không bao giờ nằm chờ, lệnh bị cơ
-chế chống tự giao dịch dừng lại cũng vậy. Phần còn lại của chúng bị bỏ đi trước
-cả khi arena được hỏi xin một ô (đoạn trích):
+Lệnh immediate-or-cancel, lệnh thị trường và lệnh bị dừng bởi cơ chế chống tự
+giao dịch đều không nằm chờ trong sổ. Phần số lượng còn lại bị loại bỏ trước khi
+engine yêu cầu arena cấp ô (đoạn trích):
 
 ```rust
 if stopped_by_self_trade || !order_type.rests() {  // only Limit and PostOnly rest
@@ -431,19 +428,18 @@ if stopped_by_self_trade || !order_type.rests() {  // only Limit and PostOnly re
 }
 ```
 
-Vì vậy một lệnh như thế không bao giờ nhận `BookFull` và không bao giờ chiếm một
-ô, dù chỉ trong khoảnh khắc. Chuỗi sự kiện của nó kết thúc bằng `OrderExpired`,
-sau `OrderPartiallyFilled` của taker nếu nó đã giao dịch. Vì sao lại cần một sự
-kiện mới thay vì `OrderCancelled`? `OrderCancelled` có nghĩa là "số lượng này đã
-rời khỏi sổ", và bên tiêu thụ đang theo dõi độ sâu của sổ (chương 7) sẽ trừ nó
-khỏi một mức giá. Số lượng hết hạn chưa từng nằm trong sổ, nên không có gì để
-trừ.
+Vì vậy, lệnh loại này không bao giờ nhận `BookFull` và không chiếm ô nào, dù chỉ
+trong chốc lát. Chuỗi sự kiện kết thúc bằng `OrderExpired`, sau sự kiện
+`OrderPartiallyFilled` của taker nếu lệnh đã giao dịch. Vì sao cần sự kiện riêng
+này thay vì `OrderCancelled`? `OrderCancelled` nghĩa là "số lượng này đã rời khỏi
+sổ". Bên tiêu thụ theo dõi độ sâu của sổ (chương 7) sẽ trừ số lượng đó khỏi một
+mức giá. Phần số lượng hết hạn chưa từng nằm trong sổ nên không có gì để trừ.
 
 ## 6.5 Theo dõi trọn vẹn từng bước
 
-Ta hãy chạy lại bước 6 của
+Hãy chạy lại bước 6 của
 [ví dụ minh họa](01-order-book-basics.md#110-một-ví-dụ-hoàn-chỉnh) và quan
-sát từng cấu trúc dữ liệu thay đổi ra sao. Trạng thái ban đầu (dung lượng 16;
+xem từng cấu trúc dữ liệu thay đổi ra sao. Trạng thái ban đầu (dung lượng 16;
 xem [chương 2](02-architecture.md#các-mảnh-ghép-trỏ-vào-nhau-như-thế-nào) để có
 bức tranh đầy đủ):
 
@@ -483,7 +479,7 @@ Trạng thái cuối:
  best_bid = 102, best_ask = None, live_order_count = 3
 ```
 
-Mỗi bước ở trên đều là O(1), và không có byte bộ nhớ nào được cấp phát.
+Mỗi bước trên đều là O(1) và không cấp phát byte bộ nhớ nào.
 
 ### Thêm vài ví dụ (đều do engine thật tạo ra)
 
@@ -537,17 +533,18 @@ pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut 
 | Bỏ mức giá khỏi chỉ mục nếu giờ đã trống | `bitset.clear` | O(1) |
 | Trả ô về để dùng lại | `pool.free` | O(1) |
 
-Hủy một id **không tồn tại** hoặc **đã khớp hết** sẽ không đụng gì đến sổ, phát
-`CancelRejected` (lý do `NotResting`) và trả về `false`. Việc phát một sự kiện, chứ không chỉ trả về
-`false`, có ý nghĩa với bất kỳ ai theo dõi engine chỉ qua các sự kiện của nó: mọi
-yêu cầu hủy đều để lại đúng một sự kiện. (Hãy thử hủy lệnh 4 hai lần trong ví dụ
-minh họa: lần đầu trả về `true` kèm `OrderCancelled`, lần sau trả về `false` kèm
-`CancelRejected`.)
+Hủy một id **không tồn tại** hoặc **đã khớp hết** không làm thay đổi sổ; engine
+phát `CancelRejected` (lý do `NotResting`) và trả về `false`. Việc phát sự kiện,
+thay vì chỉ trả về `false`, rất quan trọng với bên chỉ theo dõi engine qua các
+sự kiện: mỗi yêu cầu hủy đều tạo ra đúng một sự kiện. (Thử hủy lệnh 4 hai lần
+trong ví dụ minh họa: lần đầu trả về `true` kèm `OrderCancelled`, lần sau trả về
+`false` kèm `CancelRejected`.)
 
-`OrderCancelled` sao chép phía, tick và số lượng còn lại ra khỏi bản ghi lệnh
-trước khi ô được free, nhờ vậy bên tiêu thụ biết mức giá nào bị mất bao nhiêu. Để
-đọc chính các field đó *mà không* hủy lệnh, hãy dùng `resting_order(id)`: cùng
-một lần tra `id_map`, rồi sao chép các field của lệnh vào một `RestingOrder`.
+Khi tạo sự kiện `OrderCancelled`, engine sao chép phía, tick và số lượng còn lại
+từ bản ghi lệnh trước khi giải phóng ô. Nhờ đó, bên tiêu thụ biết mức giá nào bị
+giảm bao nhiêu. Để đọc các field này *mà không* hủy lệnh, hãy dùng
+`resting_order(id)`: phương thức này tra `id_map` một lần rồi sao chép các field
+của lệnh vào một `RestingOrder`.
 
 ### Giảm số lượng của lệnh
 
@@ -567,13 +564,13 @@ sink.emit(Event::OrderReduced { order_id, side: order.side, price_tick: order.pr
                                 reduced_qty: reduce_by, remaining_qty: order.remaining_qty - reduce_by });
 ```
 
-Lệnh vẫn giữ nguyên vị trí của nó trong hàng đợi. Như vậy là công bằng: một lệnh
-nhỏ đi thì không bao giờ có thể giành mất lần khớp của các lệnh xếp sau nó. (Tăng
-số lượng thì có thể, nên muốn tăng thì bạn hủy rồi gửi một lệnh mới, lệnh này sẽ
-xếp vào cuối hàng.) `reduce_qty` chính là thao tác của `PriceLevel` mà một lần
-khớp một phần sử dụng (chương 3): nó giảm `remaining_qty` của lệnh và `total_qty`
-của mức giá cùng một lúc. Giảm bằng hoặc nhiều hơn toàn bộ phần còn lại thì là
-hủy lệnh, kèm `OrderCancelled`.
+Lệnh vẫn giữ nguyên vị trí trong hàng đợi. Điều này bảo đảm công bằng: giảm số
+lượng không giúp lệnh vượt lên trước các lệnh phía sau. (Tăng số lượng có thể
+ảnh hưởng đến ưu tiên, nên muốn tăng thì bạn phải hủy lệnh rồi gửi lệnh mới; lệnh
+mới sẽ vào cuối hàng.) `reduce_qty` là thao tác của `PriceLevel` được dùng khi
+khớp một phần (chương 3): thao tác này đồng thời giảm `remaining_qty` của lệnh
+và `total_qty` của mức giá. Nếu giảm bằng hoặc nhiều hơn toàn bộ số lượng còn
+lại, engine hủy lệnh và phát `OrderCancelled`.
 
 ### Hủy hàng loạt
 
@@ -602,16 +599,17 @@ for side in [Side::Buy, Side::Sell] {
 sink.emit(Event::MassCancelled { account, cancelled_orders: cancelled });
 ```
 
-Vì vậy các lệnh hủy diễn ra theo một **thứ tự cố định**: bid trước, từ giá tốt
-nhất, rồi đến ask, từ giá tốt nhất, và ở mỗi mức giá thì lệnh cũ nhất trước. Điều
-đó quan trọng cho tính tất định: khi chạy lại (replay) thì chúng được báo theo
-đúng thứ tự cũ, và sổ lệnh tham chiếu trong kiểm thử đối chiếu có thể đoán trước
-từng sự kiện. `remove_cancelled` là nửa sau của `cancel_order`, giờ được dùng
-chung vì có hai nơi gọi cần đến nó. Chi phí là số tick giữa giá tốt nhất và giá
-tệ nhất của mỗi phía (tối đa bằng số tick) cộng với số lệnh ở đó; các tick trống là cái
-giá của việc không giữ danh sách theo tài khoản (bài tập 11 ở chương 11 thêm một
-danh sách như vậy). `MassCancelled` khép lại mọi lần hủy hàng loạt, kể cả lần
-không tìm thấy lệnh nào, nên yêu cầu đó luôn để lại một sự kiện.
+Vì vậy, các lệnh bị hủy theo **thứ tự cố định**: bid trước, bắt đầu từ giá tốt
+nhất, rồi đến ask, cũng bắt đầu từ giá tốt nhất; tại mỗi mức giá, lệnh cũ nhất
+được xử lý trước. Thứ tự này quan trọng với tính tất định: khi phát lại (replay),
+các sự kiện xuất hiện đúng thứ tự cũ và sổ lệnh tham chiếu trong kiểm thử đối
+chiếu có thể dự đoán từng sự kiện. `remove_cancelled` là phần còn lại của
+`cancel_order`, được dùng chung vì cả hai thao tác đều cần đến nó. Chi phí gồm
+số tick giữa giá tốt nhất và giá tệ nhất của mỗi phía (tối đa bằng số tick) cộng
+với số lệnh đang chờ; các tick trống là cái giá phải trả khi không duy trì danh
+sách theo tài khoản (bài tập 11 ở chương 11 bổ sung danh sách đó).
+`MassCancelled` kết thúc mọi lần hủy hàng loạt, kể cả khi không tìm thấy lệnh
+nào, nên mỗi yêu cầu đều tạo ra một sự kiện.
 
 ## 6.7 Các trường hợp biên, đã được kiểm chứng
 
@@ -645,18 +643,18 @@ không tìm thấy lệnh nào, nên yêu cầu đó luôn để lại một s�
 
 - **Giai đoạn 1 và 2 (kiểm tra, chấp nhận):** O(1) kỳ vọng: một lần tra bảng
   băm.
-- **Giai đoạn 3 (khớp):** mỗi vòng lặp tạo ra một giao dịch, rồi hoặc loại một
-  maker khỏi sổ (`O(1)` cho gỡ khỏi hàng đợi + free + xóa khỏi bảng băm), hoặc
-  làm taker hết số lượng. Chuyển sang mức giá kế tiếp là một lần quét bit, cũng
-  O(1). Mỗi mức giá được duyệt qua đều tạo ra ít nhất một giao dịch hoặc một
-  lệnh của chính tài khoản bị hủy, nên tổng chi phí là **O(số lần khớp + số lần
+- **Giai đoạn 3 (khớp):** mỗi vòng lặp tạo ra một giao dịch, rồi hoặc gỡ một
+  maker khỏi sổ (`O(1)` để gỡ khỏi hàng đợi, giải phóng ô và xóa khỏi bảng băm),
+  hoặc làm taker hết số lượng. Chuyển sang mức giá kế tiếp cần một lần quét bit,
+  cũng là O(1). Ở mỗi mức giá được duyệt, engine thực hiện ít nhất một giao dịch
+  hoặc hủy một lệnh tự giao dịch, nên tổng chi phí là **O(số lần khớp + số lần
   tự giao dịch bị chặn)**.
 - **Giai đoạn 4 (nằm chờ hoặc hết hạn):** O(1).
 - **`cancel_order` và `reduce_order`:** O(1) kỳ vọng: một lần tra bảng băm, rồi
   một lượng công việc cố định trên hàng đợi của lệnh.
 - **`cancel_account` và `cancel_all`:** O(số tick giữa giá tốt nhất và giá tệ
-  nhất ở mỗi phía + số lệnh ở đó), tối đa `tick_count()` tick; không cần tra bảng băm để
-  tìm lệnh, chỉ một lần cho mỗi lệnh bị hủy để xóa nó.
+  nhất ở mỗi phía + số lệnh ở đó), tối đa `tick_count()` tick; không cần tra bảng
+  băm để tìm lệnh, chỉ tra một lần cho mỗi lệnh bị hủy để xóa nó.
 
 Tổng thể: **O(1 + số lần khớp) kỳ vọng** (chữ "kỳ vọng" có mặt vì bảng băm phải
 dò; xem chương 5), khớp với doc comment ("O(1) + O(fills)"). Một taker không
@@ -665,8 +663,8 @@ bao nhiêu lệnh.
 
 ## 6.9 Các bất biến sau mỗi lần gọi
 
-Các bất biến (invariant) này luôn đúng giữa các lần gọi, và cái cuối cùng còn
-đúng ngay cả trong lúc đang gọi. Kiểm thử đối chiếu ở chương 10
+Các bất biến (invariant) này luôn đúng giữa các lần gọi; bất biến cuối cùng còn
+đúng ngay cả khi lời gọi đang chạy. Kiểm thử đối chiếu ở chương 10
 (`tests/model_check.rs`) kiểm tra những cái quan sát được (giá tốt nhất, độ sâu,
 số lệnh còn sống, chính xác từng sự kiện) sau mỗi yêu cầu:
 
@@ -694,24 +692,22 @@ số lệnh còn sống, chính xác từng sự kiện) sau mỗi yêu cầu:
 
 **Một hàm cho cả hai phía.** Thay vì nhân đôi vòng lặp khớp lệnh cho lệnh mua và
 lệnh bán, `match_incoming` nhận vùng lưu trữ của phía đối diện cùng một giá trị
-`Crossing`. Các nhánh `match direction` cực kỳ dễ cho CPU dự đoán (branch
-prediction).
+`Crossing`. CPU dễ dự đoán các nhánh `match direction` (branch prediction).
 
 **Vì sao `match_incoming` là associated function (hàm liên kết), không phải
-phương thức `&mut self`.** Nó nhận `&mut self.pool`, `&mut self.ask_levels`,
+phương thức `&mut self`.** Hàm nhận `&mut self.pool`, `&mut self.ask_levels`,
 `&mut self.ask_bitset` và `&mut self.id_map` làm các tham số riêng. Rust cho
-phép mượn dạng mutable *các field rời nhau* (disjoint fields) của một struct
-cùng một lúc, nhưng không cho mượn cả struct cộng thêm một field: một phương
-thức `fn match_incoming(&mut self, levels: &mut [PriceLevel], ...)` sẽ không
-thể được gọi với `&mut self.ask_levels`, vì `self` đã bị mượn nguyên cả khối
-rồi.
+phép mượn mutable đồng thời *các field rời nhau* (disjoint fields) của một
+struct, nhưng không thể mượn toàn bộ struct cùng lúc với một field của nó. Vì
+vậy, không thể gọi phương thức `fn match_incoming(&mut self, levels: &mut [PriceLevel], ...)`
+với `&mut self.ask_levels`: khi ấy `self` đã bị mượn toàn bộ.
 
-Thật ra phương thức `&mut self` *vẫn làm được*: nó có thể mở đầu bằng
+Thực ra, phương thức `&mut self` *vẫn làm được*: nó có thể mở đầu bằng
 `let (levels, bitset) = match direction { ... }` rồi tự chọn các field, vì
-trong thân một hàm thì mượn hai field khác nhau là được phép. Cách dùng
-associated function được chọn vì nó giữ quyết định đó ở nơi gọi, và làm cho mọi
-phần trạng thái mà vòng lặp đụng tới đều lộ ra ngay trong chữ ký hàm.
-`#[allow(clippy::too_many_arguments)]` là cái giá phải trả cho sự rõ ràng ấy.
+trong thân hàm, việc mượn hai field khác nhau vẫn được phép. Associated function
+được chọn để quyết định này nằm ở nơi gọi, đồng thời làm rõ trong chữ ký hàm mọi
+phần trạng thái mà vòng lặp sử dụng. `#[allow(clippy::too_many_arguments)]` là
+cái giá phải trả cho sự rõ ràng đó.
 
 **Bộ đếm `sequence`.** Nó tăng một lần cho mỗi lệnh vượt qua bước kiểm tra hợp
 lệ, và được sao chép vào bản ghi `Order` nếu lệnh đó nằm chờ trong sổ. Engine
@@ -728,14 +724,14 @@ này để phát hiện bản trùng lặp và chỗ bị hụt (chương 7). M�
 một cho mỗi giao dịch thì trên thực tế không bao giờ tràn, nên nó dùng `+= 1`
 bình thường.
 
-**`#[inline(always)]` trên các accessor nhỏ xíu** (`best_bid`, `best_ask`,
+**`#[inline(always)]` trên các accessor rất nhỏ** (`best_bid`, `best_ask`,
 `live_order_count`, các accessor của bitset và pool) loại bỏ chi phí gọi hàm
 trong hot path.
 
 ## 6.11 Tự thực hành
 
-Chạy mọi test của engine, rồi chạy kiểm thử đối chiếu so engine với một sổ lệnh
-tham chiếu được viết cố ý thật đơn giản, trên 160,000 lời gọi ngẫu nhiên:
+Chạy mọi test của engine, sau đó chạy kiểm thử đối chiếu giữa engine và một sổ
+lệnh tham chiếu được cố ý viết thật đơn giản, với 160,000 lời gọi ngẫu nhiên:
 
 ```sh
 cargo test engine::
@@ -748,7 +744,7 @@ cargo test --test model_check
 cargo run --example walkthrough
 ```
 
-Sau đó hãy cố tình làm hỏng một chỗ. Trong `match_incoming` ở
+Tiếp theo, hãy cố tình làm hỏng một chỗ. Trong `match_incoming` ở
 [`src/engine.rs`](../../src/engine.rs), đổi
 `Crossing::TakerBuy => tick as u32 <= price_tick` thành
 `Crossing::TakerBuy => (tick as u32) < price_tick`, để lệnh mua không còn giao

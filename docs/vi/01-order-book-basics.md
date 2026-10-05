@@ -18,8 +18,8 @@ câu hỏi, hàng triệu lần mỗi ngày:
 > *"Có người muốn mua, có người muốn bán. Ta ghép họ lại với nhau được không, và
 > ở mức giá nào?"*
 
-Mọi thứ khác trong repo này (arena, bitset, bảng băm...) sinh ra chỉ để trả lời
-câu hỏi đó thật **nhanh** và thật **ổn định**.
+Mọi thứ khác trong repo này (arena, bitset, bảng băm...) đều nhằm trả lời câu
+hỏi đó thật **nhanh** và **dễ dự đoán**.
 
 ## 1.2 Lệnh
 
@@ -33,13 +33,12 @@ của nó (1.9). Một lệnh giới hạn gồm bốn thông tin:
 | `price`    | Mức giá *tệ nhất* mà nhà giao dịch chấp nhận.                  | `price_tick: u32`           |
 | `qty`      | Số lượng đơn vị (cổ phiếu, lô, hợp đồng...).                   | `qty: u64`                  |
 | `order_id` | Một nhãn duy nhất để gọi tên lệnh (ví dụ khi cần hủy).         | `order_id: u64`             |
-| `account`  | Ai đã đặt lệnh: một nhà giao dịch, một công ty, hay bất kỳ đơn vị nào mà bên gọi theo dõi. | `account: u32`              |
+| `account`  | Ai đặt lệnh: nhà giao dịch, công ty hoặc thực thể mà bên gọi muốn theo dõi. | `account: u32`              |
 
 "Duy nhất" ở đây nghĩa là *duy nhất trong số các lệnh còn nằm trong sổ*. Engine
-từ chối lệnh mới nếu id của nó trùng với một lệnh đang chờ. Nhưng khi một lệnh đã
-khớp hết hoặc đã bị hủy, engine quên id đó, nên id ấy có thể được dùng lại. Sàn
-thật thường cấm việc này; ở đây, việc tránh trùng id là trách nhiệm của bên gọi
-(caller).
+từ chối lệnh mới nếu id của nó trùng với một lệnh đang chờ. Khi lệnh đã khớp hết
+hoặc bị hủy, engine quên id đó nên id ấy có thể được dùng lại. Sàn thật thường
+cấm việc này; ở đây, bên gọi (caller) chịu trách nhiệm tránh dùng lại id.
 
 Giá là một **giới hạn**, nghĩa là:
 
@@ -70,20 +69,19 @@ Giá là một **giới hạn**, nghĩa là:
 ```
 
 Khoảng cách giữa bid tốt nhất và ask tốt nhất gọi là **spread**. Trong một sổ lệnh
-bình thường, bid tốt nhất luôn **thấp hơn** ask tốt nhất. Nếu hai giá này mà
-chạm nhau thì một giao dịch xảy ra ngay lập tức. Đó chính là việc của engine khớp
-lệnh.
+bình thường, bid tốt nhất luôn **thấp hơn** ask tốt nhất. Nếu hai mức giá chạm
+nhau, giao dịch sẽ diễn ra ngay. Đó chính là nhiệm vụ của engine khớp lệnh.
 
 > [!NOTE]
 > Chữ **CLOB** trong phần mô tả dự án này là viết tắt của *Central Limit Order
-> Book*: một sổ lệnh trung tâm duy nhất, chỉ gồm các lệnh giới hạn, mà mọi người
-> đều giao dịch với nó.
+> Book*: một sổ lệnh trung tâm duy nhất, chỉ gồm các lệnh giới hạn, nơi mọi người
+> đặt lệnh để giao dịch.
 
 ## 1.4 Vượt spread: khi nào có giao dịch
 
-Khi một lệnh mới đến, engine kiểm tra trước xem nó có giao dịch được ngay không.
-Một lệnh mới **có thể khớp ngay** (marketable, hay còn nói là nó *vượt spread*)
-khi:
+Khi có lệnh mới, trước tiên engine kiểm tra xem lệnh đó có thể giao dịch ngay
+không. Một lệnh mới **có thể khớp ngay** (marketable, hay nói cách khác là
+*vượt spread*) khi:
 
 - lệnh **mua** có giá **≥ ask tốt nhất**, hoặc
 - lệnh **bán** có giá **≤ bid tốt nhất**.
@@ -96,16 +94,17 @@ khi:
    lệnh MUA mới @ 105  ->  105 >= 101  -> khớp được, giao dịch với ask ở 101
 ```
 
-Dòng cuối chứa một điểm tinh tế mà người mới thường ngạc nhiên: người mua nói
-"tối đa 105", nhưng giao dịch lại xảy ra ở giá **101**, tức giá của lệnh đã chờ
-sẵn. **Giao dịch luôn diễn ra ở giá của lệnh đang chờ.** Người mua được giá tốt
-hơn mức họ đưa ra (*price improvement*).
+Dòng cuối thể hiện một điểm thường khiến người mới ngạc nhiên: người mua nói
+"tối đa 105", nhưng giao dịch lại diễn ra ở giá **101**, tức giá của lệnh đã nằm
+sẵn trong sổ. **Giao dịch luôn diễn ra ở giá của lệnh đang chờ.** Vì thế người
+mua được giá tốt hơn mức họ chấp nhận (*price improvement*).
 
 ### Maker và taker
 
 Mỗi giao dịch có hai lệnh tham gia:
 
-- **Maker** là lệnh đã nằm sẵn trong sổ. Nó *tạo ra* thanh khoản (liquidity).
+- **Maker** là lệnh đã nằm sẵn trong sổ. Lệnh này *cung cấp* thanh khoản
+  (liquidity).
 - **Taker** là lệnh vừa đến và *lấy đi* thanh khoản đó. Nó còn được gọi là
   **aggressor** (bên chủ động), và phía của nó là **aggressor side** của giao
   dịch: một giao dịch mà người mua vượt qua spread được gọi là "do bên mua khởi
@@ -116,8 +115,8 @@ Bạn sẽ gặp hai từ này khắp nơi trong code (`maker_order_id`, `taker_
 
 ## 1.5 Ưu tiên giá, rồi đến thời gian
 
-Nếu có nhiều lệnh đang chờ thì lệnh nào được phục vụ trước? Quy tắc mà hầu hết
-các sàn (và engine này) dùng là **ưu tiên giá, rồi đến thời gian**
+Nếu có nhiều lệnh đang chờ thì lệnh nào được xử lý trước? Quy tắc mà hầu hết
+các sàn (và engine này) áp dụng là **ưu tiên giá, rồi đến thời gian**
 (price-time priority):
 
 1. **Giá trước.** Giá tốt nhất được phục vụ trước. Với người mua, đó là ask thấp
@@ -136,13 +135,13 @@ Vì vậy, mỗi mức giá trong engine là một **hàng đợi** chứ không
 
 ## 1.6 Khớp một phần
 
-Lệnh đến có thể lớn hơn số lượng đang có sẵn. Khi đó nó chỉ được khớp **một
-phần**:
+Lệnh mới có thể có số lượng lớn hơn lượng đang chờ trong sổ. Khi đó lệnh chỉ được
+khớp **một phần**:
 
-- Nếu taker lớn hơn maker, maker được khớp hết và rời khỏi sổ; taker đi tiếp sang
-  lệnh đang chờ kế tiếp.
-- Nếu taker nhỏ hơn maker, taker được khớp hết, còn maker ở lại trong sổ với số
-  lượng còn lại nhỏ hơn.
+- Nếu taker có số lượng lớn hơn maker, maker được khớp hết và rời khỏi sổ; taker
+  tiếp tục khớp với lệnh đang chờ kế tiếp.
+- Nếu taker có số lượng nhỏ hơn maker, taker được khớp hết, còn maker ở lại trong
+  sổ với số lượng còn lại ít hơn.
 - Nếu hai bên có đúng cùng số lượng, **cả hai** đều khớp hết cùng lúc: maker rời
   khỏi sổ và taker xong việc. (Engine phát một sự kiện `OrderFilled` cho từng lệnh.)
 - Nếu sau khi đã giao dịch với mọi lệnh có thể mà taker vẫn còn dư số lượng, thì
@@ -150,7 +149,7 @@ phần**:
 
 ## 1.7 Hủy lệnh
 
-Nhà giao dịch có thể rút một lệnh đang chờ bất cứ lúc nào bằng `order_id` của nó.
+Nhà giao dịch có thể hủy một lệnh đang chờ bất cứ lúc nào bằng `order_id` của lệnh.
 Engine phải tìm ra lệnh đó *mà không quét cả sổ*, gỡ nó ra khỏi giữa hàng đợi, và
 nếu đó là lệnh cuối cùng ở mức giá ấy thì phải xóa luôn mức giá khỏi sổ. Làm được
 việc này trong O(1) là một trong những thách thức thiết kế chính (xem
@@ -170,22 +169,22 @@ giao dịch bị tạm dừng.
 
 ### Giao dịch với chính mình
 
-Một nhà giao dịch lớn thường có cả lệnh mua lẫn lệnh bán trong sổ cùng lúc, đến
-từ các chiến lược khác nhau. Nếu một lệnh mua của họ gặp một lệnh bán của chính
-họ, một "giao dịch" được ghi nhận dù chẳng có gì chuyển từ chủ này sang chủ khác,
-nhưng phần còn lại của thị trường lại coi đó là hoạt động thật. Cố ý làm vậy được
-gọi là **giao dịch giả** (wash trading), và đó là hành vi thao túng thị trường bất
-hợp pháp. Vì thế các sàn cung cấp cơ chế **chống tự giao dịch** (self-trade
-prevention): khi một lệnh đến sắp giao dịch với một lệnh đang chờ của cùng tài
-khoản, giao dịch đó bị chặn, và nhà giao dịch chọn điều gì xảy ra thay vào đó:
-hủy lệnh đang chờ, hủy lệnh vừa đến, hoặc hủy cả hai.
+Một nhà giao dịch lớn thường có cả lệnh mua lẫn lệnh bán trong sổ cùng lúc, xuất
+phát từ các chiến lược khác nhau. Nếu lệnh mua của họ khớp với lệnh bán của chính
+họ, một giao dịch vẫn được ghi nhận dù không có tài sản nào chuyển từ chủ này
+sang chủ khác; tuy nhiên, thị trường lại nhìn thấy hoạt động đó như một giao dịch
+thật. Cố ý làm vậy gọi là **giao dịch giả** (wash trading), một hành vi thao túng
+thị trường bất hợp pháp. Vì thế các sàn cung cấp cơ chế **chống tự giao dịch**
+(self-trade prevention): nếu lệnh mới sắp khớp với lệnh đang chờ của cùng tài
+khoản, giao dịch bị chặn. Nhà giao dịch có thể chọn cách xử lý tiếp theo: hủy lệnh
+đang chờ, hủy lệnh mới đến hoặc hủy cả hai.
 
 ## 1.8 Tick: giá là những số nguyên nhỏ
 
-Giá thật trông như `101.25`. Số dấu phẩy động không biểu diễn chính xác được
-hầu hết các phân số thập phân và cho kết quả đáng ngạc nhiên (`0.1 + 0.2 != 0.3`),
-điều không thể chấp nhận khi có tiền đổi chủ. Vì vậy các sàn dùng **tick là số
-nguyên**. Một *tick* là bước giá nhỏ nhất được phép.
+Giá thực tế thường có dạng như `101.25`. Số dấu phẩy động không biểu diễn chính
+xác được hầu hết phân số thập phân, nên có thể cho kết quả bất ngờ
+(`0.1 + 0.2 != 0.3`). Điều đó không thể chấp nhận khi giao dịch tiền bạc, vì vậy
+các sàn dùng **tick nguyên**. Một *tick* là bước giá nhỏ nhất được phép.
 
 ```text
    kích thước tick = 0.25    tick 0   -> giá 100.00   (nếu ta chọn mốc lệch (offset) là 100.00)
@@ -195,19 +194,19 @@ nguyên**. Một *tick* là bước giá nhỏ nhất được phép.
                              tick 4095-> giá 1123.75
 ```
 
-Engine này **chỉ làm việc với tick**: `price_tick` là một `u32` từ `0` cho tới
-số tick của engine, mặc định là 4096 trừ khi bạn chọn một số khác bằng
-`Engine::with_ticks` (tối đa khoảng 16.7 triệu). Ví dụ ở trên cần 4096 tick để
-lên tới 1123.75; một cổ phiếu quanh mức 100.00 giao dịch theo bước 0.01 thì cần
-hơn 10,000 tick. Việc đổi qua lại giữa giá thật và tick
+Engine này **chỉ làm việc với tick**: `price_tick` là một `u32` từ `0` đến nhỏ
+hơn số tick của engine. Mặc định engine có 4096 tick, trừ khi bạn chọn số khác
+bằng `Engine::with_ticks` (tối đa khoảng 16.7 triệu). Ví dụ ở trên cần 4096 tick
+để lên tới 1123.75; một cổ phiếu quanh mức 100.00, giao dịch theo bước 0.01, cần
+hơn 10,000 tick. Việc đổi qua lại giữa giá thực tế và tick
 (`price = offset + tick * tick_size`) là **trách nhiệm của bên gọi**.
 
 Các ví dụ trong các chương đều dùng 4096 tick mặc định.
 
-Vì sao điều này quan trọng với thiết kế? Nếu tập các mức giá có thể có vừa nhỏ
-vừa liền nhau, ta có thể dùng **mảng đánh chỉ số theo tick** thay cho cây hay bảng
-băm. `levels[tick]` chỉ tốn một lần đọc bộ nhớ. Ý tưởng đó chống đỡ toàn bộ thiết
-kế.
+Vì sao điều này quan trọng với thiết kế? Nếu các mức giá có thể có không quá
+nhiều và nằm dày đặc, ta có thể dùng **mảng đánh chỉ số theo tick** thay cho cây
+hay bảng băm. `levels[tick]` chỉ cần một lần đọc bộ nhớ. Đây là ý tưởng nền tảng
+của toàn bộ thiết kế.
 
 ## 1.9 Engine này hỗ trợ gì (và không hỗ trợ gì)
 
@@ -215,7 +214,7 @@ kế.
 |--------------------------------------------------------|--------------------------------------------------------|
 | Lệnh giới hạn, immediate-or-cancel, thị trường (market) và post-only | Lệnh dừng (stop), fill-or-kill, lệnh trong ngày |
 | Khớp một phần và khớp đủ                               | Lệnh tảng băng (iceberg, có phần số lượng ẩn)          |
-| Cho phần chưa khớp nằm chờ trong sổ                    | Tăng số lượng hoặc đổi giá ngay tại chỗ (hủy rồi đặt lệnh mới là được) |
+| Cho phần chưa khớp nằm chờ trong sổ                    | Tăng số lượng hoặc đổi giá ngay tại chỗ (có thể hủy rồi đặt lệnh mới) |
 | Hủy theo `order_id`; giảm số lượng mà vẫn giữ ưu tiên  | Giới hạn theo tài khoản (vị thế, số lệnh đang mở)      |
 | Tài khoản, chống tự giao dịch, hủy hàng loạt           | Phiên giao dịch và tạm dừng giao dịch (cho việc này chỉ có `cancel_all`) |
 | Ưu tiên giá, rồi đến thời gian                         | Nhiều mã giao dịch trong một `Engine` (mỗi mã một engine) |
@@ -225,25 +224,25 @@ kế.
 
 ### Giới hạn rủi ro: ngăn lỗi bấm nhầm (fat finger)
 
-Một nhà giao dịch gõ 10000 thay vì 100, hoặc đặt giá mua cao gấp mười lần, có thể
-gây thiệt hại thật chỉ trong vài micro giây: lệnh đó giao dịch với mọi thứ mà nó
-chạm tới. Vì thế các sàn kiểm tra mọi lệnh theo các **giới hạn rủi ro trước giao
-dịch** trước khi cho phép nó giao dịch. Engine này có hai giới hạn:
+Nhà giao dịch nhập 10000 thay vì 100, hoặc đặt giá mua cao gấp mười lần, có thể
+gây thiệt hại thật chỉ trong vài micro giây: lệnh đó có thể khớp với mọi lệnh mà
+nó gặp. Vì vậy, các sàn kiểm tra mọi lệnh theo **giới hạn rủi ro trước giao
+dịch** trước khi cho phép khớp. Engine này có hai giới hạn:
 
 - **số lượng tối đa của một lệnh**;
-- **biên độ giá (price band)**: một lệnh chỉ được vươn tới tối đa vài tick vượt
-  quá giá tốt nhất ở phía bên kia. Một lệnh mua giới hạn ở 150 khi ask tốt nhất
-  là 100 bị từ chối thẳng, còn một lệnh thị trường dừng lại ở mép của biên độ
-  thay vì quét sạch cả sổ.
+- **biên độ giá (price band)**: một lệnh chỉ được khớp ở mức giá cách giá tốt
+  nhất phía đối diện tối đa vài tick. Lệnh mua giới hạn ở 150 khi ask tốt nhất
+  là 100 sẽ bị từ chối, còn lệnh thị trường dừng ở ranh giới biên độ thay vì
+  quét sạch cả sổ.
 
 Các giới hạn này là một phần trạng thái của engine và có thể thay đổi trong ngày,
 chẳng hạn khi thị trường trở nên biến động mạnh.
 
 ### Các loại lệnh
 
-Mọi loại lệnh đều giao dịch theo cùng một cách: giá tốt nhất trước, lệnh cũ nhất
-trước. Chúng khác nhau ở chỗ lệnh có được phép giao dịch hay không, và ở chuyện
-gì xảy ra với phần số lượng không giao dịch được ngay:
+Các loại lệnh tuân theo cùng thứ tự ưu tiên khi khớp: mức giá tốt nhất trước, rồi
+đến lệnh cũ nhất. Chúng khác nhau ở việc có được phép khớp hay không và cách xử
+lý phần số lượng chưa khớp ngay:
 
 | Loại | Giao dịch khi vừa đến | Số lượng còn dư | Trong code |
 |---|---|---|---|
@@ -252,17 +251,17 @@ gì xảy ra với phần số lượng không giao dịch được ngay:
 | **Thị trường** (market) | ở bất kỳ giá nào | hết hạn, không bao giờ nằm chờ | `OrderType::Market` |
 | **Post-only** | không bao giờ: bị từ chối nếu sắp giao dịch | nằm chờ trong sổ | `OrderType::PostOnly` |
 
-Lệnh **thị trường** nói rằng "mua 10 ngay, giá bao nhiêu cũng được". Nó không có
-giá của riêng mình, nên có thể quét qua nhiều mức giá; đó là lý do các sàn thật
-bảo vệ nó bằng biên độ giá (price band), và engine này cũng làm vậy khi có đặt
-biên độ (xem *Giới hạn rủi ro* ở trên).
+Lệnh **thị trường** có nghĩa là "mua 10 ngay, giá bao nhiêu cũng được". Lệnh này
+không có mức giá riêng, nên có thể khớp qua nhiều mức giá. Vì vậy, các sàn thật
+bảo vệ lệnh thị trường bằng biên độ giá (price band); engine này cũng làm vậy nếu
+đã cấu hình biên độ (xem *Giới hạn rủi ro* ở trên).
 Lệnh **post-only** dành cho các nhà tạo lập thị trường (market maker), những người
-muốn chắc chắn rằng họ chỉ luôn *thêm* lệnh vào sổ (và thường được hưởng phí thấp
-hơn nhờ vậy): nếu lệnh sắp giao dịch ngay khi vừa đến, nó bị từ chối.
+muốn chắc chắn rằng lệnh của họ chỉ *bổ sung* thanh khoản cho sổ (và thường được
+hưởng phí thấp hơn nhờ vậy): nếu lệnh sắp khớp ngay khi vừa đến, nó sẽ bị từ chối.
 
 ### Lệnh sai thì sao?
 
-Một số lệnh bị từ chối trước khi chạm được vào sổ. Engine phát sự kiện
+Một số lệnh bị từ chối trước khi được đưa vào sổ. Engine phát sự kiện
 `OrderRejected` nói rõ lý do, và không có gì khác thay đổi:
 
 | Lệnh có...                                                                        | Lý do được báo       |
@@ -279,26 +278,28 @@ Một lệnh cũng có thể được chấp nhận và giao dịch bình thư�
 còn chỗ trong sổ** để phần dư nằm chờ. Lúc đó nó bị từ chối với lý do
 `BookFull` (chương 6 giải thích khi nào điều này xảy ra).
 
-Giới hạn phạm vi tính năng là có chủ ý: nhờ vậy code đủ ngắn để đọc trong một lần ngồi.
+Phạm vi tính năng được giới hạn có chủ ý để code đủ ngắn, có thể đọc trọn trong
+một lần.
 [Chương 11](11-limitations-and-exercises.md) liệt kê các ý tưởng mở rộng.
 
 ## 1.10 Một ví dụ hoàn chỉnh
 
-Hãy theo dõi ví dụ này thật kỹ; ta sẽ dùng lại nó ở
-[chương 6](06-matching-algorithm.md) để cho thấy bên trong engine làm gì. Mọi kết
-quả bên dưới đều do chạy engine thật mà ra, và bạn có thể tự chạy lại:
+Hãy theo dõi kỹ ví dụ này; ta sẽ dùng lại ở
+[chương 6](06-matching-algorithm.md) để minh họa những gì diễn ra bên trong
+engine. Các kết quả dưới đây đều được tạo bởi engine thật và bạn có thể tự chạy
+lại:
 
 ```sh
 cargo run --example walkthrough
 ```
 
-Chương trình ([`examples/walkthrough.rs`](../../examples/walkthrough.rs)) gửi lần
-lượt các lệnh dưới đây, rồi in ra các sự kiện và trạng thái sổ sau mỗi bước. Sổ
-mà chương trình in ra cho thấy tổng số lượng ở mỗi mức giá; còn hàng đợi của từng
-lệnh trong các sơ đồ bên dưới là thứ mà chương 3 và 6 sẽ xây dựng.
+Chương trình ([`examples/walkthrough.rs`](../../examples/walkthrough.rs)) lần
+lượt gửi các lệnh dưới đây, rồi in sự kiện và trạng thái sổ sau mỗi bước. Sổ in
+ra tổng số lượng ở mỗi mức giá; các sơ đồ bên dưới bổ sung hàng đợi của từng
+lệnh, cấu trúc sẽ được xây dựng trong chương 3 và 6.
 
-**Bước 1 đến 5: năm lệnh lần lượt đến, không lệnh nào khớp được, nên tất cả đều
-nằm chờ.**
+**Bước 1 đến 5: năm lệnh lần lượt được gửi đến. Không lệnh nào khớp ngay nên
+tất cả đều nằm chờ trong sổ.**
 
 | # | Lệnh đến               | Có thể khớp ngay? | Kết quả      |
 |---|------------------------|-------------|--------------|
@@ -308,7 +309,7 @@ nằm chờ.**
 | 4 | `#4` MUA 10 @ 99       | 99 < ask tốt nhất 101 | nằm chờ  |
 | 5 | `#5` MUA 6 @ 100       | 100 < ask tốt nhất 101 | nằm chờ |
 
-Lúc này sổ lệnh trông như sau:
+Sổ lệnh lúc này như sau:
 
 ```text
             ASK
@@ -321,8 +322,8 @@ Lúc này sổ lệnh trông như sau:
             BID
 ```
 
-**Bước 6: lệnh `#6` MUA 14 @ 102 đến.** Nó có thể khớp ngay (102 ≥ 101). Engine đi
-lên phía ask, từ giá rẻ nhất trở đi:
+**Bước 6: lệnh `#6` MUA 14 @ 102 được gửi đến.** Lệnh có thể khớp ngay
+(102 ≥ 101). Engine duyệt phía ask, bắt đầu từ mức giá thấp nhất:
 
 | Lần khớp | Với          | Giá   | SL  | Vì sao                                               |
 |----------|--------------|-------|-----|------------------------------------------------------|
@@ -330,8 +331,8 @@ lên phía ask, từ giá rẻ nhất trở đi:
 | 2        | `#3` (maker) | 101   | 4   | lệnh kế tiếp trong hàng đợi FIFO; `#3` khớp hết      |
 | 3        | `#1` (maker) | 102   | 5   | mức 101 đã hết lệnh, chuyển lên 102; `#1` khớp hết   |
 
-Tổng đã khớp: 3 + 4 + 5 = 12. Lệnh yêu cầu 14, nên **còn dư 2 đơn vị**. Không còn
-ask nào nữa, vì vậy phần dư **nằm chờ như một bid ở giá 102**:
+Tổng khớp được là 3 + 4 + 5 = 12. Lệnh có số lượng 14 nên **còn dư 2 đơn vị**.
+Không còn ask nào, vì vậy phần dư **nằm chờ như một bid ở giá 102**:
 
 ```text
             ASK
@@ -358,9 +359,9 @@ OrderFilled { order_id: 1 }
 OrderPartiallyFilled { order_id: 6, remaining_qty: 2 }
 ```
 
-Mỗi `Trade` đều cho biết ai là bên chủ động (`taker_side: Buy`: người mua đã vượt
-qua spread) và mang theo một `trade_id`. Đây là ba giao dịch đầu tiên của sổ lệnh
-này, nên chúng được đánh số 1, 2 và 3.
+Mỗi `Trade` đều cho biết bên chủ động (`taker_side: Buy`: người mua đã vượt
+spread) và có một `trade_id`. Đây là ba giao dịch đầu tiên của sổ lệnh này, nên
+chúng được đánh số 1, 2 và 3.
 
 Sự kiện là cách engine nói chuyện với thế giới bên ngoài; xem
 [chương 7](07-events.md).
@@ -371,46 +372,46 @@ Sự kiện là cách engine nói chuyện với thế giới bên ngoài; xem
 |-----------------|--------------------------------------------------------------------------|
 | Bid             | Một lệnh mua đang chờ                                                    |
 | Ask / Offer     | Một lệnh bán đang chờ                                                    |
-| Best bid / ask  | Bid cao nhất / ask thấp nhất, là các mức giá hấp dẫn nhất ở mỗi phía     |
+| Best bid / ask  | Bid cao nhất / ask thấp nhất, tức mức giá tốt nhất của mỗi phía           |
 | Spread          | Ask tốt nhất trừ bid tốt nhất                                            |
 | Lệnh giới hạn   | "Giao dịch ở mức giá này hoặc tốt hơn"                                   |
 | Lệnh thị trường | "Giao dịch ngay, ở bất kỳ giá nào"; phần không giao dịch được ngay sẽ hết hạn |
 | IOC             | Immediate-or-cancel: một lệnh giới hạn có phần dư hết hạn thay vì nằm chờ |
 | Post-only       | Một lệnh giới hạn bị từ chối nếu nó sẽ giao dịch ngay khi vừa đến        |
-| Tài khoản (account) | Ai đã đặt một lệnh; chống tự giao dịch và hủy hàng loạt dựa vào nó   |
+| Tài khoản (account) | Tài khoản đặt lệnh; cơ chế chống tự giao dịch và hủy hàng loạt dùng thông tin này |
 | Tự giao dịch (self-trade) | Giao dịch giữa hai lệnh của cùng một tài khoản; có thể được ngăn chặn |
-| Biên độ giá (price band) | Một lệnh được phép vươn xa tới đâu so với giá tốt nhất phía đối diện |
+| Biên độ giá (price band) | Giới hạn mức giá lệnh được phép khớp so với giá tốt nhất phía đối diện |
 | Marketable      | Có thể giao dịch ngay với phía đối diện                                  |
-| Maker           | Lệnh đang chờ trong một giao dịch                                        |
+| Maker           | Lệnh đang chờ được khớp trong một giao dịch                              |
 | Taker           | Lệnh vừa đến trong một giao dịch                                         |
 | Mức giá (price level) | Tất cả các lệnh đang chờ ở cùng một giá                            |
 | Độ sâu (depth)  | Tổng số lượng có sẵn ở một mức giá (hoặc qua nhiều mức)                  |
 | Fill            | Một lần khớp; *khớp một phần* nghĩa là vẫn còn số lượng dư               |
 | Tick            | Bước giá nhỏ nhất; engine này dùng tick nguyên, mặc định từ 0 đến 4095  |
-| Ưu tiên giá-thời gian | Giá tốt hơn trước, rồi đến lệnh đến sớm hơn                        |
+| Ưu tiên giá-thời gian | Mức giá tốt hơn được ưu tiên trước, rồi đến lệnh đến sớm hơn       |
 | Arena           | Một mảng lớn cấp phát sẵn, nơi các đối tượng sống (chương 3)             |
 | Hot path        | Đoạn code chạy cho mọi lệnh; phần phải nhanh nhất                        |
 
-Bảng này chỉ gồm các từ về giao dịch được dùng trong chương này. [Bảng thuật
-ngữ](glossary.md) đầy đủ còn giải thích mọi thuật ngữ về cấu trúc dữ liệu, Rust,
-lập trình đồng thời và lưu trữ mà các chương sau sử dụng.
+Bảng này chỉ gồm các thuật ngữ giao dịch dùng trong chương. [Bảng thuật
+ngữ](glossary.md) còn giải thích đầy đủ các thuật ngữ về cấu trúc dữ liệu, Rust,
+lập trình đồng thời và lưu trữ được dùng ở các chương sau.
 
 ## 1.12 Tự thực hành
 
-Hãy chạy ví dụ minh họa và so sánh kết quả với mục 1.10:
+Chạy ví dụ minh họa và so sánh kết quả với mục 1.10:
 
 ```sh
 cargo run --example walkthrough
 ```
 
-Rồi thử sửa nó. Trong [`examples/walkthrough.rs`](../../examples/walkthrough.rs),
-đổi `#6` thành `Buy 14 @ 101` thay vì `@ 102`. **Trước khi chạy**, hãy đoán xem lệnh
-này khớp với những maker nào, còn dư bao nhiêu, và phần dư nằm chờ ở mức giá nào.
-(Các dòng `assert_eq!` sau bước 6 sẽ báo lỗi với con số mới; hãy sửa chúng theo dự
-đoán của bạn.)
+Tiếp theo, thử sửa chương trình. Trong [`examples/walkthrough.rs`](../../examples/walkthrough.rs),
+đổi `#6` thành `Buy 14 @ 101` thay vì `@ 102`. **Trước khi chạy**, hãy đoán lệnh
+này sẽ khớp với những maker nào, còn dư bao nhiêu và phần dư sẽ nằm chờ ở mức giá
+nào. (Các dòng `assert_eq!` sau bước 6 sẽ báo lỗi vì kết quả đã thay đổi; hãy sửa
+chúng theo dự đoán của bạn.)
 
-Unit test ghi lại quy tắc ưu tiên giá-thời gian là một ví dụ ngắn, dễ đọc về API
-của engine:
+Unit test ghi lại quy tắc ưu tiên giá-thời gian là ví dụ ngắn, dễ đọc về API của
+engine:
 
 ```sh
 cargo test price_time_priority_within_a_level_is_fifo
