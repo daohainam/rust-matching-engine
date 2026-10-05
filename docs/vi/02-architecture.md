@@ -65,9 +65,9 @@ Hãy nhìn các mũi tên: engine phụ thuộc vào `pool`, `bitset`, `hashmap`
 những khối xây dựng độc lập, do *bạn* nối quanh engine (chương 8 và 9 chỉ cách
 làm).
 
-Crate tái xuất năm tên mà hầu hết trường hợp sử dụng cần đến trong
-[`src/lib.rs`](../../src/lib.rs): `Engine`, `Event`, `EventSink`, `EventBatch` và
-`Side`.
+Crate tái xuất bảy tên mà hầu hết trường hợp sử dụng cần đến trong
+[`src/lib.rs`](../../src/lib.rs): `Engine`, `RestingOrder`, `Event`, `EventSink`,
+`EventBatch`, `RejectReason` và `Side`.
 
 ## 2.3 Struct `Engine`, từng trường một
 
@@ -80,6 +80,7 @@ pub struct Engine {
     bid_levels: Box<[PriceLevel]>,// bid_levels[tick] = FIFO queue of bids at that tick
     ask_levels: Box<[PriceLevel]>,// ask_levels[tick] = FIFO queue of asks at that tick
     sequence: u64,                // arrival counter; metadata only, never read by matching
+    trades: u64,                  // trades so far; the last trade's trade_id
 }
 ```
 
@@ -92,6 +93,7 @@ Mỗi trường chỉ có đúng một trách nhiệm:
 | `*_levels`    | "Những lệnh nào đang chờ ở tick giá T?"                        | `levels[T]`: một lần đọc mảng |
 | `*_bitset`    | "Mức giá không rỗng tốt nhất là mức nào?"                      | hai lần quét bit |
 | `sequence`    | "Engine đã nhận bao nhiêu lệnh?" (metadata phục vụ kiểm toán; thứ tự FIFO đến từ các liên kết trong hàng đợi chứ không phải từ con số này, xem [6.10](06-matching-algorithm.md#610-những-ghi-chú-thiết-kế-đáng-chú-ý)) | một phép cộng |
+| `trades`      | "Engine đã thực hiện bao nhiêu giao dịch?" Nó đánh số cho từng sự kiện `Trade` (`trade_id`), giống hệt nhau ở mọi lần phát lại. | một phép cộng cho mỗi giao dịch |
 
 ### Các mảnh ghép trỏ vào nhau như thế nào
 
@@ -206,8 +208,8 @@ sequenceDiagram
     participant L as mức giá + bitset phía của chính lệnh
     C->>E: cancel_order(id, sink)
     E->>M: remove(id)
-    M-->>E: ô arena (hoặc không tìm thấy: trả về false)
-    E->>P: đọc lệnh (side, tick)
+    M-->>E: ô arena (hoặc không tìm thấy: phát CancelRejected, trả về false)
+    E->>P: đọc lệnh (side, tick, số lượng còn lại)
     E->>L: gỡ khỏi hàng đợi của mức giá
     opt hàng đợi trở nên rỗng
         E->>L: xóa bit của tick đó
@@ -249,11 +251,11 @@ Mọi thứ được cấp phát trong `Engine::new(order_capacity)`. Với sứ
 | Free stack (ngăn xếp các ô trống) | `N × 4 B` | 40,000 B |
 | Bảng băm | `next_pow2(2 × max(N,16)) × 16 B` | 32,768 × 16 = 524,288 B |
 | Các mức giá (bid + ask) | `2 × 4096 × 24 B` | 196,608 B |
-| Bản thân struct `Engine` | chứa hai bitset (`2 × 520 B`) cùng các con trỏ, bộ đếm và seed của hàm băm | 1,160 B |
-| **Tổng cộng** | | **1,242,056 B ≈ 1.24 MB** |
+| Bản thân struct `Engine` | chứa hai bitset (`2 × 520 B`) cùng các con trỏ, bộ đếm và seed của hàm băm | 1,168 B |
+| **Tổng cộng** | | **1,242,064 B ≈ 1.24 MB** |
 
 (Kích thước của `Order` = 48 B, `PriceLevel` = 24 B, ô băm 16 B và
-`Engine` = 1,160 B đều được đo bằng `size_of`.)
+`Engine` = 1,168 B đều được đo bằng `size_of`.)
 
 Con số đó đủ nhỏ để nằm gọn trong cache L2/L3 của một CPU hiện đại, và đó là một
 phần lý do thiết kế này nhanh.
