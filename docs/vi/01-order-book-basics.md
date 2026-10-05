@@ -104,10 +104,13 @@ hơn mức họ đưa ra (*price improvement*).
 Mỗi giao dịch có hai lệnh tham gia:
 
 - **Maker** là lệnh đã nằm sẵn trong sổ. Nó *tạo ra* thanh khoản (liquidity).
-- **Taker** là lệnh vừa đến và *lấy đi* thanh khoản đó.
+- **Taker** là lệnh vừa đến và *lấy đi* thanh khoản đó. Nó còn được gọi là
+  **aggressor** (bên chủ động), và phía của nó là **aggressor side** của giao
+  dịch: một giao dịch mà người mua vượt qua spread được gọi là "do bên mua khởi
+  xướng" (*buyer-initiated*).
 
 Bạn sẽ gặp hai từ này khắp nơi trong code (`maker_order_id`, `taker_order_id`,
-`match_incoming`).
+`taker_side`, `match_incoming`).
 
 ## 1.5 Ưu tiên giá, rồi đến thời gian
 
@@ -271,15 +274,19 @@ Sau đó `#4` bị hủy: mức bid 99 biến mất, chỉ còn các bid ở 102
 Chuỗi **sự kiện** chính xác mà engine phát ra cho bước 6 là:
 
 ```text
-OrderAccepted      { order_id: 6 }
-Trade              { maker_order_id: 2, taker_order_id: 6, price_tick: 101, qty: 3 }
-OrderFilled        { order_id: 2 }
-Trade              { maker_order_id: 3, taker_order_id: 6, price_tick: 101, qty: 4 }
-OrderFilled        { order_id: 3 }
-Trade              { maker_order_id: 1, taker_order_id: 6, price_tick: 102, qty: 5 }
-OrderFilled        { order_id: 1 }
+OrderAccepted { order_id: 6, side: Buy, price_tick: 102, qty: 14 }
+Trade { trade_id: 1, maker_order_id: 2, taker_order_id: 6, taker_side: Buy, price_tick: 101, qty: 3 }
+OrderFilled { order_id: 2 }
+Trade { trade_id: 2, maker_order_id: 3, taker_order_id: 6, taker_side: Buy, price_tick: 101, qty: 4 }
+OrderFilled { order_id: 3 }
+Trade { trade_id: 3, maker_order_id: 1, taker_order_id: 6, taker_side: Buy, price_tick: 102, qty: 5 }
+OrderFilled { order_id: 1 }
 OrderPartiallyFilled { order_id: 6, remaining_qty: 2 }
 ```
+
+Mỗi `Trade` đều cho biết ai là bên chủ động (`taker_side: Buy`: người mua đã vượt
+qua spread) và mang theo một `trade_id`. Đây là ba giao dịch đầu tiên của sổ lệnh
+này, nên chúng được đánh số 1, 2 và 3.
 
 Sự kiện là cách engine nói chuyện với thế giới bên ngoài; xem
 [chương 7](07-events.md).

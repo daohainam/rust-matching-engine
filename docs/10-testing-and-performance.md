@@ -30,13 +30,19 @@ Reading them is a good way to learn the behaviour each module promises.
 
 | Test | What it proves |
 |---|---|
-| `resting_order_with_no_match` | A non-crossing order rests; best bid and depth are right; only `OrderAccepted` is emitted. |
+| `resting_order_with_no_match` | A non-crossing order rests; best bid and depth are right; only `OrderAccepted` (with the order's side, tick and quantity) is emitted. |
+| `acceptance_repeats_the_order_terms_even_when_it_fills_at_once` | `OrderAccepted` describes the order even when it never rests, so the event stream alone says what was ordered. |
 | `full_fill_taker_and_maker` | An exact match emits `Trade`, `Filled(maker)`, `Filled(taker)` and leaves the book empty. |
 | `partial_fill_leaves_maker_resting` | A smaller taker fills completely; the maker stays with reduced quantity. |
 | `partial_fill_leaves_taker_resting_remainder` | A bigger taker consumes the maker, then rests its remainder. |
-| `cancel_head_middle_tail_of_price_queue` | Cancelling from the head, middle and tail of a FIFO queue all work; a second cancel returns `false` with no events. |
+| `cancel_head_middle_tail_of_price_queue` | Cancelling from the head, middle and tail of a FIFO queue all work; a second cancel returns `false` and emits `CancelRejected`. |
+| `cancel_reports_only_what_is_left_after_a_partial_fill` | `OrderCancelled` carries the side, the tick and the quantity still resting (6 of 10), not the original size. |
+| `resting_order_follows_an_order_through_its_life` | `resting_order` shows an order's remaining quantity after a partial fill, and `None` once it is cancelled, for a taker that never rested, and for the reserved id. |
+| `cancelling_a_filled_order_is_rejected_without_touching_the_book` | A cancel for an order that has already filled emits `CancelRejected` and leaves depth and live count alone. |
 | `crosses_multiple_ask_price_levels_in_price_time_priority` | A buy sweeps asks from the cheapest level upward. |
+| `trade_names_the_aggressor_side` | A sell taker's `Trade` reports `taker_side: Sell`. |
 | `crosses_multiple_bid_price_levels_for_incoming_sell` | A sell sweeps bids from the highest level downward (the mirror case). |
+| `trade_ids_count_up_across_calls` | `trade_id` counts 1, 2, 3 across calls; rejections, resting orders and cancels do not use up an id. |
 | `price_time_priority_within_a_level_is_fifo` | Within one price, the older order fills first. |
 | `rejects_duplicate_order_id_and_zero_qty` | Validation rejects a live duplicate id (`DuplicateOrderId`) and `qty == 0` (`ZeroQuantity`). |
 | `rejects_out_of_range_price_tick` | A tick of 4096 is rejected with `PriceOutOfRange` and leaves the book empty. |
@@ -87,8 +93,8 @@ engine with a second, **deliberately naive** order book on long random request
 streams, and requires them to agree on everything observable.
 
 The reference book is written for obviousness, not speed: a `BTreeMap` of price
-levels per side, a `VecDeque` of `(order_id, qty)` per level, and a `HashMap` of
-live orders. It is short enough to check by eye.
+levels per side, a `VecDeque` of `(order_id, qty)` per level, a `HashMap` of
+live orders and a trade counter. It is short enough to check by eye.
 
 The request generator (`OpGenerator` in [`tests/common/mod.rs`](../tests/common/mod.rs))
 is seeded, so every run is reproducible. It produces:
@@ -99,8 +105,10 @@ is seeded, so every run is reproducible. It produces:
   across the whole book, and oversized quantities at far-away ticks that make a
   level's total overflow.
 
-After **every** request the test compares the exact event stream, the best bid and
-ask, the live order count and the depth at every tick the generator can use. Every
+After **every** request the test compares the exact event stream (trade ids
+included), the best bid and ask, the live order count, the depth at every tick the
+generator can use, and `resting_order` for the order the request named and every
+maker it traded with. Every
 1,000 requests it also compares full `depth_snapshot`s. It runs 4 seeds × 20,000
 requests with a tight arena (64 orders, so remainders are often rejected) and 4
 more with an ample one (8,192 orders, so books get deep).
@@ -123,7 +131,8 @@ This test runs 10,000 generated requests through a primary engine while logging
 each one to a WAL *before* applying it (with a small preallocation, so the file
 grows several times). It finalizes the log, reads it back, checks that the
 sequence numbers run from 0 to 9,999, and replays the records into a **second**
-engine. The replica must produce exactly the same events, live count and depth.
+engine. The replica must produce exactly the same events (so the same `trade_id` for
+every trade), live count and depth.
 
 The replica builds its own hash map, with its own **random seed**. The test
 therefore also proves the claim from chapter 5: the seed changes where entries

@@ -319,8 +319,11 @@ The usual fix uses the WAL `sequence` number from 9.2. Downstream remembers the
 sequence of the last request whose events it has fully processed, say 41. On
 restart, the replay throws away the events of requests 0 to 41 and publishes the
 events of requests 42 onwards. Because the engine is deterministic, those are
-exactly the events the crashed process would have published. This repository
-leaves that bookkeeping to you; the program in 9.7 does not publish events at all.
+exactly the events the crashed process would have published, down to the
+`trade_id` of every trade ([7.2](07-events.md#72-ordering-rules)): a consumer that
+only cares about trades can simply skip every `trade_id` it has already seen. This
+repository leaves that bookkeeping to you; the program in 9.7 does not publish
+events at all.
 
 On the very first start there is no log yet, so a service typically does this:
 

@@ -21,12 +21,14 @@ This keeps the engine a pure, deterministic state machine:
 
 ```rust
 pub enum Event {
-    OrderAccepted        { order_id: u64 },
-    Trade                { maker_order_id: u64, taker_order_id: u64, price_tick: u32, qty: u64 },
+    OrderAccepted        { order_id: u64, side: Side, price_tick: u32, qty: u64 },
+    Trade                { trade_id: u64, maker_order_id: u64, taker_order_id: u64,
+                           taker_side: Side, price_tick: u32, qty: u64 },
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     OrderFilled          { order_id: u64 },
-    OrderCancelled       { order_id: u64 },
+    OrderCancelled       { order_id: u64, side: Side, price_tick: u32, cancelled_qty: u64 },
     OrderRejected        { order_id: u64, reason: RejectReason },
+    CancelRejected       { order_id: u64 },
 }
 
 pub enum RejectReason {
@@ -43,18 +45,18 @@ pub enum RejectReason {
 
 | Event | Emitted when | Who it is about |
 |---|---|---|
-| `OrderAccepted` | A new order passed validation. | the incoming order |
-| `Trade` | Two orders executed against each other. | maker **and** taker, at the maker's price |
+| `OrderAccepted` | A new order passed validation. It repeats the order's side, limit price and quantity. | the incoming order |
+| `Trade` | Two orders executed against each other. `taker_side` is the aggressor's side; `trade_id` numbers trades 1, 2, 3, ... | maker **and** taker, at the maker's price |
 | `OrderPartiallyFilled` | An order traded but still has quantity left. | a maker (after each partial fill), or the taker (once, at the end) |
 | `OrderFilled` | An order has nothing left. | a maker (when it is consumed), or the taker |
-| `OrderCancelled` | A resting order was cancelled on request. | the cancelled order |
+| `OrderCancelled` | A resting order was cancelled on request. It says where the order rested and how much quantity left the book. | the cancelled order |
 | `OrderRejected` | An order was refused: bad input, or no room for it to rest. `reason` says which. | the incoming order |
+| `CancelRejected` | A cancel named no resting order (never accepted, or already filled, cancelled or rejected). | the id in the cancel request |
 
 `Event` derives `Debug, Clone, Copy, PartialEq, Eq`, so events are cheap to copy
-and trivial to compare in tests. One `Event` is 32 bytes (the biggest variant,
-`Trade`, holds `8 + 8 + 4 + 8 = 28` bytes plus the tag and padding). Adding a
-`RejectReason` to `OrderRejected` costs nothing: `8 + 1` bytes still fits in the
-space `Trade` needs anyway.
+and trivial to compare in tests. One `Event` is 40 bytes (the biggest variant,
+`Trade`, holds `8 + 8 + 8 + 8 + 4 + 1 = 37` bytes, plus the tag, rounded up to a
+multiple of 8). The other variants fit in the space `Trade` needs anyway.
 
 ## 7.2 Ordering rules
 
@@ -81,6 +83,27 @@ Key points:
   (see [6.4](06-matching-algorithm.md#64-phase-4-resting-the-remainder)).
 - The engine itself **never drops an event**. Only a bounded sink, such as
   `EventBatch`, can run out of room (7.4).
+- A `cancel_order` call emits **exactly one** event: `OrderCancelled` if the
+  order was resting, `CancelRejected` if it was not. Its `bool` result says the
+  same thing, for callers that only want to branch on it.
+
+### Following the book from events alone
+
+The events carry enough to keep a copy of the book's depth without ever seeing
+the requests. That is what a market-data publisher or a risk system does:
+
+| Event | Change to the copy |
+|---|---|
+| `OrderAccepted { side, price_tick, qty, .. }` | remember these terms until the call ends |
+| `Trade { taker_side, price_tick, qty, .. }` | the maker's level loses `qty`; it is on the side **opposite** `taker_side`, at `price_tick` |
+| `OrderCancelled { side, price_tick, cancelled_qty, .. }` | that level loses `cancelled_qty` |
+| end of a `process_order` call | unless the taker's last event is `OrderFilled` or `OrderRejected`, its remainder (`qty` minus its trades) now rests at its own `price_tick` |
+
+`trade_id` helps with the gaps and duplicates of [9.5](09-write-ahead-log.md#95-reading-and-replaying):
+the engine numbers trades in the order they happen, and the engine is
+deterministic, so a replay of the same requests assigns exactly the same ids. A
+consumer that has seen trade 41 can ignore any trade with a lower id, and a jump
+from 41 to 43 means it missed one.
 
 ### Cookbook of event sequences
 
@@ -96,7 +119,7 @@ These are taken straight from the unit tests in `engine.rs`.
 | Invalid input / duplicate id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
 | Order can't rest (arena full / overflow) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (no trades happened) |
 | Cancel succeeds | `Cancelled` |
-| Cancel of unknown id | *(no events; the returned `bool` is `false`)* |
+| Cancel of an order that is not resting | `CancelRejected` (and the returned `bool` is `false`) |
 
 ## 7.3 The `EventSink` trait
 
@@ -128,7 +151,10 @@ let mut engine = Engine::new(16);
 //    allocating once it has grown to fit the largest call.
 let mut events = Vec::new();
 engine.process_order(1, Side::Sell, 100, 5, &mut events);
-assert_eq!(events, [Event::OrderAccepted { order_id: 1 }]);
+assert_eq!(
+    events,
+    [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+);
 
 // 2. A closure sees each event as it happens; this one counts trades.
 let mut trades = 0;
@@ -195,7 +221,7 @@ pub struct EventBatch {
 - `as_slice()`, `len()`, `is_empty()` and `IntoIterator for &EventBatch` give
   convenient read access.
 
-**Size** (measured): `64 × 32 + 8 + 8 = 2,064` bytes.
+**Size** (measured): `64 × 40 + 8 + 8 = 2,576` bytes.
 
 How many makers fit? Each maker touched costs two events (`Trade` plus the
 maker's `OrderFilled` or `OrderPartiallyFilled`), plus one `OrderAccepted` at the
@@ -261,16 +287,24 @@ use matching_engine::{Engine, Event, Side};
 
 fn log_event(event: Event) {
     match event {
-        Event::OrderAccepted { order_id } => println!("accepted  #{order_id}"),
-        Event::Trade { maker_order_id, taker_order_id, price_tick, qty } => println!(
-            "trade     {qty} @ {price_tick} (maker #{maker_order_id}, taker #{taker_order_id})"
-        ),
+        Event::OrderAccepted { order_id, side, price_tick, qty } => {
+            println!("accepted  #{order_id}: {side:?} {qty} @ {price_tick}")
+        }
+        Event::Trade { trade_id, maker_order_id, taker_order_id, taker_side, price_tick, qty } => {
+            println!(
+                "trade {trade_id}   {qty} @ {price_tick}, {taker_side:?} aggressor \
+                 (maker #{maker_order_id}, taker #{taker_order_id})"
+            )
+        }
         Event::OrderPartiallyFilled { order_id, remaining_qty } => {
             println!("partial   #{order_id}, {remaining_qty} left")
         }
         Event::OrderFilled { order_id } => println!("filled    #{order_id}"),
-        Event::OrderCancelled { order_id } => println!("cancelled #{order_id}"),
+        Event::OrderCancelled { order_id, cancelled_qty, .. } => {
+            println!("cancelled #{order_id}, {cancelled_qty} removed")
+        }
         Event::OrderRejected { order_id, reason } => println!("rejected  #{order_id}: {reason:?}"),
+        Event::CancelRejected { order_id } => println!("cancel rejected: #{order_id} is not resting"),
     }
 }
 
@@ -292,8 +326,15 @@ engine.process_order(2, Side::Buy, 100, 4, &mut events);
 assert_eq!(
     events,
     [
-        Event::OrderAccepted { order_id: 2 },
-        Event::Trade { maker_order_id: 1, taker_order_id: 2, price_tick: 100, qty: 4 },
+        Event::OrderAccepted { order_id: 2, side: Side::Buy, price_tick: 100, qty: 4 },
+        Event::Trade {
+            trade_id: 1,
+            maker_order_id: 1,
+            taker_order_id: 2,
+            taker_side: Side::Buy,
+            price_tick: 100,
+            qty: 4,
+        },
         Event::OrderPartiallyFilled { order_id: 1, remaining_qty: 6 },
         Event::OrderFilled { order_id: 2 },
     ]

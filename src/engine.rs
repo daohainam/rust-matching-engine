@@ -27,6 +27,20 @@ enum Crossing {
     TakerSell,
 }
 
+/// A copy of one resting order's current state, returned by
+/// [`Engine::resting_order`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestingOrder {
+    /// The caller's identifier for the order.
+    pub order_id: u64,
+    /// The side of the book it rests on.
+    pub side: Side,
+    /// The price tick it rests at.
+    pub price_tick: u32,
+    /// Quantity not yet executed; less than ordered after partial fills.
+    pub remaining_qty: u64,
+}
+
 /// A single-threaded, price-time-priority limit order book.
 ///
 /// Orders are stored in a preallocated arena. Each price tick has a FIFO
@@ -50,6 +64,8 @@ pub struct Engine {
     /// audit metadata. Matching never reads it: time priority comes from the
     /// position in a level's FIFO queue, not from comparing this number.
     sequence: u64,
+    /// Number of trades executed so far; the last one's `trade_id`.
+    trades: u64,
 }
 
 impl Engine {
@@ -75,6 +91,7 @@ impl Engine {
             bid_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
             ask_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
             sequence: 0,
+            trades: 0,
         }
     }
 
@@ -107,6 +124,24 @@ impl Engine {
             Side::Sell => &self.ask_levels,
         };
         levels.get(tick as usize).map_or(0, |level| level.total_qty)
+    }
+
+    /// Looks up an order that is resting in the book.
+    ///
+    /// Returns `None` if no resting order has this ID: it was never
+    /// accepted, has been filled or cancelled, or its remainder was
+    /// rejected. A hash lookup, like the one [`cancel_order`](Self::cancel_order)
+    /// starts with; nothing is allocated.
+    #[inline]
+    pub fn resting_order(&self, order_id: u64) -> Option<RestingOrder> {
+        let idx = self.id_map.get(order_id)?;
+        let order = self.pool.get(idx);
+        Some(RestingOrder {
+            order_id,
+            side: order.side,
+            price_tick: order.price_tick,
+            remaining_qty: order.remaining_qty,
+        })
     }
 
     /// Returns up to `levels` non-empty price ticks on `side`, best first.
@@ -211,7 +246,12 @@ impl Engine {
             sink.emit(Event::OrderRejected { order_id, reason });
             return;
         }
-        sink.emit(Event::OrderAccepted { order_id });
+        sink.emit(Event::OrderAccepted {
+            order_id,
+            side,
+            price_tick,
+            qty,
+        });
 
         // Matching spends down the incoming quantity; only the remainder can
         // become a new resting order.
@@ -223,6 +263,7 @@ impl Engine {
                 &mut self.ask_levels,
                 &mut self.ask_bitset,
                 &mut self.id_map,
+                &mut self.trades,
                 order_id,
                 price_tick,
                 &mut remaining,
@@ -235,6 +276,7 @@ impl Engine {
                 &mut self.bid_levels,
                 &mut self.bid_bitset,
                 &mut self.id_map,
+                &mut self.trades,
                 order_id,
                 price_tick,
                 &mut remaining,
@@ -321,12 +363,17 @@ impl Engine {
         levels: &mut [PriceLevel],
         bitset: &mut TwoLevelBitset,
         id_map: &mut FlatHashMap,
+        trades: &mut u64,
         taker_order_id: u64,
         price_tick: u32,
         remaining: &mut u64,
         sink: &mut S,
         direction: Crossing,
     ) {
+        let taker_side = match direction {
+            Crossing::TakerBuy => Side::Buy,
+            Crossing::TakerSell => Side::Sell,
+        };
         loop {
             if *remaining == 0 {
                 break;
@@ -365,9 +412,12 @@ impl Engine {
                 // A trade can consume the maker, the taker, or both exactly.
                 let trade_qty = (*remaining).min(maker_qty);
 
+                *trades += 1;
                 sink.emit(Event::Trade {
+                    trade_id: *trades,
                     maker_order_id,
                     taker_order_id,
+                    taker_side,
                     price_tick: tick as u32,
                     qty: trade_qty,
                 });
@@ -415,12 +465,15 @@ impl Engine {
     /// price-level FIFO queue. If it was the last order at that price, the
     /// price is removed from the active-level bitset. When an order was found
     /// and removed, `OrderCancelled` is emitted to `sink` and `true` is
-    /// returned; otherwise nothing is emitted and the result is `false`.
+    /// returned. Otherwise `CancelRejected` is emitted, the book is
+    /// unchanged and the result is `false`, so the event stream records
+    /// every cancel request either way.
     ///
     /// Lookup and unlink are constant-time in the usual case; hash-table
     /// probing can require additional work when resolving collisions.
     pub fn cancel_order<S: EventSink + ?Sized>(&mut self, order_id: u64, sink: &mut S) -> bool {
         let Some(idx) = self.id_map.remove(order_id) else {
+            sink.emit(Event::CancelRejected { order_id });
             return false;
         };
         let order = *self.pool.get(idx);
@@ -441,7 +494,12 @@ impl Engine {
             }
         }
         self.pool.free(idx);
-        sink.emit(Event::OrderCancelled { order_id });
+        sink.emit(Event::OrderCancelled {
+            order_id,
+            side: order.side,
+            price_tick: order.price_tick,
+            cancelled_qty: order.remaining_qty,
+        });
         true
     }
 
@@ -470,6 +528,16 @@ mod tests {
         events
     }
 
+    /// The acceptance event for an order with these terms.
+    fn accepted(order_id: u64, side: Side, price_tick: u32, qty: u64) -> Event {
+        Event::OrderAccepted {
+            order_id,
+            side,
+            price_tick,
+            qty,
+        }
+    }
+
     /// Cancels an order and returns whether it was found plus its events.
     fn cancel(engine: &mut Engine, order_id: u64) -> (bool, Vec<Event>) {
         let mut events = Vec::new();
@@ -481,10 +549,21 @@ mod tests {
     fn resting_order_with_no_match() {
         let mut engine = Engine::new(16);
         let events = place(&mut engine, 1, Side::Buy, 100, 10);
-        assert_eq!(events, vec![Event::OrderAccepted { order_id: 1 }]);
+        assert_eq!(events, vec![accepted(1, Side::Buy, 100, 10)]);
         assert_eq!(engine.best_bid(), Some(100));
         assert_eq!(engine.best_ask(), None);
         assert_eq!(engine.depth_at(Side::Buy, 100), 10);
+    }
+
+    #[test]
+    fn acceptance_repeats_the_order_terms_even_when_it_fills_at_once() {
+        // The event stream alone must say what was ordered: a consumer that
+        // never sees the request still learns side, limit and size.
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 3);
+        let events = place(&mut engine, 2, Side::Sell, 99, 3);
+        assert_eq!(events.first(), Some(&accepted(2, Side::Sell, 99, 3)));
+        assert_eq!(events.last(), Some(&Event::OrderFilled { order_id: 2 }));
     }
 
     #[test]
@@ -495,10 +574,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 10),
                 Event::Trade {
+                    trade_id: 1,
                     maker_order_id: 1,
                     taker_order_id: 2,
+                    taker_side: Side::Buy,
                     price_tick: 100,
                     qty: 10
                 },
@@ -519,10 +600,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 4),
                 Event::Trade {
+                    trade_id: 1,
                     maker_order_id: 1,
                     taker_order_id: 2,
+                    taker_side: Side::Buy,
                     price_tick: 100,
                     qty: 4
                 },
@@ -545,10 +628,12 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 10),
                 Event::Trade {
+                    trade_id: 1,
                     maker_order_id: 1,
                     taker_order_id: 2,
+                    taker_side: Side::Buy,
                     price_tick: 100,
                     qty: 4
                 },
@@ -575,7 +660,15 @@ mod tests {
         // Cancel middle.
         let (ok, events) = cancel(&mut engine, 2);
         assert!(ok);
-        assert_eq!(events.as_slice(), &[Event::OrderCancelled { order_id: 2 }]);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderCancelled {
+                order_id: 2,
+                side: Side::Buy,
+                price_tick: 50,
+                cancelled_qty: 1
+            }]
+        );
         assert_eq!(engine.depth_at(Side::Buy, 50), 2);
 
         // Cancel head.
@@ -590,10 +683,68 @@ mod tests {
         assert_eq!(engine.best_bid(), None);
         assert_eq!(engine.live_order_count(), 0);
 
-        // Cancelling again fails cleanly.
+        // Cancelling again fails cleanly, and says so in the event stream.
         let (ok, events) = cancel(&mut engine, 3);
         assert!(!ok);
-        assert!(events.is_empty());
+        assert_eq!(events.as_slice(), &[Event::CancelRejected { order_id: 3 }]);
+        assert_eq!(engine.live_order_count(), 0);
+    }
+
+    #[test]
+    fn cancel_reports_only_what_is_left_after_a_partial_fill() {
+        // A consumer that applies every event to its own depth view must end
+        // with the engine's depth: the cancel removes the 6 left, not the 10
+        // originally ordered.
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 120, 10);
+        place(&mut engine, 2, Side::Buy, 120, 4);
+        let (ok, events) = cancel(&mut engine, 1);
+        assert!(ok);
+        assert_eq!(
+            events.as_slice(),
+            &[Event::OrderCancelled {
+                order_id: 1,
+                side: Side::Sell,
+                price_tick: 120,
+                cancelled_qty: 6
+            }]
+        );
+        assert_eq!(engine.depth_at(Side::Sell, 120), 0);
+    }
+
+    #[test]
+    fn resting_order_follows_an_order_through_its_life() {
+        let mut engine = Engine::new(16);
+        assert_eq!(engine.resting_order(1), None);
+        place(&mut engine, 1, Side::Sell, 120, 10);
+        let resting = |remaining_qty| RestingOrder {
+            order_id: 1,
+            side: Side::Sell,
+            price_tick: 120,
+            remaining_qty,
+        };
+        assert_eq!(engine.resting_order(1), Some(resting(10)));
+        place(&mut engine, 2, Side::Buy, 120, 4);
+        assert_eq!(engine.resting_order(1), Some(resting(6)));
+        // The taker filled completely, so it never rested.
+        assert_eq!(engine.resting_order(2), None);
+        cancel(&mut engine, 1);
+        assert_eq!(engine.resting_order(1), None);
+        // The reserved id is never stored, and looking it up is harmless.
+        assert_eq!(engine.resting_order(u64::MAX), None);
+    }
+
+    #[test]
+    fn cancelling_a_filled_order_is_rejected_without_touching_the_book() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 5);
+        place(&mut engine, 2, Side::Sell, 100, 5);
+        place(&mut engine, 3, Side::Buy, 100, 5); // fills #1
+        let (ok, events) = cancel(&mut engine, 1);
+        assert!(!ok);
+        assert_eq!(events.as_slice(), &[Event::CancelRejected { order_id: 1 }]);
+        assert_eq!(engine.depth_at(Side::Sell, 100), 5);
+        assert_eq!(engine.live_order_count(), 1);
     }
 
     #[test]
@@ -622,6 +773,21 @@ mod tests {
     }
 
     #[test]
+    fn trade_names_the_aggressor_side() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Buy, 100, 5);
+        let events = place(&mut engine, 2, Side::Sell, 100, 5);
+        assert!(events.contains(&Event::Trade {
+            trade_id: 1,
+            maker_order_id: 1,
+            taker_order_id: 2,
+            taker_side: Side::Sell,
+            price_tick: 100,
+            qty: 5
+        }));
+    }
+
+    #[test]
     fn crosses_multiple_bid_price_levels_for_incoming_sell() {
         let mut engine = Engine::new(16);
         place(&mut engine, 1, Side::Buy, 102, 5);
@@ -642,6 +808,31 @@ mod tests {
         assert_eq!(trades, vec![(102, 5), (101, 5), (100, 2)]);
         assert_eq!(engine.best_bid(), Some(100));
         assert_eq!(engine.depth_at(Side::Buy, 100), 3);
+    }
+
+    #[test]
+    fn trade_ids_count_up_across_calls() {
+        let mut engine = Engine::new(16);
+        let trade_ids = |events: &[Event]| -> Vec<u64> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Trade { trade_id, .. } => Some(*trade_id),
+                    _ => None,
+                })
+                .collect()
+        };
+        place(&mut engine, 1, Side::Sell, 100, 1);
+        place(&mut engine, 2, Side::Sell, 101, 1);
+        place(&mut engine, 3, Side::Sell, 102, 1);
+        let sweep = place(&mut engine, 4, Side::Buy, 101, 5);
+        assert_eq!(trade_ids(&sweep), [1, 2]);
+        // Rejections, resting orders and cancels do not use up an id.
+        place(&mut engine, 5, Side::Buy, 100, 0);
+        place(&mut engine, 6, Side::Buy, 90, 1);
+        cancel(&mut engine, 6);
+        let next = place(&mut engine, 7, Side::Sell, 101, 1);
+        assert_eq!(trade_ids(&next), [3]);
     }
 
     #[test]
@@ -734,7 +925,7 @@ mod tests {
         assert_eq!(
             events.as_slice(),
             &[
-                Event::OrderAccepted { order_id: 3 },
+                accepted(3, Side::Buy, 99, 1),
                 Event::OrderRejected {
                     order_id: 3,
                     reason: RejectReason::BookFull
@@ -766,7 +957,10 @@ mod tests {
         // Cancelling the reserved id must also fail cleanly, never panic.
         let (ok, events) = cancel(&mut engine, u64::MAX);
         assert!(!ok);
-        assert!(events.is_empty());
+        assert_eq!(
+            events.as_slice(),
+            &[Event::CancelRejected { order_id: u64::MAX }]
+        );
     }
 
     #[test]
@@ -777,7 +971,7 @@ mod tests {
         // level's bookkeeping.
         let mut engine = Engine::new(16);
         let events = place(&mut engine, 1, Side::Buy, 100, u64::MAX);
-        assert_eq!(events.as_slice(), &[Event::OrderAccepted { order_id: 1 }]);
+        assert_eq!(events.as_slice(), &[accepted(1, Side::Buy, 100, u64::MAX)]);
         assert_eq!(engine.depth_at(Side::Buy, 100), u64::MAX);
         assert_eq!(engine.live_order_count(), 1);
 
@@ -785,7 +979,7 @@ mod tests {
         assert_eq!(
             events.as_slice(),
             &[
-                Event::OrderAccepted { order_id: 2 },
+                accepted(2, Side::Buy, 100, 1),
                 Event::OrderRejected {
                     order_id: 2,
                     reason: RejectReason::LevelQuantityOverflow
@@ -821,10 +1015,7 @@ mod tests {
             .count();
         assert_eq!(trades, 40);
         assert_eq!(maker_fills, 40);
-        assert_eq!(
-            events.first(),
-            Some(&Event::OrderAccepted { order_id: 1_000 })
-        );
+        assert_eq!(events.first(), Some(&accepted(1_000, Side::Buy, 100, 40)));
         assert_eq!(events.last(), Some(&Event::OrderFilled { order_id: 1_000 }));
         assert_eq!(engine.live_order_count(), 0);
     }

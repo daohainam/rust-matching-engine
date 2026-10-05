@@ -17,6 +17,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 
 | Thuật ngữ | Ý nghĩa | Chương |
 |---|---|---|
+| Aggressor / aggressor side (bên chủ động / phía chủ động) | Taker của một giao dịch, và phía của nó. Một giao dịch là *buyer-initiated* (do bên mua khởi phát) khi một người mua vượt spread. `Trade` báo thông tin này qua `taker_side`. | [1](01-order-book-basics.md) |
 | Ask / offer (lệnh bán) | Một lệnh **bán** đang chờ trong sổ. Ask tốt nhất là ask thấp nhất. | [1](01-order-book-basics.md) |
 | Bid (lệnh mua) | Một lệnh **mua** đang chờ trong sổ. Bid tốt nhất là bid cao nhất. | [1](01-order-book-basics.md) |
 | Book (order book, sổ lệnh) | Danh sách mọi lệnh đang chờ, chia thành bid và ask và sắp xếp theo giá. | [1](01-order-book-basics.md) |

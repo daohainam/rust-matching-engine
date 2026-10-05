@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
-use matching_engine::{Engine, Event, RejectReason, Side};
+use matching_engine::{Engine, Event, RejectReason, RestingOrder, Side};
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
 type Queue = VecDeque<(u64, u64)>;
@@ -20,6 +20,7 @@ struct ReferenceBook {
     bids: BTreeMap<u32, Queue>,
     asks: BTreeMap<u32, Queue>,
     live: HashMap<u64, (Side, u32)>,
+    trades: u64,
 }
 
 impl ReferenceBook {
@@ -29,6 +30,7 @@ impl ReferenceBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
+            trades: 0,
         }
     }
 
@@ -47,7 +49,12 @@ impl ReferenceBook {
         if let Some(reason) = invalid {
             return vec![Event::OrderRejected { order_id, reason }];
         }
-        let mut events = vec![Event::OrderAccepted { order_id }];
+        let mut events = vec![Event::OrderAccepted {
+            order_id,
+            side,
+            price_tick,
+            qty,
+        }];
 
         let mut remaining = qty;
         let opposite = match side {
@@ -75,9 +82,12 @@ impl ReferenceBook {
                 let (maker, maker_qty) = *front;
                 let traded = remaining.min(maker_qty);
                 remaining -= traded;
+                self.trades += 1;
                 events.push(Event::Trade {
+                    trade_id: self.trades,
                     maker_order_id: maker,
                     taker_order_id: order_id,
+                    taker_side: side,
                     price_tick: tick,
                     qty: traded,
                 });
@@ -138,18 +148,42 @@ impl ReferenceBook {
 
     fn cancel(&mut self, order_id: u64) -> (bool, Vec<Event>) {
         let Some((side, tick)) = self.live.remove(&order_id) else {
-            return (false, Vec::new());
+            return (false, vec![Event::CancelRejected { order_id }]);
         };
         let book = match side {
             Side::Buy => &mut self.bids,
             Side::Sell => &mut self.asks,
         };
         let queue = book.get_mut(&tick).expect("live order has a level");
-        queue.retain(|&(id, _)| id != order_id);
+        let position = queue
+            .iter()
+            .position(|&(id, _)| id == order_id)
+            .expect("live order is queued at its level");
+        let (_, cancelled_qty) = queue.remove(position).expect("position is in range");
         if queue.is_empty() {
             book.remove(&tick);
         }
-        (true, vec![Event::OrderCancelled { order_id }])
+        let event = Event::OrderCancelled {
+            order_id,
+            side,
+            price_tick: tick,
+            cancelled_qty,
+        };
+        (true, vec![event])
+    }
+
+    fn resting_order(&self, order_id: u64) -> Option<RestingOrder> {
+        let &(side, price_tick) = self.live.get(&order_id)?;
+        let &(_, remaining_qty) = self.book(side)[&price_tick]
+            .iter()
+            .find(|&&(id, _)| id == order_id)
+            .expect("live order is queued at its level");
+        Some(RestingOrder {
+            order_id,
+            side,
+            price_tick,
+            remaining_qty,
+        })
     }
 
     fn best_bid(&self) -> Option<u32> {
@@ -250,6 +284,19 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         let taker_id = match op {
             Op::Place { order_id, .. } | Op::Cancel { order_id } => order_id,
         };
+        // The order this request named, and every maker it touched.
+        let touched = events.iter().filter_map(|e| match e {
+            Event::Trade { maker_order_id, .. } => Some(*maker_order_id),
+            _ => None,
+        });
+        for order_id in std::iter::once(taker_id).chain(touched) {
+            assert_eq!(
+                engine.resting_order(order_id),
+                model.resting_order(order_id),
+                "{} resting order {order_id}",
+                context()
+            );
+        }
         match events.as_slice() {
             [Event::OrderRejected { .. }] => coverage.input_rejections += 1,
             [Event::OrderAccepted { .. }, .., Event::OrderRejected { .. }] => {

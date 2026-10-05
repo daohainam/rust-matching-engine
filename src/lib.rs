@@ -33,7 +33,7 @@ pub mod pool;
 pub mod ringbuffer;
 pub mod wal;
 
-pub use engine::Engine;
+pub use engine::{Engine, RestingOrder};
 pub use events::{Event, EventBatch, EventSink, RejectReason};
 pub use pool::Side;
 

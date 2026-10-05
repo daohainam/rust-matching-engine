@@ -48,8 +48,8 @@ for event in &events {
 Kết quả:
 
 ```text
-OrderAccepted { order_id: 2 }
-Trade { maker_order_id: 1, taker_order_id: 2, price_tick: 100, qty: 10 }
+OrderAccepted { order_id: 2, side: Buy, price_tick: 100, qty: 10 }
+Trade { trade_id: 1, maker_order_id: 1, taker_order_id: 2, taker_side: Buy, price_tick: 100, qty: 10 }
 OrderFilled { order_id: 1 }
 OrderFilled { order_id: 2 }
 ```
@@ -57,7 +57,10 @@ OrderFilled { order_id: 2 }
 Tham số cuối cùng của `process_order` và `cancel_order` là một **event sink** (nơi
 nhận sự kiện): bất cứ thứ gì cài đặt `EventSink`, chẳng hạn một `Vec<Event>`, một
 closure, hoặc `EventBatch` có dung lượng cố định. Engine đổ mọi báo cáo vào đó và
-tự nó không bao giờ cấp phát ([chương 7](docs/vi/07-events.md)).
+tự nó không bao giờ cấp phát. Sự kiện chấp nhận lệnh và hủy lệnh mang theo phía,
+giá và số lượng của lệnh, còn mỗi giao dịch mang theo phía chủ động (aggressor
+side) và một `trade_id`, nên hệ thống phía sau có thể theo dõi sổ lệnh chỉ từ các
+sự kiện ([chương 7](docs/vi/07-events.md)).
 
 Thêm về API:
 
@@ -76,8 +79,10 @@ assert_eq!(engine.best_bid(), Some(100)); // highest resting buy tick
 assert_eq!(engine.best_ask(), None); // lowest resting sell tick
 assert_eq!(engine.depth_at(Side::Buy, 100), 10); // total quantity at one tick
 assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels first
+assert_eq!(engine.resting_order(1).map(|o| o.remaining_qty), Some(10)); // order status
 assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
 assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
+assert_eq!(events.last(), Some(&Event::CancelRejected { order_id: 1 })); // and says so
 ```
 
 Giá là **tick nguyên** trong khoảng `0..4096`; việc đổi qua lại giữa tick và giá
@@ -161,8 +166,8 @@ cũng có doc comment chi tiết (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         gốc của crate; re-export Engine, Event, EventBatch, EventSink, RejectReason, Side
-  engine.rs      lõi khớp lệnh: process_order, cancel_order, các truy vấn độ sâu
+  lib.rs         gốc của crate; re-export Engine, RestingOrder, Event, EventBatch, EventSink, RejectReason, Side
+  engine.rs      lõi khớp lệnh: process_order, cancel_order, tra cứu lệnh, các truy vấn độ sâu
   pool.rs        arena chứa lệnh, free list, PriceLevel (hàng đợi FIFO intrusive)
   bitset.rs      thang giá bằng bitset hai tầng (bid / ask tốt nhất trong O(1))
   hashmap.rs     bảng băm địa chỉ mở có seed (order id -> ô trong arena)
