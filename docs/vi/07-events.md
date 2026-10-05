@@ -24,37 +24,53 @@ Nhờ vậy engine là một máy trạng thái (state machine) thuần túy và
 
 ```rust
 pub enum Event {
-    OrderAccepted        { order_id: u64, side: Side, price_tick: u32, qty: u64 },
+    OrderAccepted        { order_id: u64, account: u32, side: Side,
+                           order_type: OrderType, price_tick: u32, qty: u64 },
     Trade                { trade_id: u64, maker_order_id: u64, taker_order_id: u64,
                            taker_side: Side, price_tick: u32, qty: u64 },
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     OrderFilled          { order_id: u64 },
+    OrderExpired         { order_id: u64, expired_qty: u64 },
     OrderCancelled       { order_id: u64, side: Side, price_tick: u32, cancelled_qty: u64 },
+    OrderReduced         { order_id: u64, side: Side, price_tick: u32,
+                           reduced_qty: u64, remaining_qty: u64 },
     OrderRejected        { order_id: u64, reason: RejectReason },
-    CancelRejected       { order_id: u64 },
+    SelfTradePrevented   { taker_order_id: u64, maker_order_id: u64 },
+    MassCancelled        { account: Option<u32>, cancelled_orders: u64 },
+    CancelRejected       { order_id: u64, reason: CancelRejectReason },
 }
 
 pub enum RejectReason {
-    // Input errors: the order is rejected alone, before OrderAccepted.
+    // Found before acceptance: the order is rejected alone, the book unchanged.
     ZeroQuantity,          // qty was 0
     ReservedOrderId,       // order_id was u64::MAX
     PriceOutOfRange,       // price_tick was 4096 or more
     DuplicateOrderId,      // a resting order already has this id
+    PostOnlyWouldTrade,    // a post-only order's price reaches the other side
     // The remainder could not rest: always after OrderAccepted.
     BookFull,              // every arena slot is in use
     LevelQuantityOverflow, // the level's total would not fit in a u64
+}
+
+pub enum CancelRejectReason {
+    NotResting,            // no resting order has this id
+    ZeroQuantity,          // a reduce of 0
 }
 ```
 
 | Sự kiện | Được phát ra khi | Nói về ai |
 |---|---|---|
-| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện nhắc lại phía, giá giới hạn và số lượng của lệnh. | lệnh vừa đến |
+| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện nhắc lại tài khoản, phía, loại lệnh, giá giới hạn và số lượng của lệnh (với lệnh thị trường, giá giới hạn là mức tệ nhất mà phía của nó cho phép). | lệnh vừa đến |
 | `Trade` | Hai lệnh khớp với nhau. `taker_side` là phía của bên chủ động (aggressor); `trade_id` đánh số các giao dịch 1, 2, 3, ... | cả maker **và** taker, ở giá của maker |
 | `OrderPartiallyFilled` | Một lệnh đã giao dịch nhưng vẫn còn số lượng. | một maker (sau mỗi lần khớp một phần), hoặc taker (một lần, ở cuối) |
 | `OrderFilled` | Một lệnh không còn gì nữa. | một maker (khi nó bị khớp hết), hoặc taker |
-| `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu. Sự kiện cho biết lệnh đã nằm chờ ở đâu và bao nhiêu số lượng đã rời khỏi sổ. | lệnh bị hủy |
-| `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, hoặc không còn chỗ để nằm chờ. `reason` cho biết là lý do nào. | lệnh vừa đến |
-| `CancelRejected` | Một yêu cầu hủy không trỏ tới lệnh nào đang nằm chờ (lệnh chưa từng được chấp nhận, hoặc đã khớp hết, đã bị hủy hay bị từ chối). | id trong yêu cầu hủy |
+| `OrderExpired` | Phần còn lại của một lệnh immediate-or-cancel hoặc lệnh thị trường bị bỏ đi; nó chưa bao giờ vào sổ. | taker (một lần, ở cuối cùng) |
+| `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu (hoặc bị giảm đi toàn bộ số lượng còn lại). Sự kiện cho biết lệnh đã nằm chờ ở đâu và bao nhiêu số lượng đã rời khỏi sổ. | lệnh bị hủy |
+| `OrderReduced` | Số lượng của một lệnh đang chờ được giảm theo yêu cầu; lệnh vẫn giữ nguyên vị trí trong hàng đợi. | lệnh bị giảm |
+| `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, một lệnh post-only sẽ gây ra giao dịch, hoặc không còn chỗ để nằm chờ. `reason` cho biết là lý do nào. | lệnh vừa đến |
+| `SelfTradePrevented` | Một lệnh vừa đến gặp một lệnh đang chờ của chính tài khoản đó, và chế độ chống tự giao dịch (self-trade prevention) của nó đã chặn giao dịch. Theo sau là `OrderCancelled` của maker, `OrderExpired` của taker, hoặc cả hai, tùy theo chế độ. | cả taker **và** maker |
+| `MassCancelled` | Một lần gọi `cancel_account` (`account: Some(..)`) hoặc `cancel_all` (`None`) đã xong; `cancelled_orders` đếm số sự kiện `OrderCancelled` đứng trước nó. | yêu cầu đó |
+| `CancelRejected` | Một yêu cầu hủy hoặc giảm lệnh bị từ chối: không có lệnh đang chờ nào mang id đó, hoặc lượng giảm bằng 0. `reason` cho biết là lý do nào. | id trong yêu cầu |
 
 `Event` derive `Debug, Clone, Copy, PartialEq, Eq`, nên sao chép sự kiện rất rẻ
 và so sánh chúng trong test rất dễ. Một `Event` nặng 40 byte (biến thể lớn nhất là
@@ -63,12 +79,14 @@ số của 8). Các biến thể khác đều nằm vừa trong chỗ mà `Trade
 
 ## 7.2 Quy tắc về thứ tự
 
-Với mỗi lần gọi `process_order`, các sự kiện luôn có dạng sau:
+Với mỗi lần gọi `submit_order` (hoặc `process_order`), các sự kiện luôn có dạng
+sau:
 
 ```text
    [OrderAccepted]                                   <- luôn đứng đầu (trừ khi bị từ chối ngay từ đầu)
    ( Trade, <maker Filled | maker PartiallyFilled> ) <- lặp lại mỗi lần khớp, theo đúng thứ tự khớp
    [ taker OrderFilled | taker OrderPartiallyFilled ]<- nhiều nhất một sự kiện, cho biết trạng thái cuối của taker
+   [ OrderExpired ]                                  <- lệnh IOC và lệnh thị trường còn số lượng, hoặc một lần tự giao dịch bị chặn
    [ OrderRejected ]                                 <- chỉ khi lệnh không nằm chờ được (và chưa giao dịch lần nào)
 ```
 
@@ -76,20 +94,31 @@ Những điểm cần nhớ:
 
 - Một `Trade` **luôn được theo ngay sau** bởi sự kiện mô tả trạng thái mới của
   *maker*.
+- Khi có chống tự giao dịch, một `SelfTradePrevented` thế chỗ cho một `Trade`
+  trong chuỗi đó. Theo sau nó là `OrderCancelled` của chính maker cùng tài khoản
+  (chế độ `CancelResting` và `CancelBoth`), và với `CancelIncoming` và
+  `CancelBoth` thì việc khớp lệnh dừng lại tại đó: sự kiện cuối của taker và
+  `OrderExpired` đến ngay sau, kể cả với lệnh giới hạn.
 - `OrderPartiallyFilled` hoặc `OrderFilled` của **taker** chỉ xuất hiện **một
   lần**, ở cuối, chứ không xuất hiện sau mỗi giao dịch. Muốn theo dõi tiến độ của
   một taker, hãy cộng `qty` của các sự kiện `Trade` của nó lại.
 - Một taker không giao dịch lần nào mà chỉ nằm chờ thì chỉ tạo ra **duy nhất**
   `OrderAccepted`. Không có sự kiện riêng kiểu "lệnh đang nằm chờ".
-- Lệnh bị từ chối vì đầu vào sai thì sự kiện đến **một mình**; lệnh bị từ chối vì
-  hết dung lượng thì sự kiện đến **sau** `OrderAccepted`, và chỉ với lệnh chưa
+- Lệnh bị từ chối trước khi được chấp nhận (đầu vào sai, hoặc lệnh post-only
+  sẽ gây ra giao dịch) thì sự kiện đến **một mình**; lệnh bị từ chối vì hết dung
+  lượng thì sự kiện đến **sau** `OrderAccepted`, và chỉ với lệnh chưa
   giao dịch lần nào (xem
   [mục 6.4](06-matching-algorithm.md#64-giai-đoạn-4-cho-phần-còn-lại-nằm-chờ-trong-sổ)).
 - Bản thân engine **không bao giờ làm rơi sự kiện**. Chỉ có sink có giới hạn, như
   `EventBatch`, mới có thể hết chỗ (mục 7.4).
-- Một lần gọi `cancel_order` phát ra **đúng một** sự kiện: `OrderCancelled` nếu
-  lệnh đang nằm chờ, `CancelRejected` nếu không. Kết quả `bool` của nó cũng cho
-  biết đúng điều đó, dành cho bên gọi chỉ muốn rẽ nhánh theo kết quả.
+- Một lần gọi `cancel_order` hoặc `reduce_order` phát ra **đúng một** sự kiện:
+  `OrderCancelled` hoặc `OrderReduced` nếu nó làm thay đổi sổ lệnh,
+  `CancelRejected` nếu không. Kết quả `bool` của nó cũng cho biết đúng điều đó,
+  dành cho bên gọi chỉ muốn rẽ nhánh theo kết quả.
+- Một lần gọi `cancel_account` hoặc `cancel_all` phát ra một `OrderCancelled`
+  cho mỗi lệnh, phía bid trước (giá tốt nhất trước), rồi đến phía ask (giá tốt
+  nhất trước), lệnh cũ nhất trước ở mỗi mức giá, và luôn kết thúc bằng
+  `MassCancelled`.
 
 ### Theo dõi sổ lệnh chỉ bằng sự kiện
 
@@ -102,7 +131,9 @@ hay một hệ thống quản lý rủi ro làm:
 | `OrderAccepted { side, price_tick, qty, .. }` | ghi nhớ các thông số này cho đến khi lần gọi kết thúc |
 | `Trade { taker_side, price_tick, qty, .. }` | mức giá của maker mất đi `qty`; mức đó nằm ở phía **đối diện** với `taker_side`, tại `price_tick` |
 | `OrderCancelled { side, price_tick, cancelled_qty, .. }` | mức giá đó mất đi `cancelled_qty` |
-| kết thúc một lần gọi `process_order` | trừ khi sự kiện cuối cùng của taker là `OrderFilled` hoặc `OrderRejected`, phần còn lại của nó (`qty` trừ đi các giao dịch của nó) giờ nằm chờ tại chính `price_tick` của nó |
+| `OrderReduced { side, price_tick, reduced_qty, .. }` | mức giá đó mất đi `reduced_qty` |
+| `SelfTradePrevented`, `MassCancelled` | không có gì: các sự kiện `OrderCancelled` quanh chúng mang theo các thay đổi |
+| kết thúc một lần gọi `submit_order` | trừ khi sự kiện cuối cùng của taker là `OrderFilled`, `OrderExpired` hoặc `OrderRejected`, phần còn lại của nó (`qty` trừ đi các giao dịch của nó) giờ nằm chờ tại chính `price_tick` của nó |
 
 `trade_id` giúp xử lý các chỗ hổng và bản trùng lặp nói ở
 [mục 9.5](09-write-ahead-log.md#95-đọc-và-phát-lại): engine đánh số các giao dịch
@@ -123,9 +154,17 @@ Các chuỗi này lấy thẳng từ unit test trong `engine.rs`.
 | Taker lớn hơn maker; phần còn lại nằm chờ | `Accepted`, `Trade`, `Filled(maker)`, `PartiallyFilled(taker, left)` |
 | Taker quét qua nhiều mức giá | `Accepted`, rồi mỗi lần khớp có `Trade` + sự kiện của maker, cuối cùng là sự kiện cuối của taker |
 | Đầu vào không hợp lệ / trùng id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
+| Lệnh post-only có giá chạm tới phía đối diện | `Rejected(PostOnlyWouldTrade)` |
 | Lệnh không nằm chờ được (arena đầy / tràn số) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (chưa có giao dịch nào) |
+| Lệnh IOC hoặc lệnh thị trường còn số lượng | `Accepted`, rồi mỗi lần khớp có `Trade` + sự kiện của maker, rồi `PartiallyFilled(taker, left)` nếu nó đã giao dịch, cuối cùng là `Expired(left)` |
 | Hủy lệnh thành công | `Cancelled` |
-| Hủy một lệnh không nằm chờ | `CancelRejected` (và `bool` trả về là `false`) |
+| Hủy một lệnh không nằm chờ | `CancelRejected(NotResting)` (và `bool` trả về là `false`) |
+| Giảm ít hơn số lượng còn lại | `Reduced` |
+| Giảm bằng hoặc nhiều hơn số lượng còn lại | `Cancelled` |
+| Giảm 0 | `CancelRejected(ZeroQuantity)` |
+| Taker gặp lệnh của chính tài khoản nó, chế độ `CancelResting` | ..., `SelfTradePrevented`, `Cancelled(maker)`, rồi việc khớp lệnh tiếp tục |
+| Taker gặp lệnh của chính tài khoản nó, chế độ `CancelIncoming` | ..., `SelfTradePrevented`, `PartiallyFilled(taker, left)` nếu nó đã giao dịch, `Expired(left)` |
+| Hủy hàng loạt | `Cancelled` cho mỗi lệnh, theo thứ tự trong sổ, rồi `MassCancelled(count)` |
 
 ## 7.3 Trait `EventSink`
 
@@ -149,7 +188,7 @@ Dưới đây là cả ba cách chạy thực tế. Ví dụ y hệt có trong r
 [`src/events.rs`](../../src/events.rs), nơi `cargo test` biên dịch và chạy nó:
 
 ```rust
-use matching_engine::{Engine, Event, EventBatch, Side};
+use matching_engine::{Engine, Event, EventBatch, OrderType, Side};
 
 let mut engine = Engine::new(16);
 
@@ -159,7 +198,14 @@ let mut events = Vec::new();
 engine.process_order(1, Side::Sell, 100, 5, &mut events);
 assert_eq!(
     events,
-    [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+    [Event::OrderAccepted {
+        order_id: 1,
+        account: 0,
+        side: Side::Sell,
+        order_type: OrderType::Limit,
+        price_tick: 100,
+        qty: 5,
+    }]
 );
 
 // 2. A closure sees each event as it happens; this one counts trades.
@@ -297,12 +343,12 @@ làm đúng việc này.
 Một hàm thông thường cũng dùng được làm sink, vì nó cài đặt `FnMut(Event)`:
 
 ```rust
-use matching_engine::{Engine, Event, Side};
+use matching_engine::{Engine, Event, NewOrder, OrderType, Side};
 
 fn log_event(event: Event) {
     match event {
-        Event::OrderAccepted { order_id, side, price_tick, qty } => {
-            println!("accepted  #{order_id}: {side:?} {qty} @ {price_tick}")
+        Event::OrderAccepted { order_id, account, side, order_type, price_tick, qty } => {
+            println!("accepted  #{order_id} for {account}: {order_type:?} {side:?} {qty} @ {price_tick}")
         }
         Event::Trade { trade_id, maker_order_id, taker_order_id, taker_side, price_tick, qty } => {
             println!(
@@ -314,17 +360,32 @@ fn log_event(event: Event) {
             println!("partial   #{order_id}, {remaining_qty} left")
         }
         Event::OrderFilled { order_id } => println!("filled    #{order_id}"),
+        Event::OrderExpired { order_id, expired_qty } => {
+            println!("expired   #{order_id}, {expired_qty} never rested")
+        }
         Event::OrderCancelled { order_id, cancelled_qty, .. } => {
             println!("cancelled #{order_id}, {cancelled_qty} removed")
         }
+        Event::OrderReduced { order_id, reduced_qty, remaining_qty, .. } => {
+            println!("reduced   #{order_id} by {reduced_qty}, {remaining_qty} left")
+        }
         Event::OrderRejected { order_id, reason } => println!("rejected  #{order_id}: {reason:?}"),
-        Event::CancelRejected { order_id } => println!("cancel rejected: #{order_id} is not resting"),
+        Event::SelfTradePrevented { taker_order_id, maker_order_id } => {
+            println!("prevented #{taker_order_id} trading with its own #{maker_order_id}")
+        }
+        Event::MassCancelled { account, cancelled_orders } => {
+            println!("mass cancel of {account:?}: {cancelled_orders} orders")
+        }
+        Event::CancelRejected { order_id, reason } => {
+            println!("cancel or reduce of #{order_id} rejected: {reason:?}")
+        }
     }
 }
 
 let mut engine = Engine::new(16);
 engine.process_order(1, Side::Sell, 100, 10, &mut log_event);
-engine.process_order(2, Side::Buy, 100, 4, &mut log_event);
+let ioc = NewOrder::limit(2, Side::Buy, 100, 14).with_type(OrderType::ImmediateOrCancel);
+engine.submit_order(ioc, &mut log_event);
 ```
 
 Kiểm thử bằng sự kiện cũng trực tiếp không kém; các test của chính engine được viết
@@ -341,7 +402,14 @@ engine.process_order(2, Side::Buy, 100, 4, &mut events);
 assert_eq!(
     events,
     [
-        Event::OrderAccepted { order_id: 2, side: Side::Buy, price_tick: 100, qty: 4 },
+        Event::OrderAccepted {
+            order_id: 2,
+            account: 0,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price_tick: 100,
+            qty: 4,
+        },
         Event::Trade {
             trade_id: 1,
             maker_order_id: 1,
