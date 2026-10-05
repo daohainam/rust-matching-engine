@@ -244,7 +244,8 @@ not trade at once:
 
 A **market** order says "buy 10 now, whatever it costs". It has no price of its
 own, so it may sweep through many levels; that is why real exchanges protect it
-with price bands, which this engine leaves to the caller. A **post-only** order
+with price bands, as this engine does when one is set (see *Risk limits* above). A
+**post-only** order
 is for market makers, who want to be sure they only ever *add* orders to the
 book (and often pay lower fees for it): if it would trade on arrival, it is
 refused instead.
