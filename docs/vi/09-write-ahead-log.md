@@ -332,8 +332,11 @@ Cách xử lý thông thường dùng số `sequence` của WAL ở mục 9.2. P
 sequence của yêu cầu cuối cùng mà nó đã xử lý xong sự kiện, giả sử là 41. Khi
 khởi động lại, quá trình phát lại bỏ đi các sự kiện của yêu cầu từ 0 đến 41 và
 phát hành các sự kiện của yêu cầu từ 42 trở đi. Vì engine là tất định, đó chính
-xác là những sự kiện mà process bị crash lẽ ra đã phát hành. Repo này để phần ghi
-sổ đó cho bạn tự làm; chương trình ở 9.7 hoàn toàn không phát hành sự kiện.
+xác là những sự kiện mà process bị crash lẽ ra đã phát hành, đến tận `trade_id`
+của từng giao dịch ([7.2](07-events.md#72-quy-tắc-về-thứ-tự)): một consumer chỉ
+quan tâm đến giao dịch có thể đơn giản bỏ qua mọi `trade_id` mà nó đã thấy. Repo
+này để phần ghi sổ đó cho bạn tự làm; chương trình ở 9.7 hoàn toàn không phát
+hành sự kiện.
 
 Ở lần khởi động đầu tiên thì chưa có log, nên một service thường làm như sau:
 
