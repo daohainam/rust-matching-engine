@@ -21,9 +21,9 @@ Nếu process bị crash, sổ lệnh nằm trong bộ nhớ sẽ mất sạch. 
 Có một mẹo hay: engine là **tất định** (deterministic). Nó không có đồng hồ,
 nguồn ngẫu nhiên duy nhất của nó (seed của hàm băm, chương 5) không bao giờ ảnh
 hưởng tới kết quả, và trạng thái của nó là một hàm thuần túy của các yêu cầu
-(request) đã nhận và sức chứa (capacity) của engine lúc được tạo. Vì vậy
-**cùng một chuỗi yêu cầu, nạp vào một engine cùng capacity, luôn cho ra đúng cùng
-một sổ lệnh**. Do đó ta không cần lưu sổ lệnh; chỉ cần lưu các **yêu cầu**, theo
+(request) đã nhận và của sức chứa (capacity) cùng số tick của engine lúc được tạo.
+Vì vậy **cùng một chuỗi yêu cầu, nạp vào một engine được tạo theo cùng một cách,
+luôn cho ra đúng cùng một sổ lệnh**. Do đó ta không cần lưu sổ lệnh; chỉ cần lưu các **yêu cầu**, theo
 đúng thứ tự, rồi phát lại (replay) chúng vào một engine mới. Cách này gọi là
 *event sourcing* (ở đây chính xác hơn là *input* sourcing).
 
@@ -34,8 +34,10 @@ một sổ lệnh**. Do đó ta không cần lưu sổ lệnh; chỉ cần lưu 
    khởi động:  Engine::new(capacity)  <-------  đọc log, nạp lại từng yêu cầu
 ```
 
-Capacity cũng quan trọng không kém các yêu cầu, nên log ghi nó vào header (9.2),
-và hàm `replay` của thư viện dựng engine với đúng capacity đó.
+Capacity và số tick cũng quan trọng không kém các yêu cầu, nên log ghi chúng vào
+header (9.2), và hàm `replay` của thư viện dựng engine với đúng các giá trị đó.
+Giới hạn rủi ro cũng là đầu vào, nhưng chúng có thể thay đổi trong ngày, nên chúng
+được ghi log thành những yêu cầu riêng.
 
 "Write-ahead" (ghi trước) nghĩa là: **ghi log yêu cầu trước, rồi mới áp dụng
 nó.** Nếu ta crash ngay sau khi ghi log, lần phát lại sẽ áp dụng lại yêu cầu đó;
@@ -53,16 +55,16 @@ Header cho biết đây là tệp gì và theo định dạng nào:
 | Offset | Kích thước | Trường |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
-| 8 | 4 | phiên bản định dạng (`4`; các phiên bản `1` đến `3` vẫn được đọc) |
+| 8 | 4 | phiên bản định dạng (`5`; các phiên bản `1` đến `4` vẫn được đọc) |
 | 12 | 4 | kích thước bản ghi tính bằng byte (`40`) |
 | 16 | 8 | capacity của engine mà log được ghi cho (`0` = không rõ) |
-| 24 | 8 | dự phòng, bằng 0 |
+| 24 | 8 | số tick của engine (`0` = mặc định 4096, giá trị mà mọi log cũ hơn đều dùng) |
 
 Mỗi bản ghi mô tả một yêu cầu:
 
 | Offset | Kích thước | Trường |
 |-------:|-----:|---|
-| 0 | 1 | kind: `1` = lệnh mới, `2` = hủy lệnh, `3` = giảm số lượng, `4` = hủy các lệnh của một tài khoản, `5` = hủy mọi lệnh (`0` không bao giờ hợp lệ) |
+| 0 | 1 | kind: `1` = lệnh mới, `2` = hủy lệnh, `3` = giảm số lượng, `4` = hủy các lệnh của một tài khoản, `5` = hủy mọi lệnh, `6` = đặt giới hạn rủi ro (`0` không bao giờ hợp lệ) |
 | 1 | 1 | side: `0` = mua, `1` = bán |
 | 2 | 1 | loại lệnh: `0` = limit, `1` = immediate-or-cancel, `2` = market, `3` = post-only |
 | 3 | 1 | chống tự giao dịch: `0` = cho phép, `1` = hủy lệnh đang chờ, `2` = hủy lệnh đến, `3` = hủy cả hai |
@@ -76,21 +78,27 @@ Mỗi bản ghi mô tả một yêu cầu:
 Trường nào mà một kind không dùng thì bằng 0: một lệnh hủy không có side, giá hay
 tài khoản, một lệnh hủy hàng loạt không có id lệnh.
 
-**Bốn phiên bản.** Định dạng này đã được mở rộng ba lần. Phiên bản 1 không có loại
+Một bản ghi giới hạn rủi ro (kind `6`) dùng lại các trường của lệnh: số lượng là
+số lượng tối đa của một lệnh, tick giá là biên độ giá (price band), và byte side
+cho biết có biên độ giá (`1`) hay không (`0`).
+
+**Năm phiên bản.** Định dạng này đã được mở rộng bốn lần. Phiên bản 1 không có loại
 lệnh và không có bản ghi giảm số lượng; phiên bản 2 thêm hai thứ đó, nhưng không
 có chống tự giao dịch, không có tài khoản và không có hủy hàng loạt; phiên bản 3
-thêm những thứ đó, nhưng không ghi lại capacity của engine. Trong các phiên bản cũ,
-những byte của các trường còn thiếu là phần dự phòng, luôn bằng 0, và 0 có nghĩa
-là "limit", "cho phép", "tài khoản 0" và "capacity không rõ". Vì vậy **mọi bản ghi
-cũ cũng là một bản ghi phiên bản 4 hợp lệ**, và cả bốn phiên bản đều được đọc.
+thêm những thứ đó, nhưng không ghi lại capacity của engine; phiên bản 4 ghi lại
+capacity, nhưng không ghi số tick, và không có giới hạn rủi ro. Trong các phiên bản
+cũ, những byte của các trường còn thiếu là phần dự phòng, luôn bằng 0, và 0 có
+nghĩa là "limit", "cho phép", "tài khoản 0", "capacity không rõ" và "4096 tick". Vì
+vậy **mọi bản ghi cũ cũng là một bản ghi phiên bản 5 hợp lệ**, và cả năm phiên bản
+đều được đọc.
 
 Điều ngược lại thì không đúng: một bộ đọc cũ sẽ bỏ qua các byte mới và phát lại,
 chẳng hạn, một lệnh immediate-or-cancel như một lệnh limit, hoặc coi mọi lệnh là
 của tài khoản 0, để lại một sổ lệnh khác. Đó là lý do có số phiên bản:
-`open_append` ghi lại header cũ thành phiên bản 4 (và flush nó) trước khi ghi thêm
+`open_append` ghi lại header cũ thành phiên bản 5 (và flush nó) trước khi ghi thêm
 bất cứ thứ gì, và khi đó một bộ đọc cũ sẽ từ chối tệp thay vì đọc sai. Cũng lần
-ghi lại đó lưu capacity của engine mà `open_append` được truyền vào, nên từ đó về
-sau log biết giá trị này.
+ghi lại đó lưu capacity và số tick của engine mà `open_append` được truyền vào, nên
+từ đó về sau log biết các giá trị này.
 
 Đây là 40 byte thật mà `encode` tạo ra cho
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, tức lệnh `#6` trong ví dụ minh
@@ -251,8 +259,8 @@ tệp có thể gây ra (xem 9.5).
 
 ```mermaid
 flowchart TD
-    A["WalWriter::create(path, engine_capacity, capacity_records)"] --> B["khóa path.lock (lỗi nếu một writer khác đang giữ nó)<br/>tạo tệp MỚI (lỗi nếu tệp đã tồn tại)<br/>set_len(32 + capacity × 40), ánh xạ tệp<br/>ghi header rồi flush"]
-    O["WalWriter::open_append(path, engine_capacity, spare_records)"] --> P["khóa path.lock<br/>đọc tệp, kiểm tra header và capacity trong đó<br/>cắt bỏ phần sau bản ghi hợp lệ cuối cùng<br/>set_len để chừa chỗ trống, ánh xạ tệp"]
+    A["WalWriter::create(path, &engine, capacity_records)"] --> B["khóa path.lock (lỗi nếu một writer khác đang giữ nó)<br/>tạo tệp MỚI (lỗi nếu tệp đã tồn tại)<br/>set_len(32 + capacity × 40), ánh xạ tệp<br/>ghi header rồi flush"]
+    O["WalWriter::open_append(path, &engine, spare_records)"] --> P["khóa path.lock<br/>đọc tệp, kiểm tra header so với engine<br/>cắt bỏ phần sau bản ghi hợp lệ cuối cùng<br/>set_len để chừa chỗ trống, ánh xạ tệp"]
     B --> C["append(record)"]
     P --> C
     C --> D{"next_offset + 40<br/>> capacity_bytes?"}
@@ -267,7 +275,7 @@ flowchart TD
 ```
 
 ```text
-   sau create(path, capacity, 4):      [ header ][ zero ][ zero ][ zero ][ zero ]   chỗ cho 4 bản ghi
+   sau create(path, &engine, 4):       [ header ][ zero ][ zero ][ zero ][ zero ]   chỗ cho 4 bản ghi
    sau 3 lần append:                   [ header ][ rec0 ][ rec1 ][ rec2 ][ zero ]   next_offset = 32 + 3 × 40 = 152
    sau lần append thứ 5 (grow):        [ header ][ rec0 .. rec4 ][ zero ... ]       tệp nhân đôi: 192 -> 384 byte
    sau finalize():                     [ header ][ rec0 .. rec4 ]                   32 + 5 × 40 = 232 byte
@@ -277,9 +285,10 @@ flowchart TD
   tồn tại thì sẽ báo lỗi `AlreadyExists`. Nhờ vậy, một lần khởi động lại không
   bao giờ xóa mất log mà đáng lẽ nó phải phát lại; muốn viết tiếp một log thì
   dùng `open_append`, hoặc xóa tệp một cách có chủ đích.
-- **`open_append` kiểm tra capacity.** Nếu header ghi một capacity khác với giá
-  trị bạn truyền vào, nó báo lỗi `InvalidInput` trước khi chạm vào tệp: viết tiếp
-  log cho một engine khác sẽ khiến log không phát lại được nữa.
+- **Cả hai đều nhận engine.** `create` ghi capacity và số tick của nó vào header.
+  `open_append` kiểm tra chúng: nếu header ghi một capacity hoặc số tick khác, nó
+  báo lỗi `InvalidInput` trước khi chạm vào tệp, vì viết tiếp log cho một engine
+  khác sẽ khiến log không phát lại được nữa.
 - **Mỗi lúc chỉ một writer.** Cả hai constructor trước hết lấy một khóa độc quyền
   (`File::try_lock`) trên một tệp đi kèm nhỏ, `path.lock`, và giữ nó suốt vòng đời
   của writer; writer thứ hai sẽ nhận `WouldBlock` thay vì cắt log ngay dưới chân
@@ -321,7 +330,8 @@ sai sẽ cho lỗi `ErrorKind::InvalidData`), rồi giải mã các bản ghi **
 đầu tiên không qua được bước kiểm tra**: phần đuôi toàn số 0 được cấp phát sẵn mà
 một lần crash để lại, một lần ghi cuối bị ghi dở (torn write), hoặc một bản ghi chỉ
 có một phần. Nó trả về một `WalContents`: capacity của engine lấy từ header (`None`
-với một log có từ trước phiên bản 4) và một `Vec` các bản ghi có kiểu rõ ràng.
+với một log có từ trước phiên bản 4), số tick của nó (4096 với một log có từ trước
+phiên bản 5), và một `Vec` các bản ghi có kiểu rõ ràng.
 
 Biến một bản ghi trở lại thành một lời gọi engine là việc của
 `WalRecord::apply_to`, một `match` thường, không còn gì phải kiểm tra thêm:
@@ -343,7 +353,8 @@ log nó: khi đó lần chạy thật và lần phát lại thực hiện đúng
 từ cách xây dựng. Còn `replay` làm toàn bộ việc phục hồi chỉ trong một lời gọi:
 
 ```rust
-let engine = replay(&path, &mut events)?;  // Engine::new(recorded capacity), then
+let engine = replay(&path, &mut events)?;  // Engine::with_ticks(recorded capacity
+                                           // and tick count), then
                                            // apply_to for every record, in order
 ```
 
@@ -358,9 +369,9 @@ không qua được checksum và đánh dấu điểm kết thúc của log.
 
 **Khởi động lại sau crash** gồm ba bước:
 
-1. `replay` log. Nó dựng một `Engine` mới **có capacity mà log ghi lại** và áp
-   dụng mọi bản ghi hợp lệ.
-2. Viết tiếp chính log đó bằng `open_append(path, capacity, spare)`. Nó dừng ở
+1. `replay` log. Nó dựng một `Engine` mới **với capacity và số tick mà log ghi
+   lại** và áp dụng mọi bản ghi hợp lệ.
+2. Viết tiếp chính log đó bằng `open_append(path, &engine, spare)`. Nó dừng ở
    đúng bản ghi không hợp lệ đầu tiên mà `replay` đã dừng, bỏ mọi thứ phía sau, và
    ghi tiếp từ đó.
 3. Chỉ sau đó mới bắt đầu nhận yêu cầu mới.
@@ -374,7 +385,7 @@ bản ghi thứ tư:
                                          ^ checksum sai
 
  replay:        header OK, rec 0, rec 1, rec 2 hợp lệ; rec 3 không hợp lệ -> dừng.
-                Áp dụng 3 bản ghi đó vào Engine::new(capacity đã ghi lại).
+                Áp dụng 3 bản ghi đó vào một engine được dựng đúng như header ghi.
 
  open_append:   tìm đúng bản ghi không hợp lệ đầu tiên đó, cắt tệp tại đây,
                 rồi nới tệp ra lại bằng các số 0 mới:
@@ -418,13 +429,13 @@ hành sự kiện.
 Ở lần khởi động đầu tiên thì chưa có log, nên một service thường làm như sau:
 
 ```rust
-let mut wal = match WalWriter::open_append(&path, CAPACITY, 16_384) {
+let mut wal = match WalWriter::open_append(&path, &engine, 16_384) {
     Ok(wal) => wal,                                    // continue the existing log
     Err(e) if e.kind() == io::ErrorKind::NotFound => {
-        WalWriter::create(&path, CAPACITY, 16_384)?    // first start: a new log
+        WalWriter::create(&path, &engine, 16_384)?     // first start: a new log
     }
     Err(e) => return Err(e),                           // damaged header, another
-};                                                     // capacity, another writer:
+};                                                     // engine, another writer:
                                                        // needs a human
 ```
 
@@ -505,7 +516,8 @@ enum Command {
 
 fn main() -> std::io::Result<()> {
     const N: u64 = 10_000;
-    // The log records this, and refuses to be continued with another.
+    // The log records the engine's capacity, and refuses to be continued
+    // for an engine of another.
     const CAPACITY: usize = 50_000;
     let (mut producer, mut consumer) = spsc_channel::<Command>(1024);
 
@@ -538,8 +550,8 @@ fn main() -> std::io::Result<()> {
     if path.exists() {
         std::fs::remove_file(&path)?;
     }
-    let mut wal = WalWriter::create(&path, CAPACITY, 16_384)?;
     let mut engine = Engine::new(CAPACITY);
+    let mut wal = WalWriter::create(&path, &engine, 16_384)?;
     let mut events = Vec::new(); // one sink, reused for every call
     let mut sequence = 0;
     loop {
@@ -571,7 +583,7 @@ fn main() -> std::io::Result<()> {
     wal.finalize()?; // flush, trim the preallocated tail, sync
 
     // Recovery: rebuild the book from the log alone. `replay` builds the
-    // replica with the capacity the log records and applies every record
+    // replica like the engine the log records and applies every record
     // with `apply_to`, like the loop above. Its events are not needed here.
     let replica = replay(&path, &mut |_: Event| {})?;
     std::fs::remove_file(&path)?;
@@ -602,8 +614,8 @@ Chương trình này minh họa:
 - **Thứ tự:** lần append vào WAL diễn ra *trước* lời gọi engine.
 - **Một đường code duy nhất:** cả lần chạy thật lẫn lần phát lại đều đi qua
   `WalRecord::apply_to`, nên chúng không thể lệch nhau.
-- **Tính tất định (determinism):** một engine mới có capacity mà log ghi lại, được
-  nạp các yêu cầu đã ghi log, sẽ kết thúc ở đúng cùng một trạng thái. Đó là điều
+- **Tính tất định (determinism):** một engine mới được dựng đúng như log ghi lại,
+  được nạp các yêu cầu đã ghi log, sẽ kết thúc ở đúng cùng một trạng thái. Đó là điều
   khiến WAL hữu ích cho việc phục hồi, kiểm thử và kiểm toán (audit).
 
 Những gì chương trình cố ý bỏ qua:
@@ -624,9 +636,10 @@ Phát lại toàn bộ log thì vẫn chạy được, nhưng khi đó engine ch
 hồi càng mất nhiều thời gian: một tuần yêu cầu là một tuần phát lại. Cách khắc phục
 là thỉnh thoảng lưu lại **trạng thái**, và chỉ phát lại những gì đến sau nó.
 
-**Một snapshot** là toàn bộ trạng thái của engine: capacity, hai bộ đếm của nó (số
-lệnh đã chấp nhận và số giao dịch), và mọi lệnh đang chờ theo thứ tự ưu tiên (các
-bid từ giá tốt nhất, rồi đến các ask, ở mỗi mức giá thì lệnh cũ nhất trước). Nó nằm
+**Một snapshot** là toàn bộ trạng thái của engine: capacity và số tick, hai bộ đếm
+của nó (số lệnh đã chấp nhận và số giao dịch), giới hạn rủi ro của nó, và mọi lệnh
+đang chờ theo thứ tự ưu tiên (các bid từ giá tốt nhất, rồi đến các ask, ở mỗi mức
+giá thì lệnh cũ nhất trước). Nó nằm
 trong [`src/snapshot.rs`](../../src/snapshot.rs):
 
 ```rust
@@ -654,7 +667,7 @@ replay_from(&log_path, &mut engine, checkpoint.next_sequence, &mut events)?;
 
 `replay_from` bỏ qua mọi bản ghi đứng trước `next_sequence` (snapshot đã chứa tác
 dụng của chúng), áp dụng phần còn lại bằng `apply_to`, và từ chối một engine có
-capacity khác với capacity của log. Cách này dựa vào việc số sequence tăng đúng một
+capacity hoặc số tick khác với của log. Cách này dựa vào việc số sequence tăng đúng một
 đơn vị sau mỗi bản ghi, như cách các chương trình trong chương này đánh số chúng.
 
 Tệp checkpoint được ghi một cách **nguyên tử** (atomic), vì một checkpoint ghi dở
