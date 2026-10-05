@@ -17,7 +17,9 @@ giống hệt mã nguồn.
 
 ```rust
 let mut engine = Engine::new(order_capacity);          // allocate everything, once
+// or Engine::with_ticks(order_capacity, ticks): another price range (chapter 4)
 let mut events = Vec::new();                            // any EventSink (chapter 7)
+engine.set_risk_limits(limits);                         // pre-trade checks (6.2)
 
 engine.process_order(id, side, tick, qty, &mut events); // submit a limit order
 engine.submit_order(order, &mut events);                // any NewOrder (see below)
@@ -32,6 +34,8 @@ engine.depth_at(side, tick);       // u64   total resting qty at one tick
 engine.depth_snapshot(side, n);    // Vec<(tick, qty)>  best n levels, best first
 engine.live_order_count();         // usize number of resting orders
 engine.resting_order(id);          // Option<RestingOrder>  side, tick, remaining qty
+engine.tick_count();               // usize valid ticks are 0..tick_count()
+engine.risk_limits();              // RiskLimits
 ```
 
 `submit_order` nhận một `NewOrder`, một struct `Copy` nhỏ chứa mọi điều khoản
@@ -66,13 +70,14 @@ thẳng vào vòng lặp khớp lệnh. Ràng buộc `?Sized` còn cho phép tru
 | `depth_snapshot` | không | **có** (`Vec`) | O(số tick phải quét); chỉ dùng để báo cáo |
 | `live_order_count` | không | không | O(1) |
 | `resting_order` | không | không | O(1) kỳ vọng: một lần tra bảng băm |
+| `set_risk_limits` / `risk_limits` / `tick_count` | chỉ `set_risk_limits` | không | O(1) |
 
 ## 6.2 `submit_order` gồm bốn giai đoạn
 
 ```mermaid
 flowchart TD
-    A(["submit_order(order, sink)"]) --> A2["lệnh thị trường: tick = giới hạn tệ nhất<br/>(4095 nếu là lệnh mua, 0 nếu là lệnh bán)"]
-    A2 --> B{"qty == 0, hoặc id bị dành riêng,<br/>hoặc tick >= 4096,<br/>hoặc id trùng với lệnh còn sống,<br/>hoặc lệnh post-only sẽ giao dịch?"}
+    A(["submit_order(order, sink)"]) --> A2["lệnh thị trường: tick = mép của biên độ giá,<br/>nếu không thì là đầu mút của thang giá"]
+    A2 --> B{"qty == 0, hoặc id bị dành riêng,<br/>hoặc tick ngoài phạm vi,<br/>hoặc id trùng với lệnh còn sống,<br/>hoặc vi phạm một giới hạn rủi ro,<br/>hoặc lệnh post-only sẽ giao dịch?"}
     B -- có --> R(["phát OrderRejected(reason)<br/>return ngay"])
     B -- không --> C["phát OrderAccepted"]
     C --> D["remaining = qty<br/>match_incoming với phía đối diện"]
@@ -97,10 +102,11 @@ flowchart TD
 
 Tóm tắt bằng lời:
 
-1. **Kiểm tra hợp lệ (validate).** Đầu vào sai, và lệnh post-only sẽ gây ra giao
-   dịch, bị từ chối trước khi có bất cứ thứ gì thay đổi. (Lệnh thị trường trước
-   hết được gán mức giới hạn tệ nhất mà phía của nó cho phép, nên từ đây trở đi
-   nó được xử lý như mọi lệnh khác.)
+1. **Kiểm tra hợp lệ (validate).** Đầu vào sai, lệnh vi phạm một giới hạn rủi
+   ro, và lệnh post-only sẽ gây ra giao dịch, đều bị từ chối trước khi có bất cứ
+   thứ gì thay đổi. (Lệnh thị trường trước hết được gán một mức giới hạn: mép của
+   biên độ giá, hoặc nếu không có biên độ thì là mức giá tệ nhất mà phía của nó
+   cho phép; từ đây trở đi nó được xử lý như mọi lệnh khác.)
 2. **Chấp nhận (accept).** Phát sự kiện `OrderAccepted`.
 3. **Khớp (match).** Giao dịch với phía đối diện chừng nào giá còn chạm nhau.
 4. **Cho nằm chờ (rest).** Đưa phần số lượng còn lại vào sổ, hoặc để nó hết hạn
@@ -118,10 +124,14 @@ fn validate(&self, order_id: u64, side: Side, order_type: OrderType,
         Err(RejectReason::ZeroQuantity)
     } else if order_id == crate::hashmap::RESERVED_KEY {
         Err(RejectReason::ReservedOrderId)
-    } else if (price_tick as usize) >= MAX_TICKS {
+    } else if (price_tick as usize) >= self.tick_count() {
         Err(RejectReason::PriceOutOfRange)
     } else if self.id_map.get(order_id).is_some() {
         Err(RejectReason::DuplicateOrderId)
+    } else if qty > self.limits.max_order_qty {
+        Err(RejectReason::QuantityAboveLimit)
+    } else if self.is_outside_band(side, price_tick) {
+        Err(RejectReason::PriceOutsideBand)
     } else if order_type == OrderType::PostOnly && self.is_marketable(side, price_tick) {
         Err(RejectReason::PostOnlyWouldTrade)
     } else {
@@ -130,10 +140,9 @@ fn validate(&self, order_id: u64, side: Side, order_type: OrderType,
 }
 
 // In submit_order (after `let NewOrder { order_id, account, side, .. } = order;`):
-let price_tick = match (order_type, side) {             // a market order may trade at
-    (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1, // any price: give it the
-    (OrderType::Market, Side::Sell) => 0,                   // worst limit its side allows
-    _ => price_tick,
+let price_tick = match order_type {
+    OrderType::Market => self.market_limit(side),       // the edge of the price band,
+    _ => price_tick,                                    // or the end of the ladder
 };
 if let Err(reason) = self.validate(order_id, side, order_type, price_tick, qty) {
     sink.emit(Event::OrderRejected { order_id, reason });
@@ -146,17 +155,27 @@ sink.emit(Event::OrderAccepted { order_id, account, side, order_type, price_tick
 |---|---|---|
 | `qty == 0` | `ZeroQuantity` | Lệnh rỗng thì vô nghĩa. Nếu không có bước kiểm tra này, nó sẽ đi thẳng qua khâu khớp lệnh mà chẳng có gì để khớp, rồi phát ra một cặp `OrderAccepted` + `OrderFilled` vô lý. |
 | `order_id == u64::MAX` | `ReservedOrderId` | Được dành riêng làm giá trị đánh dấu "trống" của bảng băm (chương 5). |
-| `price_tick >= 4096` | `PriceOutOfRange` | Thang giá chỉ có 4096 tick; đánh chỉ mục vượt quá sẽ truy cập ngoài giới hạn mảng. |
+| `price_tick >= tick_count()` | `PriceOutOfRange` | Thang giá chỉ có chừng ấy tick (mặc định là 4096); đánh chỉ mục vượt quá sẽ truy cập ngoài giới hạn mảng. |
 | `id_map.get(id).is_some()` | `DuplicateOrderId` | Trùng id với một lệnh **còn sống** (live). (Id của lệnh đã khớp hết hoặc đã hủy thì không còn trong map, nên có thể dùng lại.) |
+| `qty > limits.max_order_qty` | `QuantityAboveLimit` | Một giới hạn rủi ro trước giao dịch chống "lỗi bấm nhầm (fat finger)": thừa một chữ số 0 ở số lượng. |
+| `is_outside_band(side, tick)` | `PriceOutsideBand` | Giới hạn rủi ro còn lại: một lệnh mua chỉ được đặt giá cao hơn ask tốt nhất tối đa `band` tick, một lệnh bán chỉ được đặt giá thấp hơn bid tốt nhất tối đa `band` tick. Khi phía bên kia không có lệnh nào thì không có giá tham chiếu, và không áp dụng biên độ nào. |
 | post-only và `is_marketable(side, tick)` | `PostOnlyWouldTrade` | Lệnh post-only cam kết không bao giờ lấy thanh khoản. `is_marketable` đặt đúng câu hỏi mở đầu việc khớp lệnh (giá tốt nhất phía đối diện có chạm tới giới hạn này không?) chỉ với một lần quét bit và không thay đổi gì trong sổ. |
 
 Khi kiểm tra thất bại, chỉ có **một** sự kiện `OrderRejected` được phát ra,
 không có `OrderAccepted` đứng trước. Các bước kiểm tra chạy theo thứ tự trong
 bảng và dừng ở lỗi đầu tiên, nên một lệnh mắc hai lỗi (ví dụ số lượng bằng 0
 *và* tick sai) luôn nhận cùng một lý do là `ZeroQuantity`. Lệnh thị trường không
-bao giờ trượt bước kiểm tra giá: tick của nó đã được thay trước khi các bước kiểm
-tra chạy, và `OrderAccepted` báo lại mức giới hạn đó, nên bên tiêu thụ biết lệnh
-được phép giao dịch xa tới đâu. Trả về `Result` từ một hàm nhỏ giúp thứ tự đó dễ đọc, và để nơi gọi xử lý mọi trường hợp từ chối
+bao giờ trượt các bước kiểm tra giá: tick của nó đã được `market_limit` thay
+trước khi các bước đó chạy, bằng mép của biên độ giá (ask tốt nhất + band với
+lệnh mua, bid tốt nhất − band với lệnh bán) hoặc, nếu không có biên độ, bằng đầu
+mút của thang giá. `OrderAccepted` báo lại mức giới hạn đó, nên bên tiêu thụ biết
+lệnh được phép giao dịch xa tới đâu, và biên độ giá trở thành **lớp bảo vệ cho
+lệnh thị trường**: chúng dừng lại ở mép biên độ, và phần còn lại của chúng hết
+hạn.
+
+Các giới hạn rủi ro là trạng thái của engine, được thay đổi bằng
+`set_risk_limits`. Cũng như một lệnh, lời gọi đó làm thay đổi các kết quả về sau,
+nên nó được ghi vào log giống như một lệnh (chương 9). Trả về `Result` từ một hàm nhỏ giúp thứ tự đó dễ đọc, và để nơi gọi xử lý mọi trường hợp từ chối
 chỉ bằng một câu `if let`.
 
 ### Giai đoạn 3: `match_incoming`, chọn phía
@@ -589,7 +608,7 @@ nhất, rồi đến ask, từ giá tốt nhất, và ở mỗi mức giá thì 
 đúng thứ tự cũ, và sổ lệnh tham chiếu trong kiểm thử đối chiếu có thể đoán trước
 từng sự kiện. `remove_cancelled` là nửa sau của `cancel_order`, giờ được dùng
 chung vì có hai nơi gọi cần đến nó. Chi phí là số tick giữa giá tốt nhất và giá
-tệ nhất của mỗi phía (tối đa 4096) cộng với số lệnh ở đó; các tick trống là cái
+tệ nhất của mỗi phía (tối đa bằng số tick) cộng với số lệnh ở đó; các tick trống là cái
 giá của việc không giữ danh sách theo tài khoản (bài tập 11 ở chương 11 thêm một
 danh sách như vậy). `MassCancelled` khép lại mọi lần hủy hàng loạt, kể cả lần
 không tìm thấy lệnh nào, nên yêu cầu đó luôn để lại một sự kiện.
@@ -611,6 +630,9 @@ không tìm thấy lệnh nào, nên yêu cầu đó luôn để lại một s�
 | Lệnh immediate-or-cancel hoặc lệnh thị trường còn số lượng dư | `[OrderAccepted, ...các lần khớp..., OrderExpired]` | không có gì được đưa vào sổ; không cần ô nào |
 | Lệnh thị trường khi phía đối diện trống | `[OrderAccepted, OrderExpired]` | không có |
 | Lệnh thị trường với tick ngoài phạm vi | xử lý bình thường: tick bị bỏ qua | bình thường |
+| Số lượng vượt quá `max_order_qty` | `[OrderRejected(QuantityAboveLimit)]` | không có |
+| Lệnh mua có giá cao hơn ask tốt nhất quá `band` tick (hoặc lệnh bán thấp hơn bid tốt nhất quá mức đó) | `[OrderRejected(PriceOutsideBand)]` | không có |
+| Lệnh thị trường khi có biên độ giá | `OrderAccepted` với giới hạn là ask tốt nhất + band (hoặc bid tốt nhất − band); giao dịch tới mức đó; `OrderExpired` cho phần còn lại | bình thường |
 | `cancel_order` với một id không nằm chờ trong sổ | `[CancelRejected(NotResting)]` (trả về `false`) | không có |
 | `reduce_order` với lượng giảm bằng 0 | `[CancelRejected(ZeroQuantity)]` (trả về `false`) | không có |
 | `reduce_order` với lượng giảm bằng hoặc lớn hơn số lượng còn lại | `[OrderCancelled]` (trả về `true`) | lệnh bị gỡ khỏi sổ |
@@ -633,7 +655,7 @@ không tìm thấy lệnh nào, nên yêu cầu đó luôn để lại một s�
 - **`cancel_order` và `reduce_order`:** O(1) kỳ vọng: một lần tra bảng băm, rồi
   một lượng công việc cố định trên hàng đợi của lệnh.
 - **`cancel_account` và `cancel_all`:** O(số tick giữa giá tốt nhất và giá tệ
-  nhất ở mỗi phía + số lệnh ở đó), tối đa 4096 tick; không cần tra bảng băm để
+  nhất ở mỗi phía + số lệnh ở đó), tối đa `tick_count()` tick; không cần tra bảng băm để
   tìm lệnh, chỉ một lần cho mỗi lệnh bị hủy để xóa nó.
 
 Tổng thể: **O(1 + số lần khớp) kỳ vọng** (chữ "kỳ vọng" có mặt vì bảng băm phải
