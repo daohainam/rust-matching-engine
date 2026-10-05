@@ -42,11 +42,14 @@ flowchart LR
     subgraph plumbing["Phần kết nối (quanh engine)"]
         ringbuffer["ringbuffer<br/>hàng đợi đầu vào SPSC"]
         wal["wal<br/>nhật ký ghi trước"]
+        snapshot["snapshot<br/>trạng thái + checkpoint"]
     end
     engine --> pool
     engine --> bitset
     engine --> hashmap
     engine --> events
+    engine -. "kiểu Snapshot" .-> snapshot
+    wal --> engine
     wal --> pool
 ```
 
@@ -59,15 +62,19 @@ flowchart LR
 | `events`     | [`src/events.rs`](../../src/events.rs)       | Enum `Event`, trait `EventSink` mà engine dùng để báo kết quả, và `EventBatch`, một sink có giới hạn dung lượng. | [7](07-events.md) |
 | `ringbuffer` | [`src/ringbuffer.rs`](../../src/ringbuffer.rs) | Hàng đợi lock-free (không dùng khóa), tách thành hai handle `Producer` và `Consumer`, để nạp lệnh cho engine từ một luồng khác. | [8](08-ring-buffer.md) |
 | `wal`        | [`src/wal.rs`](../../src/wal.rs)             | Nhật ký nhị phân chỉ ghi nối thêm (append-only) các yêu cầu, dùng để phát lại (replay) và khôi phục. | [9](09-write-ahead-log.md) |
+| `snapshot`   | [`src/snapshot.rs`](../../src/snapshot.rs)   | Toàn bộ trạng thái của engine, cùng các tệp checkpoint, để việc khôi phục không phải phát lại từ đầu. | [9](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
 
 Hãy nhìn các mũi tên: engine phụ thuộc vào `pool`, `bitset`, `hashmap` và
-`events`, nhưng **không** phụ thuộc vào `ringbuffer` hay `wal`. Hai module này là
-những khối xây dựng độc lập, do *bạn* nối quanh engine (chương 8 và 9 chỉ cách
-làm).
+`events` (và vào `snapshot` chỉ vì kiểu `Snapshot` đơn thuần mà nó trả về), nhưng
+**không** phụ thuộc vào `ringbuffer` hay `wal`. Đó là những khối xây dựng do
+*bạn* nối quanh engine (chương 8 và 9 chỉ cách làm); `wal` biết đến engine, nhờ
+vậy nó có thể phát lại một log vào một engine.
 
-Crate tái xuất bảy tên mà hầu hết trường hợp sử dụng cần đến trong
-[`src/lib.rs`](../../src/lib.rs): `Engine`, `RestingOrder`, `Event`, `EventSink`,
-`EventBatch`, `RejectReason` và `Side`.
+Crate tái xuất mười bốn tên mà hầu hết trường hợp sử dụng cần đến trong
+[`src/lib.rs`](../../src/lib.rs): `Engine`, `NewOrder`, `OrderType`,
+`SelfTradePrevention`, `RestingOrder`, `Event`, `EventSink`, `EventBatch`,
+`RejectReason`, `CancelRejectReason`, `Side`, `Snapshot`, `SnapshotError` và
+`Checkpoint`.
 
 ## 2.3 Struct `Engine`, từng trường một
 
@@ -182,7 +189,10 @@ sequenceDiagram
 ```
 
 (Sơ đồ này đã được đơn giản hóa: thứ tự chính xác và mọi nhánh lỗi nằm trong
-[chương 6](06-matching-algorithm.md).)
+[chương 6](06-matching-algorithm.md). Nó minh họa một lệnh giới hạn. `submit_order`
+còn nhận thêm một `OrderType`: lệnh immediate-or-cancel hay lệnh thị trường bỏ qua
+khung "còn dư số lượng" và báo `OrderExpired` thay vào đó, còn lệnh post-only sẽ
+giao dịch thì bị từ chối ngay ở bước kiểm tra hợp lệ.)
 
 Engine không tự quyết định sự kiện đi đâu. Mỗi sự kiện được trao cho **sink**
 (nơi nhận sự kiện) mà bên gọi truyền vào, ngay tại lúc nó xảy ra. Sink có thể là
@@ -270,8 +280,8 @@ phần lý do thiết kế này nhanh.
   +-----------------+              +------------------------+          +--------------------+
 ```
 
-Các phương thức làm thay đổi sổ (`process_order` và `cancel_order`) nhận
-`&mut self`, nên chính Rust bảo đảm rằng mỗi lúc chỉ có một bên gọi được đụng
+Các phương thức làm thay đổi sổ (`submit_order`, `process_order`, `reduce_order`,
+`cancel_order`, `cancel_account` và `cancel_all`) nhận `&mut self`, nên chính Rust bảo đảm rằng mỗi lúc chỉ có một bên gọi được đụng
 vào sổ lệnh. Trong engine **không có khóa nào cả**. Bộ đệm vòng áp dụng cùng ý
 tưởng cho hàng đợi: nó chỉ trao ra đúng một `Producer` và một `Consumer`, nên
 quy tắc "một bên ghi, một bên đọc" cũng được hệ thống kiểu (type system) ép
@@ -289,8 +299,9 @@ engine** (hoặc mỗi nhóm mã một engine), mỗi engine trên một lõi ri
 
 ## 2.8 "Không cấp phát" nghĩa là gì và không có nghĩa là gì
 
-Nó có nghĩa là **không có cấp phát trên heap bên trong `process_order` và
-`cancel_order`**, và điều này được kiểm thử (xem
+Nó có nghĩa là **không có cấp phát trên heap bên trong bất kỳ phương thức nào
+làm thay đổi sổ** (`submit_order`, `process_order`, `reduce_order`,
+`cancel_order`, `cancel_account`, `cancel_all`), và điều này được kiểm thử (xem
 [chương 10](10-testing-and-performance.md)).
 
 Những lời gọi sau *có* cấp phát, và không sao cả vì chúng không nằm trên hot path
@@ -300,7 +311,8 @@ Những lời gọi sau *có* cấp phát, và không sao cả vì chúng không
 |---|---|
 | `Engine::new` | dựng toàn bộ các mảng (đây chính là mục đích: chỉ làm một lần) |
 | `Engine::depth_snapshot` | trả về một `Vec` (để kiểm tra / báo cáo) |
-| `WalWriter::create`, `WalWriter::open_append`, `wal::read_all` | khởi tạo tệp và `Vec` |
+| `WalWriter::create`, `WalWriter::open_append`, `wal::read`, `wal::read_all`, `wal::replay`, `wal::replay_from` | khởi tạo tệp và `Vec` (và, với `replay`, một engine mới) |
+| `Engine::snapshot`, `Engine::restore`, `write_checkpoint`, `read_checkpoint` | danh sách lệnh của snapshot, một engine mới, nội dung tệp |
 | `ringbuffer::spsc_channel` | dựng mảng các ô |
 
 > [!TIP]
