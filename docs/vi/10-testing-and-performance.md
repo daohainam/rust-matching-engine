@@ -34,13 +34,19 @@ hay để hiểu những hành vi mà module đó cam kết.
 
 | Test | Chứng minh điều gì |
 |---|---|
-| `resting_order_with_no_match` | Lệnh không vượt spread thì nằm chờ trong sổ; bid tốt nhất và độ sâu đều đúng; chỉ phát ra `OrderAccepted`. |
+| `resting_order_with_no_match` | Lệnh không vượt spread thì nằm chờ trong sổ; bid tốt nhất và độ sâu đều đúng; chỉ phát ra `OrderAccepted` (kèm phía, tick và số lượng của lệnh). |
+| `acceptance_repeats_the_order_terms_even_when_it_fills_at_once` | `OrderAccepted` mô tả lệnh ngay cả khi lệnh không bao giờ nằm chờ trong sổ, nên chỉ riêng luồng sự kiện cũng cho biết lệnh đã đặt là gì. |
 | `full_fill_taker_and_maker` | Hai lệnh khớp vừa khít nhau phát ra `Trade`, `Filled(maker)`, `Filled(taker)` và để sổ trống. |
 | `partial_fill_leaves_maker_resting` | Taker nhỏ hơn thì khớp hết; maker vẫn nằm chờ với số lượng đã giảm. |
 | `partial_fill_leaves_taker_resting_remainder` | Taker lớn hơn thì ăn hết maker, rồi phần còn lại của nó nằm chờ trong sổ. |
-| `cancel_head_middle_tail_of_price_queue` | Hủy lệnh ở đầu, giữa và cuối hàng đợi FIFO đều chạy đúng; lần hủy thứ hai trả về `false` và không phát sự kiện nào. |
+| `cancel_head_middle_tail_of_price_queue` | Hủy lệnh ở đầu, giữa và cuối hàng đợi FIFO đều chạy đúng; lần hủy thứ hai trả về `false` và phát ra `CancelRejected`. |
+| `cancel_reports_only_what_is_left_after_a_partial_fill` | `OrderCancelled` mang theo phía, tick và số lượng còn đang nằm chờ (6 trên 10), chứ không phải số lượng ban đầu. |
+| `resting_order_follows_an_order_through_its_life` | `resting_order` cho thấy số lượng còn lại của lệnh sau khi khớp một phần, và trả về `None` khi lệnh đã bị hủy, với một taker chưa từng nằm chờ, và với id dành riêng. |
+| `cancelling_a_filled_order_is_rejected_without_touching_the_book` | Lệnh hủy nhắm vào một lệnh đã khớp hết thì phát ra `CancelRejected` và không động đến độ sâu cũng như số lệnh còn sống. |
 | `crosses_multiple_ask_price_levels_in_price_time_priority` | Lệnh mua quét qua các ask từ mức rẻ nhất đi lên. |
+| `trade_names_the_aggressor_side` | `Trade` của một taker bán báo `taker_side: Sell`. |
 | `crosses_multiple_bid_price_levels_for_incoming_sell` | Lệnh bán quét qua các bid từ mức cao nhất đi xuống (trường hợp đối xứng). |
+| `trade_ids_count_up_across_calls` | `trade_id` đếm 1, 2, 3 qua các lời gọi; lệnh bị từ chối, lệnh nằm chờ và lần hủy lệnh không tiêu tốn id nào. |
 | `price_time_priority_within_a_level_is_fifo` | Trong cùng một giá, lệnh cũ hơn được khớp trước. |
 | `rejects_duplicate_order_id_and_zero_qty` | Bước kiểm tra đầu vào từ chối id trùng với một lệnh còn sống (`DuplicateOrderId`) và `qty == 0` (`ZeroQuantity`). |
 | `rejects_out_of_range_price_tick` | Tick 4096 bị từ chối với `PriceOutOfRange` và sổ vẫn trống. |
@@ -93,8 +99,8 @@ rất dài, và đòi hai bên phải khớp nhau ở mọi thứ quan sát đư
 
 Sổ lệnh tham chiếu được viết sao cho dễ thấy là đúng, chứ không phải cho nhanh:
 một `BTreeMap` chứa các mức giá của mỗi phía, một `VecDeque` chứa
-`(order_id, qty)` cho mỗi mức giá, và một `HashMap` chứa các lệnh còn sống. Nó
-đủ ngắn để kiểm tra bằng mắt.
+`(order_id, qty)` cho mỗi mức giá, một `HashMap` chứa các lệnh còn sống và một
+bộ đếm giao dịch. Nó đủ ngắn để kiểm tra bằng mắt.
 
 Bộ sinh yêu cầu (`OpGenerator` trong [`tests/common/mod.rs`](../../tests/common/mod.rs))
 dùng seed cố định, nên mỗi lần chạy đều tái lập được. Nó tạo ra:
@@ -107,9 +113,10 @@ dùng seed cố định, nên mỗi lần chạy đều tái lập được. Nó
   phạm vi, id dùng lại, những cú quét qua toàn bộ sổ, và số lượng quá lớn ở các
   tick rất xa khiến tổng của một mức giá bị tràn.
 
-Sau **mỗi** yêu cầu, test so sánh chính xác luồng sự kiện, bid tốt nhất và ask
-tốt nhất, số lệnh còn sống, và độ sâu tại mọi tick mà bộ sinh có thể dùng. Cứ
-mỗi 1,000 yêu cầu, nó còn so sánh toàn bộ `depth_snapshot`. Test chạy 4 seed ×
+Sau **mỗi** yêu cầu, test so sánh chính xác luồng sự kiện (kể cả trade id), bid
+tốt nhất và ask tốt nhất, số lệnh còn sống, độ sâu tại mọi tick mà bộ sinh có thể
+dùng, và `resting_order` của lệnh mà yêu cầu nhắc tới cùng mọi maker đã giao dịch
+với nó. Cứ mỗi 1,000 yêu cầu, nó còn so sánh toàn bộ `depth_snapshot`. Test chạy 4 seed ×
 20,000 yêu cầu với arena chật (64 lệnh, nên phần còn lại của lệnh thường bị từ
 chối) và thêm 4 seed với arena rộng rãi (8,192 lệnh, nên sổ trở nên sâu).
 
@@ -133,8 +140,8 @@ Test này cho 10,000 yêu cầu được sinh ra chạy qua một engine chính,
 từng yêu cầu vào một WAL *trước khi* áp dụng nó (với phần cấp phát trước nhỏ, nên
 tệp phải lớn lên nhiều lần). Sau đó nó finalize log, đọc lại, kiểm tra các số thứ
 tự chạy từ 0 đến 9,999, rồi phát lại các bản ghi vào một engine **thứ hai**. Bản
-sao (replica) này phải cho ra đúng cùng các sự kiện, cùng số lệnh còn sống và
-cùng độ sâu.
+sao (replica) này phải cho ra đúng cùng các sự kiện (nên mỗi giao dịch có cùng
+`trade_id`), cùng số lệnh còn sống và cùng độ sâu.
 
 Bản sao tự dựng bảng băm của mình, với **seed ngẫu nhiên** riêng. Vì vậy test này
 cũng chứng minh luôn điều đã nói ở chương 5: seed chỉ đổi chỗ các phần tử được
