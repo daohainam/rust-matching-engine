@@ -18,7 +18,7 @@ micro giây bằng cách nào, repo này chỉ ra một cách làm, từng bư�
 - Cách thiết kế một hot path **không cấp phát heap, không dùng khóa và mọi thao
   tác đều O(1)** ([chương 2](docs/vi/02-architecture.md)).
 - Bốn kỹ thuật cấu trúc dữ liệu hữu ích vượt xa lĩnh vực tài chính: **arena +
-  free list + danh sách liên kết intrusive**, **bitset hai tầng** với lệnh quét
+  free list + danh sách liên kết intrusive**, **bitset nhiều tầng** với lệnh quét
   bit của phần cứng, **bảng băm địa chỉ mở** với cách xóa dịch lùi, và **bộ đệm
   vòng SPSC lock-free**.
 - Cách làm cho một engine tất định có thể phục hồi sau sự cố bằng một **nhật ký
@@ -65,7 +65,7 @@ sự kiện ([chương 7](docs/vi/07-events.md)).
 Thêm về API:
 
 ```rust
-use matching_engine::{Engine, Event, NewOrder, RejectReason, SelfTradePrevention, Side};
+use matching_engine::{Engine, Event, NewOrder, RejectReason, RiskLimits, SelfTradePrevention, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -98,9 +98,20 @@ let own_bid = NewOrder::limit(5, Side::Buy, 110, 5)
 engine.submit_order(own_bid, &mut events); // would trade with its own ask: stopped
 assert!(matches!(events.last(), Some(Event::OrderExpired { order_id: 5, .. })));
 assert_eq!(engine.cancel_account(7, &mut events), 1); // the ask #4 goes
+
+// Pre-trade risk limits: no order above 1,000, none more than 5 ticks through the market.
+engine.set_risk_limits(RiskLimits { max_order_qty: 1_000, price_band: Some(5) });
+engine.process_order(6, Side::Buy, 100, 5_000, &mut events); // a fat finger
+let too_big = Event::OrderRejected { order_id: 6, reason: RejectReason::QuantityAboveLimit };
+assert_eq!(events.last(), Some(&too_big));
+
+// A wider price range: 300,000 ticks instead of 4096.
+let wide = Engine::with_ticks(10_000, 300_000);
+assert_eq!(wide.tick_count(), 300_000);
 ```
 
-Giá là **tick nguyên** trong khoảng `0..4096`; việc đổi qua lại giữa tick và giá
+Giá là **tick nguyên**, trong khoảng `0..4096` trừ khi engine được dựng bằng
+`Engine::with_ticks` để có khoảng rộng hơn; việc đổi qua lại giữa tick và giá
 thật là trách nhiệm của bên gọi (xem
 [chương 1](docs/vi/01-order-book-basics.md#18-tick-giá-là-những-số-nguyên-nhỏ)).
 
@@ -127,7 +138,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    BS["Bitset hai tầng<br/>tick nào đang có lệnh?<br/>bid tốt nhất / ask tốt nhất trong O(1)"] --> LV["levels[tick]<br/>hàng đợi FIFO: head, tail, count, total_qty"]
+    BS["Bitset nhiều tầng<br/>tick nào đang có lệnh?<br/>bid tốt nhất / ask tốt nhất trong O(1)"] --> LV["levels[tick]<br/>hàng đợi FIFO: head, tail, count, total_qty"]
     LV -->|"chỉ số ô u32"| OP["Arena chứa lệnh<br/>một mảng phẳng cấp phát sẵn<br/>các lệnh nối nhau bằng next_idx / prev_idx"]
     HM["Bảng băm phẳng<br/>order_id sang ô trong arena<br/>hủy lệnh trong O(1)"] --> OP
     FL["Free list<br/>ngăn xếp các ô chưa dùng"] --- OP
@@ -137,7 +148,8 @@ flowchart TB
 |---|---|---|---|
 | Lưu lệnh mà không cần `malloc` | **Arena** cố định + **free list** | O(1) cấp phát / giải phóng | [3](docs/vi/03-order-pool.md) |
 | Hàng đợi FIFO cho mỗi mức giá, hủy lệnh ở giữa hàng | **Danh sách liên kết đôi intrusive** (liên kết `u32`) | O(1) thêm / lấy / gỡ | [3](docs/vi/03-order-pool.md) |
-| Bid tốt nhất / ask tốt nhất | **Bitset hai tầng** + `trailing_zeros` / `leading_zeros` | O(1), hai lần quét bit | [4](docs/vi/04-price-ladder-bitset.md) |
+| Bid tốt nhất / ask tốt nhất | **Bitset nhiều tầng** + `trailing_zeros` / `leading_zeros` | O(1), một lần quét bit cho mỗi tầng (hai lần với 4096 tick) | [4](docs/vi/04-price-ladder-bitset.md) |
+| Chặn lỗi bấm nhầm (fat finger) | **Giới hạn rủi ro trước giao dịch**: số lượng tối đa, biên độ giá (cũng bảo vệ cả lệnh thị trường) | O(1) | [6](docs/vi/06-matching-algorithm.md) |
 | Tìm một lệnh theo id | **Bảng băm địa chỉ mở** có seed ngẫu nhiên, xóa bằng cách dịch lùi | O(1) kỳ vọng | [5](docs/vi/05-hash-map.md) |
 | Khớp một lệnh đến | Đi qua các mức giá từ tốt nhất, FIFO trong từng mức | O(1 + số lần khớp) | [6](docs/vi/06-matching-algorithm.md) |
 | Báo kết quả mà không cấp phát | Đổ sự kiện vào **`EventSink`** do bên gọi cung cấp | O(1) cho mỗi sự kiện | [7](docs/vi/07-events.md) |
@@ -155,7 +167,7 @@ liên kết sang chương kế tiếp.
 | 1 | [Kiến thức cơ bản về sổ lệnh](docs/vi/01-order-book-basics.md) | Bid, ask, spread, maker/taker, ưu tiên giá-thời gian, tick, cùng một ví dụ minh họa dùng xuyên suốt |
 | 2 | [Tổng quan kiến trúc](docs/vi/02-architecture.md) | Mục tiêu thiết kế, bản đồ các module, các cấu trúc trỏ vào nhau thế nào, dung lượng bộ nhớ, mô hình luồng |
 | 3 | [Order pool: kho chứa lệnh](docs/vi/03-order-pool.md) | Arena, free stack, hàng đợi FIFO liên kết đôi intrusive, `PriceLevel`, các bất biến |
-| 4 | [Bitset cho thang giá](docs/vi/04-price-ladder-bitset.md) | Bitset hai tầng, các lệnh quét bit, ví dụ minh họa ở mức từng bit |
+| 4 | [Bitset cho thang giá](docs/vi/04-price-ladder-bitset.md) | Bitset hai tầng, các lệnh quét bit, ví dụ minh họa ở mức từng bit, và thêm tầng cho các khoảng giá rộng hơn |
 | 5 | [Bảng băm phẳng](docs/vi/05-hash-map.md) | Dò tuyến tính, SplitMix64, seed bí mật chống id được dựng sẵn để gây va chạm, hệ số tải, xóa bằng cách dịch lùi |
 | 6 | [Thuật toán khớp lệnh](docs/vi/06-matching-algorithm.md) | `process_order` và `cancel_order` từng dòng một, lưu đồ, một bản theo dõi trạng thái đầy đủ, các trường hợp biên |
 | 7 | [Sự kiện](docs/vi/07-events.md) | Ngữ nghĩa và thứ tự của sự kiện, trait `EventSink`, cách chọn sink, việc `EventBatch` cắt bớt sự kiện |
@@ -182,10 +194,10 @@ cũng có doc comment chi tiết (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         gốc của crate; re-export Engine, NewOrder, OrderType, SelfTradePrevention, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side, Snapshot, SnapshotError, Checkpoint
+  lib.rs         gốc của crate; re-export Engine, NewOrder, OrderType, SelfTradePrevention, RiskLimits, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side, Snapshot, SnapshotError, Checkpoint, DEFAULT_TICKS
   engine.rs      lõi khớp lệnh: submit_order, giảm/hủy/hủy hàng loạt, chống tự giao dịch, tra cứu lệnh, các truy vấn độ sâu, snapshot/khôi phục
   pool.rs        arena chứa lệnh, free list, PriceLevel (hàng đợi FIFO intrusive)
-  bitset.rs      thang giá bằng bitset hai tầng (bid / ask tốt nhất trong O(1))
+  bitset.rs      thang giá bằng bitset nhiều tầng, kích thước theo từng engine (bid / ask tốt nhất trong O(1))
   hashmap.rs     bảng băm địa chỉ mở có seed (order id -> ô trong arena)
   events.rs      enum Event, trait EventSink, sink có giới hạn EventBatch
   ringbuffer.rs  bộ đệm vòng SPSC lock-free với các handle Producer / Consumer
@@ -213,7 +225,8 @@ docs/vi/         các chương đó bằng tiếng Việt (README.vi.md là READ
 
 | Giới hạn | Giá trị | Nguồn gốc |
 |---|---|---|
-| Khoảng giá | tick `0..=4095` | bitset gồm `64 × 64` bit |
+| Khoảng giá | tick `0..=4095` theo mặc định, tối đa 2^24 cho mỗi engine | `Engine::with_ticks`; khoảng 48 byte cho mỗi tick |
+| Giới hạn rủi ro | một số lượng tối đa và một biên độ giá cho mỗi engine | `RiskLimits`, thay đổi bằng `set_risk_limits` |
 | Số lệnh đang chờ | `order_capacity` truyền vào `Engine::new` | kích thước arena |
 | Số sự kiện mỗi lần gọi | không giới hạn với sink là `Vec` hoặc closure; `EventBatch` giữ 64 sự kiện và đếm phần còn lại | tùy bạn chọn `EventSink` nào |
 | Order id dành riêng | `u64::MAX` | giá trị đánh dấu "ô trống" của bảng băm |
