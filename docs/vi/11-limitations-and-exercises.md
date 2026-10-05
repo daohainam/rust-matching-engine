@@ -31,9 +31,10 @@ số lỗi tự nó đã là bài tập hay.
 
 | Giới hạn | Chi tiết |
 |---|---|
-| **4096 tick giá** | Bị cố định bởi bitset hai tầng (`64 × 64`), và được kiểm tra lúc biên dịch. Không có logic về kích thước tick hay độ lệch giá; phía gọi tự quy đổi. |
+| **Số tick giá được chọn theo từng engine** | Mặc định là 4096, tối đa 2^24 với `Engine::with_ticks`; bộ nhớ tăng thêm khoảng 48 byte cho mỗi tick. Không có logic về kích thước tick hay độ lệch giá; phía gọi tự quy đổi. |
 | **Sức chứa lệnh cố định** | Được chọn trong `Engine::new`. Khi arena đầy, những lệnh cần nằm chờ trong sổ sẽ bị từ chối (lệnh khớp hết ngay thì vẫn thành công). |
-| **Bốn loại lệnh** | Lệnh giới hạn (limit), immediate-or-cancel, lệnh thị trường (market) và post-only. Không có fill-or-kill, stop, iceberg hay lệnh trong ngày. Có thể giảm số lượng ngay tại chỗ, nhưng tăng số lượng hay đổi giá thì phải hủy rồi đặt lệnh mới, và như vậy mất ưu tiên. Lệnh thị trường không có cơ chế bảo vệ giá. |
+| **Bốn loại lệnh** | Lệnh giới hạn (limit), immediate-or-cancel, lệnh thị trường (market) và post-only. Không có fill-or-kill, stop, iceberg hay lệnh trong ngày. Có thể giảm số lượng ngay tại chỗ, nhưng tăng số lượng hay đổi giá thì phải hủy rồi đặt lệnh mới, và như vậy mất ưu tiên. Lệnh thị trường chỉ được bảo vệ khi có đặt biên độ giá (price band). |
+| **Giới hạn rủi ro áp dụng chung cho cả engine** | Một số lượng tối đa và một biên độ giá cho mọi lệnh. Biên độ được đo từ giá tốt nhất phía đối diện, nên nó không có tác dụng khi phía đó trống; không có giới hạn theo tài khoản, không có giá tham chiếu như giá của giao dịch gần nhất. |
 | **Tài khoản chỉ là nhãn** | Mỗi lệnh có một tài khoản, dùng cho việc chống tự giao dịch (self-trade prevention) và hủy hàng loạt. Không có giới hạn theo tài khoản (số lệnh đang mở, vị thế, hạn mức tín dụng), và engine không giữ danh sách lệnh của từng tài khoản, nên `cancel_account` phải duyệt qua cả sổ lệnh. |
 | **Mỗi `Engine` chỉ có một mã giao dịch** | Muốn nhiều mã (symbol) thì chạy nhiều engine. |
 | **`Engine` không được nối sẵn với WAL hay bộ đệm vòng** | Phía gọi tự nối; [`examples/pipeline.rs`](../../examples/pipeline.rs) cho thấy cách làm, còn `WalRecord::apply_to`, `wal::replay` và `wal::replay_from` lo phần phát lại. `sequence` của WAL do phía gọi cấp và độc lập với bộ đếm riêng của engine. |
@@ -116,7 +117,9 @@ khác vẫn qua, và bạn có số liệu benchmark cho cả ba cách bố trí
 (chạy tuyến tính) trong `depth_snapshot` bằng các phương thức của bitset là
 `prev_set(tick)` / `next_set(tick)`. *Gợi ý: dùng phép dịch bit để che các bit tại
 và thấp hơn (hoặc cao hơn) `tick` trong word chứa nó, rồi kiểm tra word đó; nếu
-rỗng thì làm tương tự với word tóm tắt (summary word).* Hãy unit test so với bản
+rỗng thì đi lên một tầng và làm tương tự với bit của word đó, cho đến khi một tầng
+nào đó có bit nằm xa hơn; sau đó đi xuống lại như `lowest()` vẫn làm, lấy bit thấp
+nhất (hoặc cao nhất) ở mỗi tầng.* Hãy unit test so với bản
 tuyến tính cũ bằng các bitset ngẫu nhiên.
 
 **Hoàn thành khi:** một test so sánh `next_set` / `prev_set` với các bản tuyến tính
@@ -149,17 +152,17 @@ lượng, và một lệnh bị hủy bỏ mà không có giao dịch nào và �
 không đủ, đồng thời `model_check` vẫn qua khi bộ sinh dữ liệu có cả lệnh
 fill-or-kill.
 
-🟡 **9. Bảo vệ giá cho lệnh thị trường.** Một lệnh thị trường quét cho đến khi khớp
-hết, bất kể phải đi xa đến đâu (1.9). Hãy thêm một biên độ giá (price band): giá
-giới hạn của lệnh thị trường trở thành giá tốt nhất phía đối diện lúc lệnh đến,
-cộng thêm (với lệnh mua) hoặc trừ đi (với lệnh bán) `band` tick. *Gợi ý: giá giới
-hạn được chọn ở đúng một chỗ trong `submit_order`; hãy tính nó từ `best_ask` /
-`best_bid` ở đó. Hãy quyết định chuyện gì xảy ra khi phía đối diện trống, và
-`band` nằm ở đâu: trong `Engine::new`, hay trong mỗi lần gọi.*
+🟡 **9. Biên độ quanh giao dịch gần nhất.** Biên độ giá được đo từ giá tốt nhất
+phía đối diện, nên nó biến mất khi phía đó trống, và nó dịch chuyển mỗi khi chỉ một
+lệnh làm thay đổi giá tốt nhất. Các sàn giao dịch thường đo nó từ một **giá tham
+chiếu** (reference price), chẳng hạn giá của giao dịch gần nhất. Hãy thêm lựa chọn
+đó. *Gợi ý: engine cần thêm một trạng thái nữa, giá của giao dịch gần nhất, mà
+`match_incoming` biết mỗi khi nó phát ra một `Trade`. Đã là trạng thái thì nó phải
+được đưa vào snapshot, kéo theo cả định dạng checkpoint; WAL không cần gì mới, vì
+một lần phát lại sẽ tự tính lại giao dịch gần nhất.*
 
-**Hoàn thành khi:** với biên độ 5, một lệnh mua thị trường gặp các ask ở 100, 101 và
-150 chỉ giao dịch ở 100 và 101 rồi cho phần còn lại hết hạn, và một lệnh thị trường
-gặp phía đối diện trống vẫn chỉ phát ra sự kiện chấp nhận lệnh và `OrderExpired`.
+**Hoàn thành khi:** với biên độ 5 quanh giao dịch gần nhất ở 100, một lệnh mua ở
+106 bị từ chối ngay cả khi phía ask trống, và `tests/snapshot.rs` vẫn qua.
 
 🟡 **10. Sửa lệnh (amend): đổi giá hoặc tăng số lượng.** `reduce_order` giữ được ưu
 tiên vì lệnh nhỏ đi. Hãy thêm `amend_order(id, new_price_tick, new_qty)` cho mọi
@@ -203,18 +206,19 @@ chuỗi yêu cầu ngắn nhất vẫn tái hiện được lỗi.
 [6.11](06-matching-algorithm.md#611-tự-thực-hành)), proptest báo cáo một chuỗi
 gây lỗi chỉ gồm vài yêu cầu.
 
-🔴 **13. Bitset ba tầng.** Hãy tổng quát hóa `TwoLevelBitset` thành `N` tầng `u64`
-(3 tầng = 262,144 tick). Giữ cho `lowest()` và `highest()` không có vòng lặp với
-một độ sâu cố định. Cho `MAX_TICKS` thay đổi theo, và cập nhật phần kiểm tra lúc
-biên dịch trên `TICKS`. *Gợi ý: tầng trên cùng vẫn là một `u64`; mỗi bit giờ tóm
-tắt 64 word của tầng giữa. `lowest()` trở thành ba lần quét bit: word trên cùng,
-rồi word ở tầng giữa mà nó trỏ tới, rồi word ở tầng dưới. `set` và `clear` cập
-nhật tối đa ba word; `clear` chỉ được xóa bit tóm tắt khi word bên dưới nó đã bằng
-không.*
+🔴 **13. 45 nano giây đi đâu?** Trên một thang giá 300,000 tick, việc đặt một lệnh
+tốn hơn khoảng 45 ns so với trên 4096 tick (10.6). Chương 10 đoán rằng phần lớn
+chênh lệch đến từ cache miss trên 14 MB mức giá, chứ không phải từ hai lần quét bit
+thêm vào. Hãy kiểm chứng phỏng đoán đó. *Gợi ý: thêm một benchmark trên thang giá
+rộng với các giá tập trung trong một dải hẹp, giống benchmark mặc định, rồi so
+sánh; sau đó dùng một profiler đếm được cache miss (`perf stat -e cache-misses`
+trên Linux, VTune hoặc Windows Performance Analyzer ở nơi khác). Để có điểm dữ liệu
+thứ ba, hãy thu nhỏ `PriceLevel` (bạn có cần `count` không?) và xem khoảng chênh có
+hẹp lại không.*
 
-**Hoàn thành khi:** các test bitset hiện có đều qua với ba tầng, một test mới tìm
-đúng `lowest()` và `highest()` giữa các tick gần 0, 4,096 và 262,143, và
-`model_check` vẫn qua.
+**Hoàn thành khi:** bạn có số liệu cho giá tập trung và giá trải rộng trên cả hai
+thang giá, và nói được trong hai câu rằng bao nhiêu phần của khoảng chênh là do
+cache miss.
 
 🔴 **14. Chia shard theo mã giao dịch.** Hãy chạy bốn `Engine` trên bốn luồng, mỗi
 engine được nuôi bởi bộ đệm vòng riêng, định tuyến yêu cầu theo id của mã giao dịch
@@ -319,7 +323,7 @@ git switch main                                      # come back (stash or commi
 ```
 
 `a192ebc` có **API cũ**, nên các chương (vốn mô tả code hiện tại) sẽ không khớp
-hoàn toàn với nó; hãy dùng các chương để lấy ý tưởng. Các bài R7 đến R12 được giải
+hoàn toàn với nó; hãy dùng các chương để lấy ý tưởng. Các bài R7 đến R14 được giải
 muộn hơn nhiều: hãy bắt đầu chúng từ commit ngay trước commit được nêu tên
 (`git switch --detach <hash>~1`).
 
@@ -365,8 +369,8 @@ một sự kiện mới `OrderExpired` là phù hợp nhất.*
 🟡 **R8. Lệnh thị trường.** Một lệnh mua ở tick 4095 vượt qua mọi ask, nhưng phần
 còn lại của nó lại nằm chờ ở đó, và đó không phải là ý nghĩa của lệnh thị trường.
 Hãy xây lệnh thị trường thật sự trên nền IOC. *Đã được giải bằng
-`feat(engine): add market orders`; bài tập 9 thêm cơ chế bảo vệ giá mà các sàn giao
-dịch thật vẫn dùng.*
+`feat(engine): add market orders`; R13 thêm cơ chế bảo vệ giá mà các sàn giao dịch
+thật vẫn dùng.*
 
 🟡 **R9. Giảm số lượng ngay tại chỗ.** Hãy cho phép trader giảm số lượng của một
 lệnh mà không mất ưu tiên về thời gian; giảm về không thì phải hoạt động như hủy
@@ -400,6 +404,21 @@ làm gì nếu khác đi. Checkpoint, nửa còn lại của câu chuyện phụ
 đó, trong `feat(engine): snapshot and restore the book` và hai commit theo sau nó;
 các bài tập 16 và 17 xây dựng trên nền đó.*
 
+🟡 **R13. Bảo vệ giá cho lệnh thị trường.** Một lệnh thị trường quét cho đến khi
+khớp hết, bất kể phải đi xa đến đâu. Hãy thêm một biên độ giá (price band): giá
+giới hạn của lệnh thị trường trở thành giá tốt nhất phía đối diện lúc lệnh đến,
+cộng thêm (với lệnh mua) hoặc trừ đi (với lệnh bán) `band` tick. *Đã được giải bằng
+`feat(engine): add pre-trade risk limits`, commit này biến biên độ thành một giới
+hạn rủi ro cho mọi lệnh và lấy mép của biên độ làm giá giới hạn cho lệnh thị
+trường; bài tập 9 thì đo biên độ từ giao dịch gần nhất.*
+
+🔴 **R14. Vượt quá 4096 tick.** Hãy tổng quát hóa bitset hai tầng thành nhiều tầng
+hơn, để một engine có thể có hơn 4096 tick. *Đã được giải bằng
+`refactor(bitset): size the price ladder at run time`, commit này chọn số tầng bất
+kỳ lúc chạy thay vì cố định ba tầng, cùng với
+`feat(engine)!: choose the number of price ticks per engine`. Hãy so sánh các ghi
+chú benchmark của commit với mục 10.6, và xem bài tập 13.*
+
 ### Mọi bản sửa, kèm commit
 
 Hãy tìm một commit theo dòng tiêu đề (subject) của nó, rồi hiển thị nó:
@@ -421,7 +440,7 @@ git log --oneline --grep "detect double frees"   # then: git show <hash>
 | `engine.rs` | `OrderFilled` của maker cuối cùng được báo cáo khi mức giá đã cạn của nó vẫn còn trong bitset, nên một panic của sink bị bắt lại sẽ để lại một giá tốt nhất đã lỗi thời. | `fix(engine): update the price index before reporting a maker fill` | [6.3](06-matching-algorithm.md#63-match_incoming-trái-tim-của-engine) |
 | `hashmap.rs` | `get`, `insert` và `remove` lặp vô tận trên một bảng đã đầy, và phép tính kích thước bảng có thể bị tràn số (wrap) ở bản release. | `fix(hashmap): panic instead of hanging when the table would fill`, `fix(hashmap): check the table size computation for overflow` | [5.5](05-hash-map.md#55-định-cỡ-vì-sao-bảng-không-bao-giờ-đầy) |
 | `pool.rs` | Double free chỉ bị bắt bởi `debug_assert!`, và `count -= 1` bị tràn số âm thầm ở bản release. | `fix(pool): detect double frees in release builds`, `fix(pool): check the level order count for underflow` | [3.7](03-order-pool.md#37-các-kiểm-tra-phòng-thủ) |
-| `bitset.rs` | Giới hạn `TICKS` chỉ nằm trong một dòng comment. | `fix(bitset): enforce the TICKS limits at compile time` | [4.6](04-price-ladder-bitset.md#46-vì-sao-là-4096-tick) |
+| `bitset.rs` | Giới hạn `TICKS` chỉ nằm trong một dòng comment. | `fix(bitset): enforce the TICKS limits at compile time` | [4.6](04-price-ladder-bitset.md#46-vì-sao-là-4096-tick-và-làm-sao-để-có-nhiều-hơn) |
 | `wal.rs` | Trình đọc ánh xạ log lần thứ hai, và việc này có thể tranh chấp với một writer đang chạy. | `fix(wal): read logs with plain file I/O` | [9.3](09-write-ahead-log.md#93-tệp-ánh-xạ-bộ-nhớ-trong-một-phút) |
 | `ringbuffer.rs` | Consumer không phân biệt được một producer đã xong với một producer chậm, nên quay vòng chờ mãi. | `feat(ringbuffer): detect a dropped producer or consumer` | [8.5](08-ring-buffer.md#phân-biệt-chưa-có-gì-với-sẽ-không-bao-giờ-có-gì-nữa) |
 | docs | README và các chương mô tả một API cũ, và không có gì phát hiện ra điều đó. | `docs(readme): fix the examples for the current API and compile them` (README doctest), `docs(ch08): move the complete program into examples/pipeline.rs` (`tests/docs_sync.rs`) | [10.7](10-testing-and-performance.md#107-tích-hợp-liên-tục-ci) |
