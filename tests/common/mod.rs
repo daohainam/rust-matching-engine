@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use matching_engine::engine::MAX_TICKS;
-use matching_engine::Side;
+use matching_engine::{NewOrder, OrderType, SelfTradePrevention, Side};
 
 /// xorshift64*: tiny, deterministic, and plenty for driving test inputs.
 pub struct Rng(u64);
@@ -43,15 +43,11 @@ impl Rng {
 /// One engine request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
-    Place {
-        order_id: u64,
-        side: Side,
-        price_tick: u32,
-        qty: u64,
-    },
-    Cancel {
-        order_id: u64,
-    },
+    Place(NewOrder),
+    Cancel { order_id: u64 },
+    Reduce { order_id: u64, reduce_by: u64 },
+    CancelAccount { account: u32 },
+    CancelAll,
 }
 
 /// Most orders land in this narrow band so they cross each other often.
@@ -69,8 +65,9 @@ pub fn watched_ticks() -> impl Iterator<Item = u32> {
 /// How many recently issued IDs cancels and reuse attempts choose from.
 const RECENT_WINDOW: usize = 256;
 
-/// Produces a reproducible request stream: mostly placements in [`BAND`],
-/// some cancels, and occasional edge inputs (zero quantity, out-of-range
+/// Produces a reproducible request stream: mostly limit orders in [`BAND`],
+/// some other order types, some cancels and reductions, rare mass cancels,
+/// and occasional edge inputs (zero quantity, out-of-range
 /// ticks, the reserved ID, reused IDs, deep sweeps, oversized quantities).
 pub struct OpGenerator {
     rng: Rng,
@@ -90,12 +87,30 @@ impl OpGenerator {
     }
 
     pub fn next_op(&mut self) -> Op {
+        // Rarely, a mass cancel: of one account, or (less often) of all.
+        if self.issued > 0 && self.rng.below(1_000) < 5 {
+            return if self.rng.percent(10) {
+                Op::CancelAll
+            } else {
+                Op::CancelAccount {
+                    account: self.rng.below(4) as u32,
+                }
+            };
+        }
         if self.issued > 0 && self.rng.percent(30) {
             let order_id = match self.rng.below(100) {
                 0..=4 => u64::MAX,                              // reserved sentinel
                 5..=14 => u64::MAX - 1 - self.rng.below(1_000), // never issued
                 _ => self.recent_id(),                          // live, filled, or gone
             };
+            if self.rng.percent(25) {
+                // Zero now and then, and often the whole remainder or more.
+                let reduce_by = self.rng.below(60);
+                return Op::Reduce {
+                    order_id,
+                    reduce_by,
+                };
+            }
             return Op::Cancel { order_id };
         }
 
@@ -131,12 +146,29 @@ impl OpGenerator {
             }
             _ => {}
         }
-        Op::Place {
+        let order_type = match self.rng.below(100) {
+            0..=9 => OrderType::ImmediateOrCancel,
+            10..=12 => OrderType::Market,
+            13..=22 => OrderType::PostOnly,
+            _ => OrderType::Limit,
+        };
+        // A few accounts, so that orders of one account often meet.
+        let account = self.rng.below(4) as u32;
+        let self_trade_prevention = match self.rng.below(100) {
+            0..=9 => SelfTradePrevention::CancelResting,
+            10..=14 => SelfTradePrevention::CancelIncoming,
+            15..=19 => SelfTradePrevention::CancelBoth,
+            _ => SelfTradePrevention::Allow,
+        };
+        Op::Place(NewOrder {
             order_id,
+            account,
             side,
+            order_type,
             price_tick,
             qty,
-        }
+            self_trade_prevention,
+        })
     }
 
     fn fresh_id(&mut self) -> u64 {
@@ -169,5 +201,6 @@ impl TempFile {
 impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+        let _ = std::fs::remove_file(matching_engine::wal::lock_path(&self.0));
     }
 }

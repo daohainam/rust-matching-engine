@@ -5,7 +5,7 @@
 //! Three kinds of sink are built in:
 //!
 //! ```
-//! use matching_engine::{Engine, Event, EventBatch, Side};
+//! use matching_engine::{Engine, Event, EventBatch, OrderType, Side};
 //!
 //! let mut engine = Engine::new(16);
 //!
@@ -15,7 +15,14 @@
 //! engine.process_order(1, Side::Sell, 100, 5, &mut events);
 //! assert_eq!(
 //!     events,
-//!     [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+//!     [Event::OrderAccepted {
+//!         order_id: 1,
+//!         account: 0,
+//!         side: Side::Sell,
+//!         order_type: OrderType::Limit,
+//!         price_tick: 100,
+//!         qty: 5,
+//!     }]
 //! );
 //!
 //! // 2. A closure sees each event as it happens; this one counts trades.
@@ -35,6 +42,7 @@
 //! assert_eq!(batch.as_slice().last(), Some(&Event::OrderFilled { order_id: 3 }));
 //! ```
 
+use crate::engine::OrderType;
 use crate::pool::Side;
 
 /// Capacity of an [`EventBatch`].
@@ -52,10 +60,13 @@ pub enum Event {
     /// A new order passed validation and processing began; it may trade
     /// immediately, rest, or later have an un-rested remainder rejected.
     /// It repeats the order's terms, so a consumer of the event stream
-    /// alone knows the side, price and size of every order it sees.
+    /// alone knows the account, side, price and size of every order it
+    /// sees, and can route each later event about it to its owner.
     OrderAccepted {
         order_id: u64,
+        account: u32,
         side: Side,
+        order_type: OrderType,
         price_tick: u32,
         qty: u64,
     },
@@ -79,9 +90,16 @@ pub enum Event {
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     /// An order has no remaining quantity; a resting maker is removed.
     OrderFilled { order_id: u64 },
-    /// An order was cancelled by explicit request. `side` and `price_tick`
-    /// say where it rested and `cancelled_qty` how much quantity left the
-    /// book, so a consumer can update its depth from this event alone.
+    /// The unfilled quantity of an order whose [`OrderType`] does not let it
+    /// rest was dropped. It is the order's last event, after any trades,
+    /// and `expired_qty` never entered the book.
+    OrderExpired { order_id: u64, expired_qty: u64 },
+    /// A resting order was cancelled: by a cancel, reduce or mass cancel
+    /// request, or by self-trade prevention (then right after
+    /// `SelfTradePrevented`).
+    /// `side` and `price_tick` say where it rested and `cancelled_qty` how
+    /// much quantity left the book, so a consumer can update its depth from
+    /// this event alone.
     OrderCancelled {
         order_id: u64,
         side: Side,
@@ -92,19 +110,49 @@ pub enum Event {
     /// alone (no `OrderAccepted`); a remainder that cannot rest comes after
     /// `OrderAccepted`. See [`RejectReason`].
     OrderRejected { order_id: u64, reason: RejectReason },
-    /// A cancel request named no resting order: the ID was never accepted,
-    /// or the order has already been filled, cancelled or had its remainder
-    /// rejected. The book is unchanged.
-    CancelRejected { order_id: u64 },
+    /// A resting order's quantity was lowered on request; it keeps its place
+    /// in the queue. `side` and `price_tick` say where it rests,
+    /// `reduced_qty` how much left the book and `remaining_qty` how much is
+    /// still resting.
+    OrderReduced {
+        order_id: u64,
+        side: Side,
+        price_tick: u32,
+        reduced_qty: u64,
+        remaining_qty: u64,
+    },
+    /// An incoming order met a resting order of its own account, and its
+    /// [`SelfTradePrevention`](crate::engine::SelfTradePrevention) mode
+    /// blocked the trade. What follows depends on the mode: an
+    /// `OrderCancelled` for the resting order, the incoming order's
+    /// `OrderExpired`, or both.
+    SelfTradePrevented {
+        taker_order_id: u64,
+        maker_order_id: u64,
+    },
+    /// A mass cancel finished: `account` is the account whose orders were
+    /// cancelled, or `None` for every account, and `cancelled_orders` how
+    /// many were (each reported before with its own `OrderCancelled`).
+    MassCancelled {
+        account: Option<u32>,
+        cancelled_orders: u64,
+    },
+    /// A cancel or reduce request was refused; `reason` says why. The book
+    /// is unchanged.
+    CancelRejected {
+        order_id: u64,
+        reason: CancelRejectReason,
+    },
 }
 
 /// Why an order was rejected.
 ///
-/// The first four reasons are **input errors**: they are checked before
-/// anything else, so the order is rejected on its own, without an
-/// `OrderAccepted` event, and the book is unchanged. The last two can only
-/// happen after `OrderAccepted`, when the unfilled remainder of an order
-/// cannot rest in the book.
+/// The first five reasons are found **before acceptance**: the first four
+/// are input errors, and the fifth is a post-only order that would trade.
+/// The order is rejected on its own, without an `OrderAccepted` event, and
+/// the book is unchanged. The last two can only happen after
+/// `OrderAccepted`, when the unfilled remainder of an order cannot rest in
+/// the book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectReason {
     /// The quantity was zero.
@@ -116,11 +164,24 @@ pub enum RejectReason {
     PriceOutOfRange,
     /// A resting order already uses this order ID.
     DuplicateOrderId,
+    /// A [`PostOnly`](crate::engine::OrderType::PostOnly) order would have
+    /// traded on arrival: its price reaches the best price on the other side.
+    PostOnlyWouldTrade,
     /// The remainder could not rest: every order slot was in use.
     BookFull,
     /// The remainder could not rest: the total quantity at its price level
     /// would no longer fit in a `u64`.
     LevelQuantityOverflow,
+}
+
+/// Why a cancel or reduce request was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelRejectReason {
+    /// No resting order has this ID: it was never accepted, or the order
+    /// has already been filled, cancelled or had its remainder rejected.
+    NotResting,
+    /// A reduce request asked to remove zero quantity.
+    ZeroQuantity,
 }
 
 /// Receives the events produced by one engine call, in the order they occur.

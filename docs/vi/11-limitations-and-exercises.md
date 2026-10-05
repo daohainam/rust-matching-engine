@@ -20,8 +20,8 @@ số lỗi tự nó đã là bài tập hay.
 
 | Ở đâu | Vấn đề | Mức độ | Chương |
 |---|---|---|---|
-| `wal.rs` | Các giới hạn về độ bền vững (durability): một lần flush thất bại là kết thúc, không cứu lại được; mục thư mục (directory entry) của tệp mới không được sync trên Unix; đĩa đầy biến thành `SIGBUS` trên Linux; `create` không atomic; hư hỏng ở giữa log bị coi như một đuôi bị ghi dở; và không có gì ép buộc mỗi tệp chỉ có một writer. | Trung bình nếu triển khai thật; ổn khi dùng để học, miễn là bạn biết chúng. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
-| `wal.rs` + `engine.rs` | Phát lại (replay) chỉ tất định khi dùng **cùng sức chứa của `Engine`**, mà log không ghi lại thông tin này. | Trung bình: dùng sai thì bản sao (replica) sẽ lặng lẽ khác bản gốc. | [9.1](09-write-ahead-log.md#91-vì-sao-phải-ghi-log) |
+| `wal.rs` | Các giới hạn về độ bền vững (durability): một lần flush thất bại là kết thúc, không cứu lại được; mục thư mục (directory entry) của tệp mới không được sync trên Unix; đĩa đầy biến thành `SIGBUS` trên Linux; `create` không atomic; hư hỏng ở giữa log bị coi như một đuôi bị ghi dở; và khóa writer chỉ chặn được các `WalWriter` khác, không chặn được các chương trình khác. | Trung bình nếu triển khai thật; ổn khi dùng để học, miễn là bạn biết chúng. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
+| `wal.rs` | Một log được ghi trước định dạng phiên bản 4 không ghi lại sức chứa của engine cho đến khi `open_append` ghi tiếp vào nó; tự tay phát lại (replay) nó với sức chứa sai thì vẫn cho ra một sổ lệnh khác. | Thấp: `replay` từ chối một log như vậy thay vì đoán. | [9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal) |
 | `events.rs` | Một `EventBatch` chỉ giữ 64 sự kiện cho mỗi lần gọi. Phần còn lại được đếm, nên việc mất sự kiện không còn âm thầm nữa, nhưng bạn phải kiểm tra `is_truncated()`. | Thấp: hãy kiểm tra nó, hoặc dùng một sink không giới hạn. | [7.4](07-events.md#74-chuyện-gì-xảy-ra-khi-có-quá-nhiều-sự-kiện) |
 | `engine.rs` | Một sink bị panic (và panic đó bị bắt lại) để lại sổ lệnh nhất quán nhưng yêu cầu chỉ được **áp dụng một phần**. | Thấp: dựng lại từ WAL; một binary build với `panic = "abort"` thì dừng hẳn (profile của chính bạn quyết định, [10.5](10-testing-and-performance.md#105-các-build-profile)). | [7.5](07-events.md#75-khi-sink-bị-panic) |
 | `ringbuffer.rs` | Thứ tự bộ nhớ (memory ordering) của nó được kiểm tra trên phần cứng ARM và bằng Miri, nhưng chỉ với những kịch bản xen kẽ giữa các luồng tình cờ xảy ra. | Thấp | [10.8](10-testing-and-performance.md#108-những-gì-test-không-bao-phủ) |
@@ -33,10 +33,12 @@ số lỗi tự nó đã là bài tập hay.
 |---|---|
 | **4096 tick giá** | Bị cố định bởi bitset hai tầng (`64 × 64`), và được kiểm tra lúc biên dịch. Không có logic về kích thước tick hay độ lệch giá; phía gọi tự quy đổi. |
 | **Sức chứa lệnh cố định** | Được chọn trong `Engine::new`. Khi arena đầy, những lệnh cần nằm chờ trong sổ sẽ bị từ chối (lệnh khớp hết ngay thì vẫn thành công). |
-| **Chỉ có lệnh giới hạn** | Không có lệnh thị trường (market), IOC, FOK, stop, iceberg; không có sửa lệnh (hủy rồi đặt lệnh mới thì mất ưu tiên); không có chống tự khớp lệnh (self-trade prevention); không có tài khoản. |
+| **Bốn loại lệnh** | Lệnh giới hạn (limit), immediate-or-cancel, lệnh thị trường (market) và post-only. Không có fill-or-kill, stop, iceberg hay lệnh trong ngày. Có thể giảm số lượng ngay tại chỗ, nhưng tăng số lượng hay đổi giá thì phải hủy rồi đặt lệnh mới, và như vậy mất ưu tiên. Lệnh thị trường không có cơ chế bảo vệ giá. |
+| **Tài khoản chỉ là nhãn** | Mỗi lệnh có một tài khoản, dùng cho việc chống tự giao dịch (self-trade prevention) và hủy hàng loạt. Không có giới hạn theo tài khoản (số lệnh đang mở, vị thế, hạn mức tín dụng), và engine không giữ danh sách lệnh của từng tài khoản, nên `cancel_account` phải duyệt qua cả sổ lệnh. |
 | **Mỗi `Engine` chỉ có một mã giao dịch** | Muốn nhiều mã (symbol) thì chạy nhiều engine. |
-| **`Engine` không được nối sẵn với WAL hay bộ đệm vòng** | Phía gọi tự nối; [`examples/pipeline.rs`](../../examples/pipeline.rs) cho thấy cách làm. `sequence` của WAL do phía gọi cấp và độc lập với bộ đếm riêng của engine. |
-| **Định dạng WAL còn nhỏ gọn** | Phiên bản 1 có header, các trường little-endian tường minh và checksum cho từng bản ghi, nhưng không có chính sách fsync riêng, không ghi lại sức chứa của engine và không khóa tệp ([9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal)). |
+| **`Engine` không được nối sẵn với WAL hay bộ đệm vòng** | Phía gọi tự nối; [`examples/pipeline.rs`](../../examples/pipeline.rs) cho thấy cách làm, còn `WalRecord::apply_to`, `wal::replay` và `wal::replay_from` lo phần phát lại. `sequence` của WAL do phía gọi cấp và độc lập với bộ đếm riêng của engine. |
+| **Định dạng WAL còn nhỏ gọn** | Phiên bản 4 có header chứa sức chứa của engine, các trường little-endian tường minh, checksum cho từng bản ghi và một khóa writer, nhưng không có chính sách fsync riêng và không xoay vòng log (log rotation) ([9.6](09-write-ahead-log.md#96-những-điều-cần-lưu-ý-đọc-trước-khi-dựa-vào-wal)). |
+| **Snapshot làm tạm dừng việc khớp lệnh** | `Engine::snapshot` duyệt qua cả sổ lệnh trên luồng khớp lệnh, nên một checkpoint làm chậm các yêu cầu xếp sau nó. Hãy chụp chúng giữa các yêu cầu, và đừng chụp quá thường xuyên (bài tập 17). |
 | **Lỗi thì phải kêu to** | `assert!`/`expect` trên các bất biến sẽ panic khi có lỗi sổ sách, ở mọi build profile. Với `panic = "abort"` (đã đặt trong release profile của repo này, và cũng cần đặt trong profile của binary *của bạn*, vì Cargo bỏ qua profile của dependency) thì tiến trình bị dừng hẳn. Đây là chủ ý, vì đây là một thành phần tài chính. |
 | **`depth_snapshot` khá chậm** | Nó cấp phát một `Vec` và quét tuyến tính qua các tick (đã ghi trong mã nguồn). Chỉ dùng cho báo cáo. |
 
@@ -98,15 +100,17 @@ khớp của taker).
 
 ### Hiểu sâu phần bên trong
 
-🟡 **5. Thu nhỏ `Order`.** Giữ nguyên `#[repr(C)]`, hãy sắp xếp lại các trường (gom
-các `u32` lại, rồi đặt `u8`/`bool` ở cuối) để `size_of::<Order>()` thành 40. Thêm
-một test chốt cứng kích thước này. Tiếp theo, hãy bỏ `repr(C)` và kiểm tra xem
-trình biên dịch có tự đạt 40 byte hay không (xem [3.3](03-order-pool.md#33-bản-ghi-order)).
-Sau đó thử `#[repr(C, align(64))]` và benchmark cả hai cách so với bản gốc. *Cách
-nào thắng, và kết quả có phụ thuộc vào kích thước của sổ lệnh không?*
+🟡 **5. Thu nhỏ `Order`.** `Order` nặng 48 byte, còn các trường của nó cộng lại là
+42 byte, nên sắp xếp lại thứ tự trường chẳng giúp được gì: 48 là bội số kế tiếp của
+8 (xem [3.3](03-order-pool.md#33-bản-ghi-order)). Phải bỏ bớt một thứ gì đó. Ứng
+viên hiển nhiên là `sequence`, trường mà không ai đọc: hãy bỏ nó (cùng bộ đếm của
+engine vốn chỉ để cấp giá trị cho nó), và sửa test kích thước trong `pool.rs` thành
+40. Sau đó thử `#[repr(C, align(64))]` trên bản gốc, và benchmark cả hai cách so
+với bản gốc. *Cách nào thắng, và kết quả có phụ thuộc vào kích thước của sổ lệnh
+không?*
 
-**Hoàn thành khi:** một test chốt `size_of::<Order>()` ở mức 40, mọi test khác vẫn
-qua, và bạn có số liệu benchmark cho cả ba cách bố trí.
+**Hoàn thành khi:** test kích thước chốt `size_of::<Order>()` ở mức 40, mọi test
+khác vẫn qua, và bạn có số liệu benchmark cho cả ba cách bố trí.
 
 🟡 **6. `next_set` nhanh.** Hãy thay `next_lower_active` / `next_higher_active`
 (chạy tuyến tính) trong `depth_snapshot` bằng các phương thức của bitset là
@@ -129,45 +133,63 @@ lệch có lớn hơn độ nhiễu giữa các lần chạy mà criterion báo 
 
 ### Tính năng mới
 
-🟡 **8. Lệnh IOC (immediate-or-cancel).** Hãy thêm một tham số time-in-force (thời
-hạn hiệu lực của lệnh). Lệnh IOC khớp phần nào được thì khớp và không bao giờ nằm
-chờ trong sổ. Với phần chưa khớp, luồng sự kiện nên là gì: `OrderCancelled`, hay
-`OrderRejected` kèm một `RejectReason` mới? Hãy giải thích lựa chọn của bạn.
-(Nhớ quy tắc ở mục 6.9: sổ lệnh phải nhất quán tại mọi lần `emit`.)
+🟡 **8. Lệnh fill-or-kill.** Hãy thêm `OrderType::FillOrKill`: lệnh giao dịch toàn
+bộ số lượng của nó ngay một lần, hoặc không giao dịch gì cả. "Không gì cả" nghĩa là
+sổ lệnh phải còn nguyên, nên engine phải biết *trước giao dịch đầu tiên* rằng có đủ
+số lượng đang nằm chờ ở những mức giá mà lệnh chấp nhận hay không. Sau đó hãy quyết
+định một lệnh bị hủy bỏ (killed) được báo cáo thế nào: bị từ chối trước khi được
+chấp nhận (giống lệnh post-only), hay được chấp nhận rồi hết hạn (giống lệnh IOC)?
+*Gợi ý: đi qua các mức giá phía đối diện, từ mức tốt nhất, cộng dồn `total_qty`, và
+dừng ngay khi tổng đạt `qty` hoặc khi mức giá kế tiếp không còn khớp được nữa;
+`depth_snapshot` cho thấy cách đi qua các mức giá. Bài tập 6 làm cho bước đi này
+nhanh hơn. Nhớ rằng byte loại lệnh trong WAL cần một giá trị mới.*
 
-**Hoàn thành khi:** các test cho thấy một lệnh IOC khớp một phần sẽ phát ra các
-giao dịch của nó rồi đến sự kiện cho phần còn lại mà bạn đã chọn, một lệnh IOC
-hoàn toàn không khớp được thì không phát giao dịch nào, và trong cả hai trường hợp
-`live_order_count()` không tăng.
+**Hoàn thành khi:** các test cho thấy một lệnh fill-or-kill khớp hết khi có đủ số
+lượng, và một lệnh bị hủy bỏ mà không có giao dịch nào và độ sâu không đổi khi
+không đủ, đồng thời `model_check` vẫn qua khi bộ sinh dữ liệu có cả lệnh
+fill-or-kill.
 
-🟡 **9. Lệnh thị trường.** Một lệnh mua với `price_tick = 4095` vượt qua mọi ask,
-nhưng phần còn lại của nó sẽ *nằm chờ* ở mức 4095, và đó không phải là ý nghĩa của
-lệnh thị trường. Hãy xây lệnh thị trường thật sự trên nền IOC (bài tập 8).
+🟡 **9. Bảo vệ giá cho lệnh thị trường.** Một lệnh thị trường quét cho đến khi khớp
+hết, bất kể phải đi xa đến đâu (1.9). Hãy thêm một biên độ giá (price band): giá
+giới hạn của lệnh thị trường trở thành giá tốt nhất phía đối diện lúc lệnh đến,
+cộng thêm (với lệnh mua) hoặc trừ đi (với lệnh bán) `band` tick. *Gợi ý: giá giới
+hạn được chọn ở đúng một chỗ trong `submit_order`; hãy tính nó từ `best_ask` /
+`best_bid` ở đó. Hãy quyết định chuyện gì xảy ra khi phía đối diện trống, và
+`band` nằm ở đâu: trong `Engine::new`, hay trong mỗi lần gọi.*
 
-**Hoàn thành khi:** một lệnh mua thị trường quét qua các ask ở mọi mức giá và không
-bao giờ nằm chờ, và một lệnh thị trường trên sổ trống chỉ phát ra sự kiện chấp
-nhận lệnh và sự kiện cho phần còn lại.
+**Hoàn thành khi:** với biên độ 5, một lệnh mua thị trường gặp các ask ở 100, 101 và
+150 chỉ giao dịch ở 100 và 101 rồi cho phần còn lại hết hạn, và một lệnh thị trường
+gặp phía đối diện trống vẫn chỉ phát ra sự kiện chấp nhận lệnh và `OrderExpired`.
 
-🟡 **10. Giảm số lượng ngay tại chỗ.** Hãy cho phép trader *giảm* số lượng của một
-lệnh mà không mất ưu tiên về thời gian (tăng số lượng thì vẫn phải mất ưu tiên,
-giống như hủy rồi đặt lệnh mới). *Gợi ý: chỉnh `remaining_qty` và
-`level.total_qty` cùng lúc, như `reduce_qty` đang làm. Giảm xuống 0 thì phải hoạt
-động như hủy lệnh.*
+🟡 **10. Sửa lệnh (amend): đổi giá hoặc tăng số lượng.** `reduce_order` giữ được ưu
+tiên vì lệnh nhỏ đi. Hãy thêm `amend_order(id, new_price_tick, new_qty)` cho mọi
+thay đổi khác: nó giữ nguyên vị trí của lệnh khi chỉ có số lượng giảm xuống ở cùng
+mức giá, còn lại thì hoạt động như hủy rồi đặt lệnh mới, đứng cuối hàng đợi, và
+thậm chí có thể giao dịch nếu giá mới khớp được. *Gợi ý: giao trường hợp đầu tiên
+cho `reduce_order`. Về sự kiện, hãy giữ quy tắc ở mục 7.2 rằng một consumer có thể
+theo dõi sổ lệnh chỉ từ các sự kiện: `OrderCancelled` rồi `OrderAccepted` đã đủ
+chưa, hay việc sửa lệnh xứng đáng có một sự kiện riêng? WAL cần một loại bản ghi
+mới.*
 
-**Hoàn thành khi:** một test cho hai lệnh nằm chờ ở cùng một mức giá, giảm số lượng
-lệnh đầu tiên, và cho thấy taker vẫn khớp lệnh đầu tiên trước; `depth_at` giảm
-đúng bằng lượng đã giảm, và giảm xuống 0 thì phát ra `OrderCancelled`.
+**Hoàn thành khi:** các test cho thấy giảm số lượng thì giữ ưu tiên, tăng số lượng
+thì mất ưu tiên, và dời giá sang bên kia spread thì có giao dịch; `model_check`
+cũng gửi cả các yêu cầu sửa lệnh.
 
-🔴 **11. Chống tự khớp lệnh.** Hãy thêm `account: u32` vào `Order`. Khi một taker
-sắp giao dịch với lệnh đang chờ của chính tài khoản đó, hãy áp dụng một chính sách
-(hủy lệnh cũ nhất, hủy lệnh mới nhất, hoặc trừ bớt cả hai) và phát ra các sự kiện
-tương ứng. *Gợi ý: phần kiểm tra thuộc về vòng lặp trong của `match_incoming`, ngay
-trước chỗ sẽ phát ra một `Trade`. Hãy truyền tài khoản của taker vào, và nhớ rằng
-"hủy lệnh cũ nhất" sẽ gỡ một maker, nên nó phải giữ mức giá, bitset và bảng ánh xạ
-id nhất quán đúng như khi một lệnh khớp hết.*
+🔴 **11. Danh sách lệnh theo từng tài khoản.** `cancel_account` duyệt qua cả sổ
+lệnh, nên việc hủy hai lệnh của một trader có thể đồng nghĩa với quét hàng nghìn
+tick. Hãy cho mỗi tài khoản một danh sách liên kết đôi intrusive riêng xuyên qua
+arena, giống hệt hàng đợi của một mức giá, để `cancel_account` chỉ chạm vào các
+lệnh của tài khoản đó. *Gợi ý: mỗi `Order` cần thêm hai liên kết `u32` (hãy để ý
+điều đó ảnh hưởng thế nào đến kích thước của nó, chương 3), và engine cần một bảng
+kích thước cố định ánh xạ từ tài khoản đến đầu danh sách; bảng băm phẳng ở chương
+5 có thể chứa nó. Mọi chỗ mà một lệnh đi vào hay rời khỏi sổ lệnh đều phải cập nhật
+danh sách: nằm chờ, khớp lệnh, hủy lệnh, giảm số lượng về 0, chống tự giao dịch.
+Hãy giữ nguyên thứ tự của các lần hủy, hoặc sửa sổ lệnh tham chiếu trong
+`model_check` cho khớp.*
 
-**Hoàn thành khi:** mỗi chính sách có một test trong đó taker và maker dùng chung
-một tài khoản, và `model_check` vẫn qua khi mỗi lệnh có tài khoản riêng.
+**Hoàn thành khi:** `model_check` vẫn qua, và một benchmark cho thấy
+`cancel_account` trên một tài khoản có vài lệnh tốn khoảng như nhau trong một sổ
+lệnh có 100 hay 100,000 lệnh.
 
 ### Kỹ thuật và kiểm chứng
 
@@ -222,25 +244,35 @@ một `Acquire` bị làm yếu thành `Relaxed`.
 
 ### Đưa WAL đến gần mức production
 
-🟡 **16. Ghi lại sức chứa.** Việc phát lại chỉ tất định khi dùng cùng sức chứa
-`Engine` (mục 9.1). Hãy lưu sức chứa đó vào các byte dự trữ trong header (định dạng
-phiên bản 2), và làm cho replay từ chối một log được ghi cho sức chứa khác. Vẫn
-phải đọc được các log phiên bản 1.
+🟡 **16. Một log mới ở mỗi checkpoint.** Sau một checkpoint, các bản ghi cũ hơn
+của log chỉ còn là gánh nặng: quá trình phục hồi bỏ qua chúng (9.8). Hãy bắt đầu một
+tệp log mới ở mỗi checkpoint, để các tệp cũ có thể được lưu trữ hoặc xóa đi. *Gợi
+ý: đặt tên mỗi log theo số thứ tự đầu tiên mà nó chứa, ví dụ
+`wal-00000000000000005001.log`; khi một checkpoint được ghi với `next_sequence` là
+N, hãy finalize log hiện tại và `create` `wal-N`. Quá trình phục hồi đọc checkpoint
+mới nhất và phát lại các log từ đó trở đi bằng `replay_from`. Chỉ xóa một log khi
+phía downstream đã nhận đủ mọi sự kiện mà nó sinh ra (9.5).*
 
-**Hoàn thành khi:** phát lại một log phiên bản 2 vào một engine có sức chứa khác
-thì trả về một lỗi rõ ràng, và các log phiên bản 1 do các test hiện có ghi ra vẫn
-đọc đúng.
+**Hoàn thành khi:** một test ghi ba checkpoint, sập (drop mọi thứ) rồi phục hồi,
+đạt đúng sổ lệnh đang chạy trong khi chỉ đọc checkpoint mới nhất và các log sau nó.
 
-🟡 **17. Mỗi tệp một writer.** Hãy lấy khóa độc quyền bằng `File::try_lock` trong
-`create` và `open_append` (đã stable từ Rust 1.89, nên cần nâng `rust-version`), và
-kiểm thử rằng writer thứ hai nhận một lỗi rõ ràng thay vì làm hỏng log.
+🔴 **17. Checkpoint mà không tạm dừng việc khớp lệnh.** `Engine::snapshot` chạy trên
+luồng khớp lệnh và duyệt qua cả sổ lệnh. Thay vào đó, hãy chụp snapshot trên một
+luồng khác, từ một engine **bóng** (shadow) nhận cùng các yêu cầu (các test pipeline
+và replay cho thấy một bản sao như vậy luôn giống hệt bản gốc). *Gợi ý: cho luồng
+khớp lệnh một bộ đệm vòng thứ hai (chương 8) nối sang luồng bóng, và đẩy mỗi
+`WalRecord` đã ghi log vào đó; engine bóng áp dụng chúng bằng `apply_to` và, thỉnh
+thoảng, ghi một checkpoint kèm số thứ tự mà nó đã đạt tới.*
 
-**Hoàn thành khi:** một test cho thấy việc mở writer thứ hai trên một log đang được
-dùng sẽ thất bại với một lỗi, và writer thứ nhất vẫn tiếp tục hoạt động.
+**Hoàn thành khi:** một benchmark cho thấy độ trễ của luồng khớp lệnh không đổi
+trong khi engine bóng ghi checkpoint, và việc phục hồi từ checkpoint của engine
+bóng đạt đúng sổ lệnh của engine chính.
 
 🔴 **18. `create` atomic.** Hãy ghi header vào `path.tmp`, sync, đổi tên thành
 `path`, rồi sync thư mục cha (trên Unix). Với từng bước, hãy giải thích nếu máy sập
-ngay trước bước đó thì còn lại gì trên đĩa, và vì sao bước đó cần thiết.
+ngay trước bước đó thì còn lại gì trên đĩa, và vì sao bước đó cần thiết. *Gợi ý:
+`write_checkpoint` trong `src/snapshot.rs` làm đúng các bước này cho các tệp
+checkpoint.*
 
 **Hoàn thành khi:** bạn giải thích được mục đích của từng bước trong một câu, và
 một test cho thấy tệp `path.tmp` còn sót lại từ một lần `create` bị gián đoạn
@@ -287,7 +319,9 @@ git switch main                                      # come back (stash or commi
 ```
 
 `a192ebc` có **API cũ**, nên các chương (vốn mô tả code hiện tại) sẽ không khớp
-hoàn toàn với nó; hãy dùng các chương để lấy ý tưởng.
+hoàn toàn với nó; hãy dùng các chương để lấy ý tưởng. Các bài R7 đến R12 được giải
+muộn hơn nhiều: hãy bắt đầu chúng từ commit ngay trước commit được nêu tên
+(`git switch --detach <hash>~1`).
 
 🟢 **R1. Cờ báo tràn.** Hãy làm cho batch sự kiện kích thước cố định ngày xưa ghi
 nhận việc có sự kiện nào bị bỏ rơi hay không. *Đã được giải bằng
@@ -318,8 +352,53 @@ lệnh tham chiếu chậm nhưng hiển nhiên đúng, trên các chuỗi yêu 
 🔴 **R6. Gia cố WAL.** Một header có magic number và phiên bản, một checksum cho
 mỗi bản ghi, các trường little-endian để chạy được trên mọi nền tảng, và một hàm
 khởi tạo mở log để ghi nối tiếp. *Đã được giải bằng
-`fix(wal)!: sound, portable, crash-safe log format`. Các giới hạn còn lại là bài
-tập 16 đến 20.*
+`fix(wal)!: sound, portable, crash-safe log format`. Các giới hạn còn lại đã trở
+thành R11, R12 và các bài tập 18 đến 20.*
+
+🟡 **R7. Lệnh immediate-or-cancel.** Lệnh IOC khớp phần nào được thì khớp và không
+bao giờ nằm chờ trong sổ. Với phần chưa khớp, luồng sự kiện nên là gì:
+`OrderCancelled`, hay `OrderRejected` kèm một `RejectReason` mới? Hãy giải thích lựa
+chọn của bạn. *Đã được giải bằng `feat(engine): add immediate-or-cancel orders`,
+commit này không chọn cách nào trong hai: commit message của nó giải thích vì sao
+một sự kiện mới `OrderExpired` là phù hợp nhất.*
+
+🟡 **R8. Lệnh thị trường.** Một lệnh mua ở tick 4095 vượt qua mọi ask, nhưng phần
+còn lại của nó lại nằm chờ ở đó, và đó không phải là ý nghĩa của lệnh thị trường.
+Hãy xây lệnh thị trường thật sự trên nền IOC. *Đã được giải bằng
+`feat(engine): add market orders`; bài tập 9 thêm cơ chế bảo vệ giá mà các sàn giao
+dịch thật vẫn dùng.*
+
+🟡 **R9. Giảm số lượng ngay tại chỗ.** Hãy cho phép trader giảm số lượng của một
+lệnh mà không mất ưu tiên về thời gian; giảm về không thì phải hoạt động như hủy
+lệnh. *Đã được giải bằng `feat(engine): reduce a resting order without losing priority`.
+Hãy để ý một loại yêu cầu mới chạm đến bao nhiêu chỗ: sự kiện, lý do từ chối, bản
+ghi WAL và bộ sinh dữ liệu test. Bài tập 10 đi xa hơn.*
+
+🔴 **R10. Chống tự giao dịch.** Hãy cho mỗi lệnh một tài khoản. Khi một taker sắp
+giao dịch với lệnh đang chờ của chính tài khoản đó, hãy áp dụng một chính sách (hủy
+lệnh đang chờ, hủy lệnh mới đến, hoặc hủy cả hai) và phát ra các sự kiện tương ứng.
+*Đã được giải bằng `feat(engine): give every order an account` và
+`feat(engine): add self-trade prevention`. Hãy xem phần kiểm tra nằm ở đâu trong
+vòng lặp trong của `match_incoming`, và maker bị hủy rời khỏi sổ lệnh theo đúng các
+bước của một lần khớp hết như thế nào. Hủy hàng loạt, tính năng cũng cần đến tài
+khoản, đến ngay sau đó trong
+`feat(engine): cancel every order of an account, or the whole book`; bài tập 11 làm
+cho nó nhanh hơn.*
+
+🟡 **R11. Ghi lại sức chứa.** Việc phát lại chỉ tất định khi dùng cùng sức chứa
+`Engine` (mục 9.1). Hãy lưu sức chứa đó vào header của log, và làm cho replay từ
+chối một log được ghi cho sức chứa khác, trong khi vẫn đọc được các log cũ hơn.
+*Đã được giải bằng `feat(wal)!: record the engine capacity in the log (format version 4)`;
+sau đó `feat(wal): replay a log into a new engine` dựng bản sao (replica) từ chính
+thông tin đó, nên quá trình phục hồi không thể chọn nhầm sức chứa được nữa.*
+
+🟡 **R12. Mỗi tệp một writer.** Hãy lấy khóa độc quyền bằng `File::try_lock`, và
+kiểm thử rằng writer thứ hai nhận một lỗi rõ ràng thay vì làm hỏng log. *Đã được
+giải bằng `feat(wal): refuse a second writer with a lock file`. Commit này khóa một
+tệp đi kèm chứ không khóa chính log: commit message của nó giải thích Windows sẽ
+làm gì nếu khác đi. Checkpoint, nửa còn lại của câu chuyện phục hồi, đến ngay sau
+đó, trong `feat(engine): snapshot and restore the book` và hai commit theo sau nó;
+các bài tập 16 và 17 xây dựng trên nền đó.*
 
 ### Mọi bản sửa, kèm commit
 

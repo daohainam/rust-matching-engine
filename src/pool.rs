@@ -49,6 +49,9 @@ pub struct Order {
     /// Whether this arena slot currently contains a live order;
     /// [`OrderPool::free`] checks it to catch double frees.
     pub in_use: bool,
+    /// The account that owns the order. It fills padding that was already
+    /// there, so the record stays 48 bytes.
+    pub account: u32,
 }
 
 impl Order {
@@ -63,6 +66,7 @@ impl Order {
             next_idx: NIL,
             prev_idx: NIL,
             in_use: false,
+            account: 0,
         }
     }
 }
@@ -114,6 +118,7 @@ impl OrderPool {
     pub fn allocate(
         &mut self,
         order_id: u64,
+        account: u32,
         side: Side,
         price_tick: u32,
         qty: u64,
@@ -135,6 +140,7 @@ impl OrderPool {
         order.next_idx = NIL;
         order.prev_idx = NIL;
         order.in_use = true;
+        order.account = account;
         Some(idx)
     }
 
@@ -275,9 +281,11 @@ impl PriceLevel {
             .expect("PriceLevel::total_qty underflow: bookkeeping invariant violated");
     }
 
-    /// Reduces the resting quantity of the (head) order that was partially
-    /// filled by `delta`. Caller is responsible for verifying `idx` belongs
-    /// to this level and that `delta` does not exceed the order's remainder.
+    /// Reduces the resting quantity of an order in this level by `delta`:
+    /// a head order that was partially filled, or any order reduced on
+    /// request. Its place in the queue does not change. Caller is
+    /// responsible for verifying `idx` belongs to this level and that
+    /// `delta` does not exceed the order's remainder.
     #[inline(always)]
     pub fn reduce_qty(&mut self, pool: &mut OrderPool, idx: u32, delta: u64) {
         let order = pool.get_mut(idx);
@@ -297,14 +305,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_account_fits_in_existing_padding() {
+        assert_eq!(std::mem::size_of::<Order>(), 48);
+    }
+
+    #[test]
     fn allocate_and_free_roundtrip() {
         let mut pool = OrderPool::new(4);
-        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
-        let b = pool.allocate(2, Side::Buy, 10, 200, 1).unwrap();
+        let a = pool.allocate(1, 0, Side::Buy, 10, 100, 0).unwrap();
+        let b = pool.allocate(2, 0, Side::Buy, 10, 200, 1).unwrap();
         assert_eq!(pool.live_count(), 2);
         pool.free(a);
         assert_eq!(pool.live_count(), 1);
-        let c = pool.allocate(3, Side::Buy, 10, 300, 2).unwrap();
+        let c = pool.allocate(3, 0, Side::Buy, 10, 300, 2).unwrap();
         assert_eq!(pool.live_count(), 2);
         assert_ne!(b, c);
     }
@@ -313,7 +326,7 @@ mod tests {
     #[should_panic(expected = "double free")]
     fn double_free_is_detected() {
         let mut pool = OrderPool::new(4);
-        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
+        let a = pool.allocate(1, 0, Side::Buy, 10, 100, 0).unwrap();
         pool.free(a);
         pool.free(a);
     }
@@ -325,25 +338,25 @@ mod tests {
         // level has nothing to remove: a bookkeeping bug in the caller.
         let mut pool = OrderPool::new(4);
         let mut level = PriceLevel::empty();
-        let a = pool.allocate(1, Side::Buy, 10, 100, 0).unwrap();
+        let a = pool.allocate(1, 0, Side::Buy, 10, 100, 0).unwrap();
         level.remove(&mut pool, a);
     }
 
     #[test]
     fn exhausts_capacity() {
         let mut pool = OrderPool::new(2);
-        assert!(pool.allocate(1, Side::Buy, 0, 1, 0).is_some());
-        assert!(pool.allocate(2, Side::Buy, 0, 1, 1).is_some());
-        assert!(pool.allocate(3, Side::Buy, 0, 1, 2).is_none());
+        assert!(pool.allocate(1, 0, Side::Buy, 0, 1, 0).is_some());
+        assert!(pool.allocate(2, 0, Side::Buy, 0, 1, 1).is_some());
+        assert!(pool.allocate(3, 0, Side::Buy, 0, 1, 2).is_none());
     }
 
     #[test]
     fn fifo_queue_push_and_remove_head_mid_tail() {
         let mut pool = OrderPool::new(8);
         let mut level = PriceLevel::empty();
-        let a = pool.allocate(1, Side::Buy, 0, 10, 0).unwrap();
-        let b = pool.allocate(2, Side::Buy, 0, 10, 1).unwrap();
-        let c = pool.allocate(3, Side::Buy, 0, 10, 2).unwrap();
+        let a = pool.allocate(1, 0, Side::Buy, 0, 10, 0).unwrap();
+        let b = pool.allocate(2, 0, Side::Buy, 0, 10, 1).unwrap();
+        let c = pool.allocate(3, 0, Side::Buy, 0, 10, 2).unwrap();
         assert!(level.push_back(&mut pool, a));
         assert!(level.push_back(&mut pool, b));
         assert!(level.push_back(&mut pool, c));

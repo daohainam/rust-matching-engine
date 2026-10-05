@@ -17,6 +17,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 
 | Thuật ngữ | Ý nghĩa | Chương |
 |---|---|---|
+| Account (tài khoản) | Ai là người đặt lệnh: một nhà giao dịch, một công ty, hoặc bất cứ đơn vị nào mà bên gọi theo dõi (`NewOrder::account`). Chống tự giao dịch và hủy hàng loạt dùng đến nó. | [1](01-order-book-basics.md) |
 | Aggressor / aggressor side (bên chủ động / phía chủ động) | Taker của một giao dịch, và phía của nó. Một giao dịch là *buyer-initiated* (do bên mua khởi phát) khi một người mua vượt spread. `Trade` báo thông tin này qua `taker_side`. | [1](01-order-book-basics.md) |
 | Ask / offer (lệnh bán) | Một lệnh **bán** đang chờ trong sổ. Ask tốt nhất là ask thấp nhất. | [1](01-order-book-basics.md) |
 | Bid (lệnh mua) | Một lệnh **mua** đang chờ trong sổ. Bid tốt nhất là bid cao nhất. | [1](01-order-book-basics.md) |
@@ -32,20 +33,24 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | FOK (fill-or-kill) | Lệnh phải khớp đủ ngay lập tức, nếu không thì bị hủy hoàn toàn. Chưa được cài đặt ở đây (bài tập ở chương 11). | [1](01-order-book-basics.md) |
 | Gateway (cổng nhận lệnh) | Phần của sàn nhận lệnh từ mạng, kiểm tra chúng, rồi chuyển cho engine khớp lệnh. | [2](02-architecture.md) |
 | Instrument (mã giao dịch) | Thứ được giao dịch: một cổ phiếu, một hợp đồng tương lai, một cặp tiền tệ. Mỗi mã có một sổ lệnh riêng. | [1](01-order-book-basics.md) |
-| IOC (immediate-or-cancel) | Lệnh khớp được bao nhiêu thì khớp ngay, phần dư bị hủy chứ không nằm chờ. Chưa được cài đặt ở đây (bài tập ở chương 11). | [1](01-order-book-basics.md) |
-| Limit order (lệnh giới hạn) | Lệnh có một mức giá tệ nhất mà người đặt chấp nhận: "mua ở giá này hoặc thấp hơn", "bán ở giá này hoặc cao hơn". Đây là loại lệnh duy nhất engine này hỗ trợ. | [1](01-order-book-basics.md) |
+| IOC (immediate-or-cancel) | Lệnh khớp được bao nhiêu thì khớp ngay, phần dư hết hạn chứ không nằm chờ (`OrderType::ImmediateOrCancel`, được báo bằng `OrderExpired`). | [1](01-order-book-basics.md) |
+| Limit order (lệnh giới hạn) | Lệnh có một mức giá tệ nhất mà người đặt chấp nhận: "mua ở giá này hoặc thấp hơn", "bán ở giá này hoặc cao hơn". Phần dư của nó nằm chờ trong sổ. | [1](01-order-book-basics.md) |
 | Liquidity (thanh khoản) | Có thể giao dịch được bao nhiêu mà không làm giá dịch chuyển nhiều. Lệnh đang chờ *cung cấp* thanh khoản; taker *lấy đi* thanh khoản. | [1](01-order-book-basics.md) |
 | Maker | Lệnh đang chờ trong một giao dịch. Nó đã nằm trong sổ từ trước. | [1](01-order-book-basics.md) |
 | Market data (dữ liệu thị trường) | Luồng dữ liệu công khai về các giao dịch và thay đổi của sổ lệnh mà sàn phát ra. | [2](02-architecture.md) |
+| Mass cancel (hủy hàng loạt) | Hủy mọi lệnh đang chờ của một tài khoản (ví dụ khi kết nối của nó bị ngắt: *cancel on disconnect*, hủy khi mất kết nối), hoặc mọi lệnh trong sổ (`cancel_account`, `cancel_all`). | [1](01-order-book-basics.md) |
+| Market order (lệnh thị trường) | Lệnh không có giá riêng: nó giao dịch ở bất cứ giá nào sổ lệnh đang chào, và phần dư hết hạn. Các sàn thật giới hạn mức nó được phép quét xa đến đâu (một dải giá, *price band*); engine này thì không (bài tập ở chương 11). | [1](01-order-book-basics.md) |
 | Matching engine (engine khớp lệnh) | Thành phần ghép lệnh mua với lệnh bán và quyết định giá giao dịch. Chính là toàn bộ repo này. | [1](01-order-book-basics.md) |
+| Post-only (lệnh chỉ đặt chờ) | Lệnh giới hạn không được phép giao dịch khi vừa đến: nếu giá của nó chạm tới phía đối diện, nó bị từ chối thay vì khớp. Các nhà tạo lập thị trường (market maker) dùng nó để chắc chắn rằng họ chỉ bổ sung thanh khoản. | [1](01-order-book-basics.md) |
 | Price level (mức giá) | Tất cả các lệnh đang chờ ở một mức giá trên một phía của sổ, được giữ thành một hàng đợi FIFO. | [1](01-order-book-basics.md) |
 | Price-time priority (ưu tiên giá-thời gian) | Quy tắc khớp lệnh: giá tốt hơn được khớp trước; cùng giá thì lệnh đến sớm hơn được khớp trước. | [1](01-order-book-basics.md) |
 | Resting order (lệnh đang chờ) | Lệnh nằm trong sổ vì khi đến, nó không thể giao dịch ngay. | [1](01-order-book-basics.md) |
-| Self-trade prevention (chống tự giao dịch) | Quy tắc ngăn lệnh mua của một nhà giao dịch khớp với chính lệnh bán của họ. Chưa được cài đặt ở đây. | [1](01-order-book-basics.md) |
+| Self-trade prevention (chống tự giao dịch) | Quy tắc ngăn lệnh mua của một nhà giao dịch khớp với chính lệnh bán của họ. Lệnh đến chọn điều gì xảy ra thay vào đó: hủy lệnh đang chờ, hủy lệnh đến, hoặc hủy cả hai (`SelfTradePrevention`). | [1](01-order-book-basics.md) |
 | Spread | Ask tốt nhất trừ bid tốt nhất. | [1](01-order-book-basics.md) |
 | Sweep (quét qua nhiều mức giá) | Một taker giao dịch xuyên qua nhiều mức giá liên tiếp. | [6](06-matching-algorithm.md) |
 | Taker | Lệnh vừa đến trong một giao dịch. Nó "lấy đi" thanh khoản mà một maker để lại trong sổ. | [1](01-order-book-basics.md) |
 | Tick (bước giá) | Bước giá nhỏ nhất. Engine này chỉ làm việc với tick nguyên `0..=4095`; việc đổi sang giá thật là trách nhiệm của bên gọi. | [1](01-order-book-basics.md) |
+| Wash trade (giao dịch giả) | Giao dịch giữa hai lệnh của cùng một chủ sở hữu. Nó không làm thay đổi gì, nhưng trong mắt thị trường lại trông như hoạt động thật; nếu cố ý làm thì đó là hành vi thao túng bất hợp pháp. Xem chống tự giao dịch (self-trade prevention). | [1](01-order-book-basics.md) |
 
 ## Cấu trúc dữ liệu và thuật toán
 
@@ -126,17 +131,21 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 
 | Thuật ngữ | Ý nghĩa | Chương |
 |---|---|---|
+| Atomic rename (đổi tên nguyên tử) | Thay một tệp trong một bước bằng cách ghi một tệp mới dưới một tên tạm rồi đổi tên nó đè lên tệp cũ; sự cố chỉ có thể để lại tệp cũ hoặc tệp mới, không bao giờ là một bản lẫn lộn. Các tệp checkpoint được ghi theo cách này. | [9](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
+| Checkpoint (điểm kiểm tra) | Một snapshot được lưu vào tệp, cùng với vị trí trong log mà nó đã bao gồm, để khi phục hồi chỉ cần phát lại các yêu cầu được ghi log sau nó. | [9](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
 | Checksum (mã kiểm tra) | Một con số nhỏ được tính từ một dãy byte và lưu kèm theo chúng. Nếu các byte bị đổi, checksum (rất có thể) không còn khớp. | [9](09-write-ahead-log.md) |
 | CRC / CRC32 | Một họ checksum chuẩn (dùng trong tệp zip và Ethernet). Repo này dùng checksum dựa trên SplitMix64 để khỏi phụ thuộc thư viện ngoài. | [9](09-write-ahead-log.md) |
 | Dirty page | Một trang (page) của tệp đã bị sửa trong bộ nhớ nhưng chưa được ghi xuống đĩa. | [9](09-write-ahead-log.md) |
 | Durability (độ bền vững) | Cam kết rằng dữ liệu vẫn còn sau khi máy sập hoặc mất điện, một khi nó đã được báo là đã lưu. | [9](09-write-ahead-log.md) |
 | Endianness / little-endian (thứ tự byte) | Thứ tự byte của một số nhiều byte trong bộ nhớ. *Little-endian* lưu byte thấp nhất trước. WAL luôn dùng little-endian, nên tệp chạy được trên mọi máy. | [9](09-write-ahead-log.md) |
 | `fsync` / `sync_all` / `msync` | Các lời gọi buộc hệ điều hành ghi dữ liệu đang nằm trong bộ nhớ đệm xuống đĩa. Cho đến khi một trong số chúng thành công, mất điện có thể làm mất dữ liệu. | [9](09-write-ahead-log.md) |
+| File lock (advisory / mandatory) (khóa tệp: tự nguyện / bắt buộc) | Một sự chiếm giữ trên tệp mà các chương trình khác có thể kiểm tra. Khóa *advisory* (tự nguyện) chỉ chặn những chương trình cũng xin khóa đó (Unix); khóa *mandatory* (bắt buộc) còn chặn cả việc đọc và ghi của chúng (Windows). Bộ ghi WAL khóa một tệp `.lock` đi kèm để các bên đọc không bao giờ bị chặn. | [9](09-write-ahead-log.md) |
 | Header / magic number | Những byte đầu tiên của một tệp, mô tả định dạng của nó. *Magic number* là một giá trị cố định dùng để nhận ra loại tệp. | [9](09-write-ahead-log.md) |
 | MAC | *Message authentication code*: một checksum cần khóa bí mật, nên kẻ tấn công không thể giả mạo. Checksum của WAL **không phải** là MAC. | [9](09-write-ahead-log.md) |
 | Memory-mapped file, mmap (tệp ánh xạ bộ nhớ) | Một tệp được làm cho trông như một mảng trong bộ nhớ. Ghi vào mảng là ghi vào tệp, thông qua page cache. | [9](09-write-ahead-log.md) |
 | Page / page cache / page fault | Hệ điều hành quản lý bộ nhớ theo từng *page* (trang, thường 4 KiB). *Page cache* giữ các page của tệp được dùng gần đây trong RAM. *Page fault* xảy ra khi chương trình chạm vào một page chưa nằm trong RAM. | [9](09-write-ahead-log.md) |
 | Replay (phát lại) | Dựng lại trạng thái bằng cách đưa các yêu cầu đã ghi log vào một engine mới tinh một lần nữa. Làm được vì engine là tất định. | [9](09-write-ahead-log.md) |
+| Snapshot (ảnh chụp trạng thái) | Bản sao toàn bộ trạng thái của một engine (dung lượng, các bộ đếm, các lệnh đang chờ theo thứ tự ưu tiên), đủ để dựng lại một engine giống hệt. Đừng nhầm với `depth_snapshot`, hàm chỉ liệt kê các mức giá. | [9](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
 | `SIGBUS` | Tín hiệu Unix giết một tiến trình khi nó chạm vào page ánh xạ bộ nhớ mà hệ thống không thể đỡ bằng chỗ lưu thật (ví dụ đĩa đầy, hoặc tệp bị người khác thu nhỏ). | [9](09-write-ahead-log.md) |
 | Sparse file (tệp thưa) | Tệp có những phần chưa ghi không chiếm chỗ trên đĩa; hệ điều hành đọc chúng ra toàn số 0. | [9](09-write-ahead-log.md) |
 | Syscall (lời gọi hệ thống) | Yêu cầu từ chương trình gửi tới nhân (kernel) của hệ điều hành (mở tệp, ghi tệp...). Chậm hơn nhiều so với một lời gọi hàm thông thường. | [9](09-write-ahead-log.md) |
@@ -157,7 +166,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | loom | Công cụ chạy một test đồng thời qua mọi cách đan xen có thể có của các luồng, để tìm bug về thứ tự. Được gợi ý làm bài tập. | [10](10-testing-and-performance.md) |
 | LTO | *Link-time optimisation* (tối ưu hóa lúc liên kết): trình biên dịch tối ưu xuyên qua ranh giới giữa các crate khi build binary cuối cùng. | [10](10-testing-and-performance.md) |
 | Miri | Trình thông dịch cho Rust, phát hiện hành vi không xác định trong code `unsafe`. CI chạy các unit test dưới nó. | [10](10-testing-and-performance.md) |
-| MSRV | *Minimum supported Rust version* (phiên bản Rust tối thiểu được hỗ trợ): trình biên dịch cũ nhất mà crate cam kết build được (ở đây là 1.88). | [10](10-testing-and-performance.md) |
+| MSRV | *Minimum supported Rust version* (phiên bản Rust tối thiểu được hỗ trợ): trình biên dịch cũ nhất mà crate cam kết build được (ở đây là 1.89, để dùng `File::try_lock`). | [10](10-testing-and-performance.md) |
 | Unit test | Test nhỏ nằm cạnh code mà nó kiểm thử (`#[cfg(test)] mod tests`), nên thấy được cả các phần private. | [10](10-testing-and-performance.md) |
 
 **Quay lại:** [README](../../README.vi.md) · [1. Kiến thức cơ bản về sổ lệnh](01-order-book-basics.md)

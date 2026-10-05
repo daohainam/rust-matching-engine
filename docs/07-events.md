@@ -21,37 +21,53 @@ This keeps the engine a pure, deterministic state machine:
 
 ```rust
 pub enum Event {
-    OrderAccepted        { order_id: u64, side: Side, price_tick: u32, qty: u64 },
+    OrderAccepted        { order_id: u64, account: u32, side: Side,
+                           order_type: OrderType, price_tick: u32, qty: u64 },
     Trade                { trade_id: u64, maker_order_id: u64, taker_order_id: u64,
                            taker_side: Side, price_tick: u32, qty: u64 },
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     OrderFilled          { order_id: u64 },
+    OrderExpired         { order_id: u64, expired_qty: u64 },
     OrderCancelled       { order_id: u64, side: Side, price_tick: u32, cancelled_qty: u64 },
+    OrderReduced         { order_id: u64, side: Side, price_tick: u32,
+                           reduced_qty: u64, remaining_qty: u64 },
     OrderRejected        { order_id: u64, reason: RejectReason },
-    CancelRejected       { order_id: u64 },
+    SelfTradePrevented   { taker_order_id: u64, maker_order_id: u64 },
+    MassCancelled        { account: Option<u32>, cancelled_orders: u64 },
+    CancelRejected       { order_id: u64, reason: CancelRejectReason },
 }
 
 pub enum RejectReason {
-    // Input errors: the order is rejected alone, before OrderAccepted.
+    // Found before acceptance: the order is rejected alone, the book unchanged.
     ZeroQuantity,          // qty was 0
     ReservedOrderId,       // order_id was u64::MAX
     PriceOutOfRange,       // price_tick was 4096 or more
     DuplicateOrderId,      // a resting order already has this id
+    PostOnlyWouldTrade,    // a post-only order's price reaches the other side
     // The remainder could not rest: always after OrderAccepted.
     BookFull,              // every arena slot is in use
     LevelQuantityOverflow, // the level's total would not fit in a u64
+}
+
+pub enum CancelRejectReason {
+    NotResting,            // no resting order has this id
+    ZeroQuantity,          // a reduce of 0
 }
 ```
 
 | Event | Emitted when | Who it is about |
 |---|---|---|
-| `OrderAccepted` | A new order passed validation. It repeats the order's side, limit price and quantity. | the incoming order |
+| `OrderAccepted` | A new order passed validation. It repeats the order's account, side, type, limit price and quantity (for a market order, the worst limit its side allows). | the incoming order |
 | `Trade` | Two orders executed against each other. `taker_side` is the aggressor's side; `trade_id` numbers trades 1, 2, 3, ... | maker **and** taker, at the maker's price |
 | `OrderPartiallyFilled` | An order traded but still has quantity left. | a maker (after each partial fill), or the taker (once, at the end) |
 | `OrderFilled` | An order has nothing left. | a maker (when it is consumed), or the taker |
-| `OrderCancelled` | A resting order was cancelled on request. It says where the order rested and how much quantity left the book. | the cancelled order |
-| `OrderRejected` | An order was refused: bad input, or no room for it to rest. `reason` says which. | the incoming order |
-| `CancelRejected` | A cancel named no resting order (never accepted, or already filled, cancelled or rejected). | the id in the cancel request |
+| `OrderExpired` | The remainder of an immediate-or-cancel or market order was dropped; it never entered the book. | the taker (once, last) |
+| `OrderCancelled` | A resting order was cancelled on request (or reduced by all it had). It says where the order rested and how much quantity left the book. | the cancelled order |
+| `OrderReduced` | A resting order's quantity was lowered on request; it keeps its place in the queue. | the reduced order |
+| `OrderRejected` | An order was refused: bad input, a post-only order that would trade, or no room for it to rest. `reason` says which. | the incoming order |
+| `SelfTradePrevented` | An incoming order met a resting order of its own account, and its self-trade prevention mode blocked the trade. An `OrderCancelled` for the maker, the taker's `OrderExpired`, or both follow, as the mode says. | taker **and** maker |
+| `MassCancelled` | A `cancel_account` (`account: Some(..)`) or `cancel_all` (`None`) finished; `cancelled_orders` counts the `OrderCancelled` events before it. | the request |
+| `CancelRejected` | A cancel or reduce was refused: no resting order has the id, or the reduction was zero. `reason` says which. | the id in the request |
 
 `Event` derives `Debug, Clone, Copy, PartialEq, Eq`, so events are cheap to copy
 and trivial to compare in tests. One `Event` is 40 bytes (the biggest variant,
@@ -60,12 +76,14 @@ multiple of 8). The other variants fit in the space `Trade` needs anyway.
 
 ## 7.2 Ordering rules
 
-For one `process_order` call the events always follow this shape:
+For one `submit_order` (or `process_order`) call the events always follow this
+shape:
 
 ```text
    [OrderAccepted]                                   <- always first (unless rejected up front)
    ( Trade, <maker Filled | maker PartiallyFilled> ) <- repeated once per execution, in execution order
    [ taker OrderFilled | taker OrderPartiallyFilled ]<- at most one, describing the taker's final state
+   [ OrderExpired ]                                  <- IOC and market orders with quantity left, or a stopped self-trade
    [ OrderRejected ]                                 <- only if the order could not rest (it never traded)
 ```
 
@@ -73,19 +91,29 @@ Key points:
 
 - A `Trade` is **always immediately followed** by the event describing the
   *maker's* new state.
+- With self-trade prevention, a `SelfTradePrevented` takes the place of a
+  `Trade` in that sequence. It is followed by the own maker's `OrderCancelled`
+  (modes `CancelResting` and `CancelBoth`), and for `CancelIncoming` and
+  `CancelBoth` matching then stops: the taker's final event and `OrderExpired`
+  come next, even for a limit order.
 - The **taker's** `OrderPartiallyFilled` or `OrderFilled` appears **once**, at the
   end, not after every trade. To follow a taker's progress, add up the `qty` of
   its `Trade` events.
 - A taker that does not trade at all and simply rests produces **only**
   `OrderAccepted`. There is no separate "order is now resting" event.
-- Rejections caused by bad input come **alone**; rejections caused by capacity
+- Rejections found before acceptance (bad input, or a post-only order that
+  would trade) come **alone**; rejections caused by capacity
   come **after** `OrderAccepted`, and only for an order that did not trade
   (see [6.4](06-matching-algorithm.md#64-phase-4-resting-the-remainder)).
 - The engine itself **never drops an event**. Only a bounded sink, such as
   `EventBatch`, can run out of room (7.4).
-- A `cancel_order` call emits **exactly one** event: `OrderCancelled` if the
-  order was resting, `CancelRejected` if it was not. Its `bool` result says the
-  same thing, for callers that only want to branch on it.
+- A `cancel_order` or `reduce_order` call emits **exactly one** event:
+  `OrderCancelled` or `OrderReduced` if it changed the book, `CancelRejected` if
+  it did not. Its `bool` result says the same thing, for callers that only want
+  to branch on it.
+- A `cancel_account` or `cancel_all` call emits one `OrderCancelled` per order,
+  bids best first, then asks best first, oldest first at each price, and always
+  ends with `MassCancelled`.
 
 ### Following the book from events alone
 
@@ -97,7 +125,9 @@ the requests. That is what a market-data publisher or a risk system does:
 | `OrderAccepted { side, price_tick, qty, .. }` | remember these terms until the call ends |
 | `Trade { taker_side, price_tick, qty, .. }` | the maker's level loses `qty`; it is on the side **opposite** `taker_side`, at `price_tick` |
 | `OrderCancelled { side, price_tick, cancelled_qty, .. }` | that level loses `cancelled_qty` |
-| end of a `process_order` call | unless the taker's last event is `OrderFilled` or `OrderRejected`, its remainder (`qty` minus its trades) now rests at its own `price_tick` |
+| `OrderReduced { side, price_tick, reduced_qty, .. }` | that level loses `reduced_qty` |
+| `SelfTradePrevented`, `MassCancelled` | nothing: the `OrderCancelled` events around them carry the changes |
+| end of a `submit_order` call | unless the taker's last event is `OrderFilled`, `OrderExpired` or `OrderRejected`, its remainder (`qty` minus its trades) now rests at its own `price_tick` |
 
 `trade_id` helps with the gaps and duplicates of [9.5](09-write-ahead-log.md#95-reading-and-replaying):
 the engine numbers trades in the order they happen, and the engine is
@@ -117,9 +147,17 @@ These are taken straight from the unit tests in `engine.rs`.
 | Taker bigger than maker; remainder rests | `Accepted`, `Trade`, `Filled(maker)`, `PartiallyFilled(taker, left)` |
 | Taker sweeps several levels | `Accepted`, then `Trade`+maker-event per fill, then the taker's final event |
 | Invalid input / duplicate id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
+| Post-only order whose price reaches the other side | `Rejected(PostOnlyWouldTrade)` |
 | Order can't rest (arena full / overflow) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (no trades happened) |
+| IOC or market order with quantity left | `Accepted`, then `Trade`+maker-event per fill, then `PartiallyFilled(taker, left)` if it traded, then `Expired(left)` |
 | Cancel succeeds | `Cancelled` |
-| Cancel of an order that is not resting | `CancelRejected` (and the returned `bool` is `false`) |
+| Cancel of an order that is not resting | `CancelRejected(NotResting)` (and the returned `bool` is `false`) |
+| Reduce by less than what is left | `Reduced` |
+| Reduce by all that is left, or more | `Cancelled` |
+| Reduce by 0 | `CancelRejected(ZeroQuantity)` |
+| Taker meets its own account's order, mode `CancelResting` | ..., `SelfTradePrevented`, `Cancelled(maker)`, then matching goes on |
+| Taker meets its own account's order, mode `CancelIncoming` | ..., `SelfTradePrevented`, `PartiallyFilled(taker, left)` if it traded, `Expired(left)` |
+| Mass cancel | `Cancelled` per order, in book order, then `MassCancelled(count)` |
 
 ## 7.3 The `EventSink` trait
 
@@ -143,7 +181,7 @@ Here are all three in action. The same example is in the rustdoc of
 [`src/events.rs`](../src/events.rs), where `cargo test` compiles and runs it:
 
 ```rust
-use matching_engine::{Engine, Event, EventBatch, Side};
+use matching_engine::{Engine, Event, EventBatch, OrderType, Side};
 
 let mut engine = Engine::new(16);
 
@@ -153,7 +191,14 @@ let mut events = Vec::new();
 engine.process_order(1, Side::Sell, 100, 5, &mut events);
 assert_eq!(
     events,
-    [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+    [Event::OrderAccepted {
+        order_id: 1,
+        account: 0,
+        side: Side::Sell,
+        order_type: OrderType::Limit,
+        price_tick: 100,
+        qty: 5,
+    }]
 );
 
 // 2. A closure sees each event as it happens; this one counts trades.
@@ -283,12 +328,12 @@ is your signature on "I know the state may be half-updated". The unit test
 A plain function works as a sink too, because it implements `FnMut(Event)`:
 
 ```rust
-use matching_engine::{Engine, Event, Side};
+use matching_engine::{Engine, Event, NewOrder, OrderType, Side};
 
 fn log_event(event: Event) {
     match event {
-        Event::OrderAccepted { order_id, side, price_tick, qty } => {
-            println!("accepted  #{order_id}: {side:?} {qty} @ {price_tick}")
+        Event::OrderAccepted { order_id, account, side, order_type, price_tick, qty } => {
+            println!("accepted  #{order_id} for {account}: {order_type:?} {side:?} {qty} @ {price_tick}")
         }
         Event::Trade { trade_id, maker_order_id, taker_order_id, taker_side, price_tick, qty } => {
             println!(
@@ -300,17 +345,32 @@ fn log_event(event: Event) {
             println!("partial   #{order_id}, {remaining_qty} left")
         }
         Event::OrderFilled { order_id } => println!("filled    #{order_id}"),
+        Event::OrderExpired { order_id, expired_qty } => {
+            println!("expired   #{order_id}, {expired_qty} never rested")
+        }
         Event::OrderCancelled { order_id, cancelled_qty, .. } => {
             println!("cancelled #{order_id}, {cancelled_qty} removed")
         }
+        Event::OrderReduced { order_id, reduced_qty, remaining_qty, .. } => {
+            println!("reduced   #{order_id} by {reduced_qty}, {remaining_qty} left")
+        }
         Event::OrderRejected { order_id, reason } => println!("rejected  #{order_id}: {reason:?}"),
-        Event::CancelRejected { order_id } => println!("cancel rejected: #{order_id} is not resting"),
+        Event::SelfTradePrevented { taker_order_id, maker_order_id } => {
+            println!("prevented #{taker_order_id} trading with its own #{maker_order_id}")
+        }
+        Event::MassCancelled { account, cancelled_orders } => {
+            println!("mass cancel of {account:?}: {cancelled_orders} orders")
+        }
+        Event::CancelRejected { order_id, reason } => {
+            println!("cancel or reduce of #{order_id} rejected: {reason:?}")
+        }
     }
 }
 
 let mut engine = Engine::new(16);
 engine.process_order(1, Side::Sell, 100, 10, &mut log_event);
-engine.process_order(2, Side::Buy, 100, 4, &mut log_event);
+let ioc = NewOrder::limit(2, Side::Buy, 100, 14).with_type(OrderType::ImmediateOrCancel);
+engine.submit_order(ioc, &mut log_event);
 ```
 
 Testing with events is just as direct; this is how the engine's own tests are
@@ -326,7 +386,14 @@ engine.process_order(2, Side::Buy, 100, 4, &mut events);
 assert_eq!(
     events,
     [
-        Event::OrderAccepted { order_id: 2, side: Side::Buy, price_tick: 100, qty: 4 },
+        Event::OrderAccepted {
+            order_id: 2,
+            account: 0,
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price_tick: 100,
+            qty: 4,
+        },
         Event::Trade {
             trade_id: 1,
             maker_order_id: 1,

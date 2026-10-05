@@ -13,6 +13,7 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 
 | Term | Meaning | Ch. |
 |---|---|---|
+| Account | Who placed an order: a trader, a firm, or whatever unit the caller tracks (`NewOrder::account`). Self-trade prevention and mass cancels use it. | [1](01-order-book-basics.md) |
 | Aggressor / aggressor side | The taker of a trade, and its side. A trade is *buyer-initiated* when a buyer crossed the spread. `Trade` reports it as `taker_side`. | [1](01-order-book-basics.md) |
 | Ask / offer | A resting order to **sell**. The best ask is the lowest one. | [1](01-order-book-basics.md) |
 | Bid | A resting order to **buy**. The best bid is the highest one. | [1](01-order-book-basics.md) |
@@ -28,20 +29,24 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | FOK (fill-or-kill) | An order that must fill completely at once, or not at all. Not implemented here (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Gateway | The part of an exchange that receives orders from the network, checks them, and passes them on to the matching engine. | [2](02-architecture.md) |
 | Instrument | The thing being traded: one stock, one future, one currency pair. Each instrument has its own book. | [1](01-order-book-basics.md) |
-| IOC (immediate-or-cancel) | An order that trades what it can at once; any remainder is cancelled instead of resting. Not implemented here (exercise in ch. 11). | [1](01-order-book-basics.md) |
-| Limit order | An order with a worst acceptable price: "buy at this price or lower", "sell at this price or higher". The only order type this engine supports. | [1](01-order-book-basics.md) |
+| IOC (immediate-or-cancel) | An order that trades what it can at once; any remainder expires instead of resting (`OrderType::ImmediateOrCancel`, reported with `OrderExpired`). | [1](01-order-book-basics.md) |
+| Limit order | An order with a worst acceptable price: "buy at this price or lower", "sell at this price or higher". Its remainder rests in the book. | [1](01-order-book-basics.md) |
 | Liquidity | How much can be traded without moving the price much. Resting orders *provide* liquidity; takers *remove* it. | [1](01-order-book-basics.md) |
 | Maker | The resting order in a trade. It was in the book first. | [1](01-order-book-basics.md) |
 | Market data | The public feed of trades and book changes that an exchange publishes. | [2](02-architecture.md) |
+| Mass cancel | Cancelling every resting order of one account (for example when its connection drops: *cancel on disconnect*), or every order in the book (`cancel_account`, `cancel_all`). | [1](01-order-book-basics.md) |
+| Market order | An order with no price of its own: it trades at whatever prices the book offers, and its remainder expires. Real exchanges limit how far it may sweep (a price band); this engine does not (exercise in ch. 11). | [1](01-order-book-basics.md) |
 | Matching engine | The component that pairs buy and sell orders and decides the trade price. This whole repository. | [1](01-order-book-basics.md) |
+| Post-only | A limit order that must not trade on arrival: if its price reaches the other side, it is rejected instead. Market makers use it to be sure they only add liquidity. | [1](01-order-book-basics.md) |
 | Price level | All orders resting at one price on one side, kept as a FIFO queue. | [1](01-order-book-basics.md) |
 | Price-time priority | Matching rule: the better price trades first; at the same price, the order that arrived earlier trades first. | [1](01-order-book-basics.md) |
 | Resting order | An order that is waiting in the book because it could not trade (fully) when it arrived. | [1](01-order-book-basics.md) |
-| Self-trade prevention | A rule that stops a trader's buy from matching their own sell. Not implemented here. | [1](01-order-book-basics.md) |
+| Self-trade prevention | A rule that stops a trader's buy from matching their own sell. The incoming order chooses what happens instead: cancel the resting order, cancel the incoming one, or both (`SelfTradePrevention`). | [1](01-order-book-basics.md) |
 | Spread | Best ask minus best bid. | [1](01-order-book-basics.md) |
 | Sweep | One taker trading through several price levels in a row. | [6](06-matching-algorithm.md) |
 | Taker | The incoming order in a trade. It "takes" liquidity that a maker left in the book. | [1](01-order-book-basics.md) |
 | Tick | The smallest price step. This engine works only with integer ticks `0..=4095`; converting to real prices is the caller's job. | [1](01-order-book-basics.md) |
+| Wash trade | A trade between two orders of the same owner. It moves nothing, but looks like real activity to the market; done on purpose it is illegal manipulation. See self-trade prevention. | [1](01-order-book-basics.md) |
 
 ## Data structures and algorithms
 
@@ -122,17 +127,21 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 
 | Term | Meaning | Ch. |
 |---|---|---|
+| Atomic rename | Replacing a file in one step by writing a new one under a temporary name and renaming it over the old; a crash leaves the old file or the new one, never a mix. Checkpoint files are written this way. | [9](09-write-ahead-log.md#98-checkpoints-replaying-less) |
+| Checkpoint | A snapshot saved to a file, together with the log position it reaches, so recovery replays only the requests logged after it. | [9](09-write-ahead-log.md#98-checkpoints-replaying-less) |
 | Checksum | A small number computed from some bytes and stored with them. If the bytes change, the checksum (very likely) no longer matches. | [9](09-write-ahead-log.md) |
 | CRC / CRC32 | A standard checksum family (used by zip files and Ethernet). This repo uses a SplitMix64-based checksum instead, to avoid a dependency. | [9](09-write-ahead-log.md) |
 | Dirty page | A page of a file that was changed in memory but not yet written to the disk. | [9](09-write-ahead-log.md) |
 | Durability | The promise that data survives a crash or power loss once it is reported as saved. | [9](09-write-ahead-log.md) |
 | Endianness / little-endian | The byte order of a multi-byte number in memory. *Little-endian* stores the lowest byte first. The WAL always uses little-endian, so files work on any machine. | [9](09-write-ahead-log.md) |
 | `fsync` / `sync_all` / `msync` | Calls that force the operating system to write cached data to the disk. Until one of them succeeds, a power loss can lose the data. | [9](09-write-ahead-log.md) |
+| File lock (advisory / mandatory) | A claim on a file that other programs can check. An *advisory* lock only stops those that ask for it too (Unix); a *mandatory* lock also blocks their reads and writes (Windows). The WAL writer locks a companion `.lock` file so that readers are never blocked. | [9](09-write-ahead-log.md) |
 | Header / magic number | The first bytes of a file, describing its format. The *magic number* is a fixed value that identifies the file type. | [9](09-write-ahead-log.md) |
 | MAC | *Message authentication code*: a checksum that needs a secret key, so an attacker cannot forge it. The WAL checksum is **not** a MAC. | [9](09-write-ahead-log.md) |
 | Memory-mapped file (mmap) | A file made to look like an array in memory. Writing to the array writes to the file, through the page cache. | [9](09-write-ahead-log.md) |
 | Page / page cache / page fault | The OS handles memory in *pages* (often 4 KiB). The *page cache* keeps recently used file pages in RAM. A *page fault* happens when a program touches a page that is not in RAM yet. | [9](09-write-ahead-log.md) |
 | Replay | Rebuilding state by feeding the logged requests into a fresh engine again. Works because the engine is deterministic. | [9](09-write-ahead-log.md) |
+| Snapshot | A copy of an engine's complete state (capacity, counters, resting orders in priority order) that can rebuild an identical engine. Not to be confused with `depth_snapshot`, which only lists price levels. | [9](09-write-ahead-log.md#98-checkpoints-replaying-less) |
 | `SIGBUS` | A Unix signal that kills a process that touches a memory-mapped page the system cannot back with real storage (for example, the disk is full, or the file was shrunk by someone else). | [9](09-write-ahead-log.md) |
 | Sparse file | A file whose unwritten parts take no disk space; the OS reads them as zeros. | [9](09-write-ahead-log.md) |
 | Syscall | A request from a program to the operating system kernel (open a file, write to it, ...). Much slower than a normal function call. | [9](09-write-ahead-log.md) |
@@ -153,7 +162,7 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | loom | A tool that runs a concurrent test under every possible thread interleaving, to find ordering bugs. Suggested as an exercise. | [10](10-testing-and-performance.md) |
 | LTO | *Link-time optimisation*: the compiler optimises across crate boundaries when building the final binary. | [10](10-testing-and-performance.md) |
 | Miri | An interpreter for Rust that detects undefined behaviour in `unsafe` code. CI runs the unit tests under it. | [10](10-testing-and-performance.md) |
-| MSRV | *Minimum supported Rust version*: the oldest compiler the crate promises to build with (here 1.88). | [10](10-testing-and-performance.md) |
+| MSRV | *Minimum supported Rust version*: the oldest compiler the crate promises to build with (here 1.89, for `File::try_lock`). | [10](10-testing-and-performance.md) |
 | Unit test | A small test next to the code it tests (`#[cfg(test)] mod tests`), which can see private items. | [10](10-testing-and-performance.md) |
 
 **Back to:** [README](../README.md) · [1. Order book basics](01-order-book-basics.md)

@@ -62,7 +62,7 @@ downstream system can follow the book from events alone
 More of the API:
 
 ```rust
-use matching_engine::{Engine, Event, RejectReason, Side};
+use matching_engine::{Engine, Event, NewOrder, RejectReason, SelfTradePrevention, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -77,9 +77,24 @@ assert_eq!(engine.best_ask(), None); // lowest resting sell tick
 assert_eq!(engine.depth_at(Side::Buy, 100), 10); // total quantity at one tick
 assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels first
 assert_eq!(engine.resting_order(1).map(|o| o.remaining_qty), Some(10)); // order status
+assert!(engine.reduce_order(1, 4, &mut events)); // 6 left, keeping its place in the queue
 assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
 assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
-assert_eq!(events.last(), Some(&Event::CancelRejected { order_id: 1 })); // and says so
+assert!(matches!(events.last(), Some(Event::CancelRejected { order_id: 1, .. }))); // and says so
+
+// Besides limit orders: immediate-or-cancel, market and post-only orders.
+engine.submit_order(NewOrder::market(3, Side::Sell, 5), &mut events); // no bids left
+let expired = Event::OrderExpired { order_id: 3, expired_qty: 5 };
+assert_eq!(events.last(), Some(&expired)); // a market order never rests
+
+// Accounts: block trading with yourself, and cancel everything on disconnect.
+engine.submit_order(NewOrder::limit(4, Side::Sell, 110, 5).with_account(7), &mut events);
+let own_bid = NewOrder::limit(5, Side::Buy, 110, 5)
+    .with_account(7)
+    .with_self_trade_prevention(SelfTradePrevention::CancelIncoming);
+engine.submit_order(own_bid, &mut events); // would trade with its own ask: stopped
+assert!(matches!(events.last(), Some(Event::OrderExpired { order_id: 5, .. })));
+assert_eq!(engine.cancel_account(7, &mut events), 1); // the ask #4 goes
 ```
 
 Prices are **integer ticks** in `0..4096`; converting to and from real prices is
@@ -123,6 +138,7 @@ flowchart TB
 | Report results without allocating | Stream events into a caller-supplied **`EventSink`** | O(1) per event | [7](docs/07-events.md) |
 | Feed the engine from another thread | **SPSC ring buffer** with separate `Producer` / `Consumer` handles (Release/Acquire) | O(1), lock-free | [8](docs/08-ring-buffer.md) |
 | Recover after a crash | **Memory-mapped WAL** with per-record checksums + deterministic replay | amortised O(1) append | [9](docs/09-write-ahead-log.md) |
+| Recover without replaying from the start | **Snapshot** of the book in an **atomically written checkpoint**, then replay only the log's tail | O(book) per checkpoint | [9.8](docs/09-write-ahead-log.md#98-checkpoints-replaying-less) |
 
 ## Learning path
 
@@ -139,7 +155,7 @@ the next.
 | 6 | [The matching algorithm](docs/06-matching-algorithm.md) | `process_order` and `cancel_order` line by line, flowcharts, a full state trace, edge cases |
 | 7 | [Events](docs/07-events.md) | Event semantics and ordering, the `EventSink` trait, choosing a sink, `EventBatch` truncation |
 | 8 | [The ring buffer](docs/08-ring-buffer.md) | The SPSC queue, memory ordering, false sharing, what the type system enforces, disconnect detection |
-| 9 | [The write-ahead log](docs/09-write-ahead-log.md) | Why log, the record format, memory-mapped files, crash safety and its limits, and a complete wired-up program |
+| 9 | [The write-ahead log](docs/09-write-ahead-log.md) | Why log, the record format, memory-mapped files, crash safety and its limits, a complete wired-up program, and checkpoints |
 | 10 | [Testing and performance](docs/10-testing-and-performance.md) | What each test proves, differential testing, the counting-allocator trick, CI, reading the benchmarks |
 | 11 | [Limitations and exercises](docs/11-limitations-and-exercises.md) | Known sharp edges, graded exercises, retracing past fixes commit by commit, further reading |
 
@@ -162,23 +178,26 @@ also has detailed doc comments (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         crate root; re-exports Engine, RestingOrder, Event, EventBatch, EventSink, RejectReason, Side
-  engine.rs      matching core: process_order, cancel_order, order lookup, depth queries
+  lib.rs         crate root; re-exports Engine, NewOrder, OrderType, SelfTradePrevention, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side, Snapshot, SnapshotError, Checkpoint
+  engine.rs      matching core: submit_order, reduce/cancel/mass cancel, self-trade prevention, order lookup, depth queries, snapshot/restore
   pool.rs        order arena, free list, PriceLevel (intrusive FIFO queue)
   bitset.rs      two-level bitset price ladder (best bid / ask in O(1))
   hashmap.rs     seeded open-addressing hash map (order id -> arena slot)
   events.rs      Event enum, EventSink trait, bounded EventBatch sink
   ringbuffer.rs  lock-free SPSC ring buffer with Producer / Consumer handles
-  wal.rs         memory-mapped, checksummed write-ahead log
+  wal.rs         memory-mapped, checksummed write-ahead log with a writer lock; replay
+  snapshot.rs    the engine's complete state; atomically written checkpoint files
 tests/
   common/        shared helpers: seeded PRNG, request generator, temp files
   model_check.rs differential test against a simple reference order book
   wal_replay.rs  replaying the WAL reproduces every event
+  snapshot.rs    an engine restored from a snapshot continues exactly like the original
   zero_alloc.rs  counting global allocator proves zero heap allocations
   docs_sync.rs   chapter 9 must show examples/pipeline.rs verbatim
 examples/
   walkthrough.rs chapter 1's worked example, printing events and the book
   pipeline.rs    ring buffer -> WAL -> engine -> replay, in one program
+  checkpoint.rs  recovery from a checkpoint plus the end of the log
 benches/
   matching_engine_bench.rs   criterion micro-benchmarks
 docs/            the chapters listed above, plus glossary.md
@@ -194,8 +213,9 @@ docs/vi/         the same chapters in Vietnamese (README.vi.md is the Vietnamese
 | Resting orders | `order_capacity` passed to `Engine::new` | arena size |
 | Events per call | unlimited with a `Vec` or closure sink; an `EventBatch` keeps 64 and counts the rest | your choice of `EventSink` |
 | Reserved order id | `u64::MAX` | hash map's "empty slot" marker |
-| Order types | limit orders only | scope of the project |
-| Rust version | 1.88 or newer | `rust-version` in `Cargo.toml` |
+| Order types | limit, immediate-or-cancel, market, post-only | scope of the project |
+| Accounts | a `u32` per order, for self-trade prevention and mass cancels; no per-account limits | scope of the project |
+| Rust version | 1.89 or newer | `rust-version` in `Cargo.toml` |
 
 Details, consequences and workarounds are in
 [chapter 11](docs/11-limitations-and-exercises.md).
@@ -208,6 +228,7 @@ cargo test --test model_check   # the engine against a simple reference book
 cargo test --test zero_alloc    # verifies zero heap allocations on the hot path
 cargo run --example walkthrough # chapter 1's worked example, step by step
 cargo run --example pipeline    # the complete program from chapter 9
+cargo run --example checkpoint  # recovery from a checkpoint (chapter 9.8)
 cargo bench                     # criterion micro-benchmarks
 ```
 

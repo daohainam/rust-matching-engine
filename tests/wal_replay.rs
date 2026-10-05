@@ -5,23 +5,8 @@
 mod common;
 
 use common::{Op, OpGenerator, TempFile};
-use matching_engine::wal::{read_all, WalRecord, WalRecordKind, WalWriter};
-use matching_engine::{Engine, Event, Side};
-
-fn apply(engine: &mut Engine, record: &WalRecord, events: &mut Vec<Event>) {
-    match record.kind {
-        WalRecordKind::NewOrder => engine.process_order(
-            record.order_id,
-            record.side,
-            record.price_tick,
-            record.qty,
-            events,
-        ),
-        WalRecordKind::Cancel => {
-            engine.cancel_order(record.order_id, events);
-        }
-    }
-}
+use matching_engine::wal::{read, replay, WalRecord, WalWriter};
+use matching_engine::{Engine, Side};
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri cannot map files.
@@ -29,38 +14,39 @@ fn replaying_the_wal_reproduces_every_event() {
     const OPS: u64 = 10_000;
     let path = TempFile::new("wal_replay");
 
-    let mut primary = Engine::new(256);
+    const CAPACITY: usize = 256;
+    let mut primary = Engine::new(CAPACITY);
     let mut primary_events = Vec::new();
     // A small preallocation forces the writer to grow several times.
-    let mut writer = WalWriter::create(&path.0, 64).unwrap();
+    let mut writer = WalWriter::create(&path.0, CAPACITY, 64).unwrap();
     let mut generator = OpGenerator::new(42);
     for sequence in 0..OPS {
         let record = match generator.next_op() {
-            Op::Place {
-                order_id,
-                side,
-                price_tick,
-                qty,
-            } => WalRecord::new_order(order_id, side, price_tick, qty, sequence),
+            Op::Place(order) => WalRecord::submit(order, sequence),
             Op::Cancel { order_id } => WalRecord::cancel(order_id, sequence),
+            Op::Reduce {
+                order_id,
+                reduce_by,
+            } => WalRecord::reduce(order_id, reduce_by, sequence),
+            Op::CancelAccount { account } => WalRecord::cancel_account(account, sequence),
+            Op::CancelAll => WalRecord::cancel_all(sequence),
         };
         // Write-ahead: the request is logged before the engine applies it.
         writer.append(record).unwrap();
-        apply(&mut primary, &record, &mut primary_events);
+        record.apply_to(&mut primary, &mut primary_events);
     }
     writer.finalize().unwrap();
 
-    let records = read_all(&path.0).unwrap();
+    let contents = read(&path.0).unwrap();
+    assert_eq!(contents.engine_capacity, Some(CAPACITY));
+    let records = contents.records;
     assert_eq!(records.len() as u64, OPS);
     assert!(records.iter().zip(0..).all(|(r, seq)| r.sequence == seq));
 
     // The replica's ID map draws a different random hash seed; the results
     // must not depend on it.
-    let mut replica = Engine::new(256);
     let mut replayed_events = Vec::new();
-    for record in &records {
-        apply(&mut replica, record, &mut replayed_events);
-    }
+    let replica = replay(&path.0, &mut replayed_events).unwrap();
 
     assert_eq!(replayed_events, primary_events);
     assert_eq!(replica.live_order_count(), primary.live_order_count());

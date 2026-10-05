@@ -1,7 +1,8 @@
-//! Verifies that `Engine::process_order` and `Engine::cancel_order` never
-//! allocate on the heap, by installing a counting global allocator for the
-//! whole test binary and asserting the allocation counter is unchanged
-//! across a sustained processing loop.
+//! Verifies that `Engine::process_order`, `Engine::reduce_order`,
+//! `Engine::cancel_order` and `Engine::cancel_all` never allocate on the
+//! heap, by installing a
+//! counting global allocator for the whole test binary and asserting the
+//! allocation counter is unchanged across a sustained processing loop.
 //!
 //! The counter is process-wide: it sees allocations from *every* thread, not
 //! only the one under test. That is sound only while this is the binary's
@@ -67,11 +68,19 @@ fn hot_path_performs_zero_heap_allocations() {
         engine.process_order(i, Side::Buy, tick, 10, &mut events);
         std::hint::black_box(&events);
     }
+    // Reductions that keep the orders resting.
+    for i in 5_000..10_000u64 {
+        events.clear();
+        std::hint::black_box(engine.reduce_order(i, 1, &mut events));
+    }
     // Cancellations across the resting book.
     for i in 5_000..10_000u64 {
         events.clear();
         std::hint::black_box(engine.cancel_order(i, &mut events));
     }
+    // A mass cancel walking the whole remaining book.
+    events.clear();
+    std::hint::black_box(engine.cancel_all(&mut events));
     // One taker sweeping 500 makers; every report reaches the sink.
     let mut trades = 0usize;
     deep_book.process_order(1_000, Side::Buy, 100, 500, &mut |event: Event| {

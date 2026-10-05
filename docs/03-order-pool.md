@@ -77,6 +77,7 @@ pub struct Order {
     pub next_idx: u32,        // next order in the same price queue (towards the tail)
     pub prev_idx: u32,        // previous order in the same price queue (towards the head)
     pub in_use: bool,         // is this slot currently holding a live order?
+    pub account: u32,         // who owns the order
 }
 ```
 
@@ -84,12 +85,12 @@ pub struct Order {
 so every field is aligned. Measured with `offset_of!`:
 
 ```text
- byte  0         8        16        24   28   32        36        40   41     48
-       +---------+---------+---------+----+----+--------+--------+----+------+
-       |order_id |remaining|sequence |tick|side|next_idx|prev_idx|in_ |      |
-       |  u64    | _qty u64|  u64    |u32 | u8 |  u32   |  u32   |use |      |
-       +---------+---------+---------+----+----+--------+--------+----+------+
-                                            ^^^ 3 bytes padding             ^^^ 7 bytes padding
+ byte  0         8        16        24   28   32        36        40   41   44        48
+       +---------+---------+---------+----+----+--------+--------+----+----+---------+
+       |order_id |remaining|sequence |tick|side|next_idx|prev_idx|in_ |    | account |
+       |  u64    | _qty u64|  u64    |u32 | u8 |  u32   |  u32   |use |    |   u32   |
+       +---------+---------+---------+----+----+--------+--------+----+----+---------+
+                                            ^^^ 3 bytes padding         ^^^ 3 bytes padding
        total size_of::<Order>() = 48 bytes
 ```
 
@@ -99,28 +100,36 @@ start at an address that is a multiple of 4, a `u64` at a multiple of 8.
 - **3 bytes after `side`.** `side` is one byte, at offset 28, so the next free
   byte is 29. `next_idx` is a `u32` and must start at a multiple of 4, so the
   compiler skips bytes 29 to 31 and puts it at 32.
-- **7 bytes at the end.** The fields end at byte 41 (`in_use` is at 40). But
-  `Order` contains `u64`s, so the whole struct must be 8-byte aligned, and its
-  size is rounded up to a multiple of 8: 48. That way, in an array of orders,
-  every element (and every `u64` inside it) starts properly aligned too.
+- **3 bytes after `in_use`.** The same story: `in_use` is one byte, at 40, and
+  `account` must start at a multiple of 4, so it goes at 44 and ends exactly at
+  48. That is also a multiple of 8, as it must be: `Order` contains `u64`s, so
+  the whole struct is 8-byte aligned and its size rounded up to a multiple of 8.
+  That way, in an array of orders, every element (and every `u64` inside it)
+  starts properly aligned too.
+
+The `account` field came late, and it was free: before it, the struct also
+ended at byte 41 and was rounded up to 48, with 7 bytes of padding at the end.
+`account` moved into those bytes. A test (`the_account_fits_in_existing_padding`
+in `pool.rs`) pins the size, so a field that would make it grow cannot slip in
+unnoticed.
 
 Why ask for `repr(C)` at all? Without it, Rust uses its default layout and is
-free to **reorder fields** to reduce padding; for this struct it picks a
-40-byte layout on its own. `repr(C)` gives up those 8 bytes in exchange for a
-layout that is fixed and predictable: the picture above is guaranteed, not a
-compiler detail that might change, which makes it something we can draw,
-measure and teach. Either choice is reasonable; the experiments in the note
-below compare them.
+free to **reorder fields** to reduce padding. Here that gains nothing: the
+fields add up to 42 bytes, which still rounds up to 48. (Before `account`
+arrived, the default layout reached 40 bytes where `repr(C)` needed 48.)
+`repr(C)` buys a layout that is fixed and predictable: the picture above is
+guaranteed, not a compiler detail that might change, which makes it something
+we can draw, measure and teach.
 
 > [!NOTE]
 > The source comment says the order is "sized to fit within a single 64-byte
 > cache line". True in the sense that 48 ≤ 64, but 48 does not divide 64, so in a
 > tightly packed array many orders **straddle two cache lines** (if the array
 > starts on a line boundary, order 1 covers bytes 48 to 95, crossing the
-> boundary at 64). Two easy experiments are listed
-> in [chapter 11](11-limitations-and-exercises.md): reorder the fields (or drop
-> `repr(C)` and let the compiler do it) to shrink the record to 40 bytes, or
-> align it to 64 bytes so each order owns exactly one cache line.
+> boundary at 64). Two experiments are listed
+> in [chapter 11](11-limitations-and-exercises.md): drop the `sequence` field,
+> which nothing reads, to shrink the record to 40 bytes, or align it to 64 bytes
+> so each order owns exactly one cache line.
 
 ## 3.4 Idea 2: the free list (a stack of free slots)
 
@@ -274,6 +283,10 @@ When a maker is partly filled, it stays at the head. Only the numbers change:
 The queue order (and therefore the maker's time priority) is untouched. A
 partly-filled order **keeps its place** at the front.
 
+`Engine::reduce_order` uses the same operation when a trader lowers a resting
+order's quantity (chapter 6). That order may sit anywhere in the queue, not only
+at the head, and it keeps its place too: `reduce_qty` never touches the links.
+
 ## 3.6 Invariants (things that must always be true)
 
 These are the rules the rest of the engine relies on. If one breaks, the book is
@@ -282,7 +295,7 @@ corrupt.
 | # | Invariant | Maintained by |
 |---|---|---|
 | 1 | `level.head == NIL` ⇔ `level.tail == NIL` ⇔ `level.count == 0` ⇔ `level.total_qty == 0` | `push_back`, `remove` |
-| 2 | `level.total_qty` = sum of `remaining_qty` over every order in the queue. (The "`total_qty == 0` ⇔ empty" half of invariant 1 also relies on the engine never resting a zero-quantity order: `process_order` rejects `qty == 0`; `PriceLevel` itself does not check.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
+| 2 | `level.total_qty` = sum of `remaining_qty` over every order in the queue. (The "`total_qty == 0` ⇔ empty" half of invariant 1 also relies on the engine never resting a zero-quantity order: `submit_order` rejects `qty == 0`, and `reduce_order` cancels an order instead of reducing it to zero; `PriceLevel` itself does not check.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
 | 3 | Walking `head -> next_idx -> ...` visits exactly `count` orders and ends at `tail` | `push_back`, `remove` |
 | 4 | `a.next_idx == b` ⇔ `b.prev_idx == a` | `push_back`, `remove` |
 | 5 | A slot is on the free stack ⇔ `in_use == false` | `allocate`, `free` |

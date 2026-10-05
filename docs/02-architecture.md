@@ -39,11 +39,14 @@ flowchart LR
     subgraph plumbing["Plumbing (around the engine)"]
         ringbuffer["ringbuffer<br/>SPSC input queue"]
         wal["wal<br/>write-ahead log"]
+        snapshot["snapshot<br/>state + checkpoints"]
     end
     engine --> pool
     engine --> bitset
     engine --> hashmap
     engine --> events
+    engine -. "Snapshot type" .-> snapshot
+    wal --> engine
     wal --> pool
 ```
 
@@ -56,14 +59,18 @@ flowchart LR
 | `events`     | [`src/events.rs`](../src/events.rs)       | The `Event` enum, the `EventSink` trait the engine reports through, and a bounded `EventBatch` sink. | [7](07-events.md) |
 | `ringbuffer` | [`src/ringbuffer.rs`](../src/ringbuffer.rs) | Lock-free queue, split into `Producer` and `Consumer` handles, to feed the engine from another thread. | [8](08-ring-buffer.md) |
 | `wal`        | [`src/wal.rs`](../src/wal.rs)             | Append-only binary log of requests, for replay and recovery. | [9](09-write-ahead-log.md) |
+| `snapshot`   | [`src/snapshot.rs`](../src/snapshot.rs)   | The engine's complete state, and checkpoint files, so recovery need not replay from the start. | [9](09-write-ahead-log.md#98-checkpoints-replaying-less) |
 
-Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`,
-but **not** on `ringbuffer` or `wal`. Those two are independent building blocks
-that *you* wire around the engine (chapters 8 and 9 show how).
+Note the arrows: the engine depends on `pool`, `bitset`, `hashmap` and `events`
+(and on `snapshot` only for the plain `Snapshot` type it returns), but **not** on
+`ringbuffer` or `wal`. Those are building blocks that *you* wire around the
+engine (chapters 8 and 9 show how); `wal` knows the engine, so it can replay a log
+into one.
 
-The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the seven names most
-users need: `Engine`, `RestingOrder`, `Event`, `EventSink`, `EventBatch`,
-`RejectReason` and `Side`.
+The crate root ([`src/lib.rs`](../src/lib.rs)) re-exports the fourteen names most
+users need: `Engine`, `NewOrder`, `OrderType`, `SelfTradePrevention`,
+`RestingOrder`, `Event`, `EventSink`, `EventBatch`, `RejectReason`,
+`CancelRejectReason`, `Side`, `Snapshot`, `SnapshotError` and `Checkpoint`.
 
 ## 2.3 The `Engine` struct, field by field
 
@@ -177,7 +184,10 @@ sequenceDiagram
 ```
 
 (The diagram is simplified: the exact order and all failure branches are in
-[chapter 6](06-matching-algorithm.md).)
+[chapter 6](06-matching-algorithm.md). It shows a limit order. `submit_order`
+takes an `OrderType` too: an immediate-or-cancel or market order skips the
+"quantity left over" box and reports `OrderExpired` instead, and a post-only
+order that would trade is refused during validation.)
 
 The engine does not decide where events go. It hands each one, at the moment it
 happens, to the **sink** the caller passed in: a `Vec<Event>`, a closure, or a
@@ -263,7 +273,8 @@ part of why the design is fast.
   +-----------------+              +------------------------+          +-------------+
 ```
 
-The mutating methods (`process_order` and `cancel_order`) take `&mut self`, so
+The mutating methods (`submit_order`, `process_order`, `reduce_order`,
+`cancel_order`, `cancel_account` and `cancel_all`) take `&mut self`, so
 Rust itself guarantees that only one caller touches the book at a time. There
 are **no locks anywhere** in the engine. The ring buffer applies the same idea
 to the queue: it hands out exactly one `Producer` and one `Consumer`, so "one
@@ -280,7 +291,9 @@ instruments), each on its own core.
 
 ## 2.8 What "zero allocation" does and does not mean
 
-It means **no heap allocation inside `process_order` and `cancel_order`**, and
+It means **no heap allocation inside any mutating method** (`submit_order`,
+`process_order`, `reduce_order`, `cancel_order`, `cancel_account`,
+`cancel_all`), and
 this is tested (see [chapter 10](10-testing-and-performance.md)).
 
 These things *do* allocate, and that is fine because they are not on the hot path:
@@ -289,7 +302,8 @@ These things *do* allocate, and that is fine because they are not on the hot pat
 |---|---|
 | `Engine::new` | builds all the arrays (this is the whole point: do it once) |
 | `Engine::depth_snapshot` | returns a `Vec` (for inspection / reporting) |
-| `WalWriter::create`, `WalWriter::open_append`, `wal::read_all` | file and `Vec` setup |
+| `WalWriter::create`, `WalWriter::open_append`, `wal::read`, `wal::read_all`, `wal::replay`, `wal::replay_from` | file and `Vec` setup (and, for `replay`, a new engine) |
+| `Engine::snapshot`, `Engine::restore`, `write_checkpoint`, `read_checkpoint` | the snapshot's order list, a new engine, file contents |
 | `ringbuffer::spsc_channel` | builds the slot array |
 
 > [!TIP]

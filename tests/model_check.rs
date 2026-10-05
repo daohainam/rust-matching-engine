@@ -9,7 +9,10 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use common::{watched_ticks, Op, OpGenerator};
 use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
-use matching_engine::{Engine, Event, RejectReason, RestingOrder, Side};
+use matching_engine::{
+    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder,
+    SelfTradePrevention, Side,
+};
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
 type Queue = VecDeque<(u64, u64)>;
@@ -20,6 +23,8 @@ struct ReferenceBook {
     bids: BTreeMap<u32, Queue>,
     asks: BTreeMap<u32, Queue>,
     live: HashMap<u64, (Side, u32)>,
+    /// Account of every order that ever rested; a reused id overwrites it.
+    accounts: HashMap<u64, u32>,
     trades: u64,
 }
 
@@ -30,11 +35,26 @@ impl ReferenceBook {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
+            accounts: HashMap::new(),
             trades: 0,
         }
     }
 
-    fn place(&mut self, order_id: u64, side: Side, price_tick: u32, qty: u64) -> Vec<Event> {
+    fn place(&mut self, order: NewOrder) -> Vec<Event> {
+        let NewOrder {
+            order_id,
+            account,
+            side,
+            order_type,
+            price_tick,
+            qty,
+            self_trade_prevention,
+        } = order;
+        let price_tick = match (order_type, side) {
+            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
+            (OrderType::Market, Side::Sell) => 0,
+            _ => price_tick,
+        };
         let invalid = if qty == 0 {
             Some(RejectReason::ZeroQuantity)
         } else if order_id == u64::MAX {
@@ -43,6 +63,13 @@ impl ReferenceBook {
             Some(RejectReason::PriceOutOfRange)
         } else if self.live.contains_key(&order_id) {
             Some(RejectReason::DuplicateOrderId)
+        } else if order_type == OrderType::PostOnly
+            && match side {
+                Side::Buy => self.best_ask().is_some_and(|ask| ask <= price_tick),
+                Side::Sell => self.best_bid().is_some_and(|bid| bid >= price_tick),
+            }
+        {
+            Some(RejectReason::PostOnlyWouldTrade)
         } else {
             None
         };
@@ -51,12 +78,19 @@ impl ReferenceBook {
         }
         let mut events = vec![Event::OrderAccepted {
             order_id,
+            account,
             side,
+            order_type,
             price_tick,
             qty,
         }];
 
         let mut remaining = qty;
+        let mut stopped_by_self_trade = false;
+        let maker_side = match side {
+            Side::Buy => Side::Sell,
+            Side::Sell => Side::Buy,
+        };
         let opposite = match side {
             Side::Buy => &mut self.asks,
             Side::Sell => &mut self.bids,
@@ -80,6 +114,35 @@ impl ReferenceBook {
                     break;
                 };
                 let (maker, maker_qty) = *front;
+                if self_trade_prevention != SelfTradePrevention::Allow
+                    && self.accounts[&maker] == account
+                {
+                    events.push(Event::SelfTradePrevented {
+                        taker_order_id: order_id,
+                        maker_order_id: maker,
+                    });
+                    if matches!(
+                        self_trade_prevention,
+                        SelfTradePrevention::CancelResting | SelfTradePrevention::CancelBoth
+                    ) {
+                        queue.pop_front();
+                        self.live.remove(&maker);
+                        events.push(Event::OrderCancelled {
+                            order_id: maker,
+                            side: maker_side,
+                            price_tick: tick,
+                            cancelled_qty: maker_qty,
+                        });
+                    }
+                    if matches!(
+                        self_trade_prevention,
+                        SelfTradePrevention::CancelIncoming | SelfTradePrevention::CancelBoth
+                    ) {
+                        stopped_by_self_trade = true;
+                        break;
+                    }
+                    continue;
+                }
                 let traded = remaining.min(maker_qty);
                 remaining -= traded;
                 self.trades += 1;
@@ -106,6 +169,9 @@ impl ReferenceBook {
             if queue.is_empty() {
                 opposite.remove(&tick);
             }
+            if stopped_by_self_trade {
+                break;
+            }
         }
 
         if remaining == 0 {
@@ -117,6 +183,15 @@ impl ReferenceBook {
                 order_id,
                 remaining_qty: remaining,
             });
+        }
+        if stopped_by_self_trade
+            || matches!(order_type, OrderType::ImmediateOrCancel | OrderType::Market)
+        {
+            events.push(Event::OrderExpired {
+                order_id,
+                expired_qty: remaining,
+            });
+            return events;
         }
         let own = match side {
             Side::Buy => &mut self.bids,
@@ -142,13 +217,15 @@ impl ReferenceBook {
                 .or_default()
                 .push_back((order_id, remaining));
             self.live.insert(order_id, (side, price_tick));
+            self.accounts.insert(order_id, account);
         }
         events
     }
 
     fn cancel(&mut self, order_id: u64) -> (bool, Vec<Event>) {
         let Some((side, tick)) = self.live.remove(&order_id) else {
-            return (false, vec![Event::CancelRejected { order_id }]);
+            let reason = CancelRejectReason::NotResting;
+            return (false, vec![Event::CancelRejected { order_id, reason }]);
         };
         let book = match side {
             Side::Buy => &mut self.bids,
@@ -172,6 +249,55 @@ impl ReferenceBook {
         (true, vec![event])
     }
 
+    fn reduce(&mut self, order_id: u64, reduce_by: u64) -> (bool, Vec<Event>) {
+        let rejected = |reason| (false, vec![Event::CancelRejected { order_id, reason }]);
+        if reduce_by == 0 {
+            return rejected(CancelRejectReason::ZeroQuantity);
+        }
+        let Some(&(side, price_tick)) = self.live.get(&order_id) else {
+            return rejected(CancelRejectReason::NotResting);
+        };
+        let book = match side {
+            Side::Buy => &mut self.bids,
+            Side::Sell => &mut self.asks,
+        };
+        let (_, qty) = book
+            .get_mut(&price_tick)
+            .and_then(|queue| queue.iter_mut().find(|(id, _)| *id == order_id))
+            .expect("live order is queued at its level");
+        if reduce_by >= *qty {
+            return self.cancel(order_id);
+        }
+        *qty -= reduce_by;
+        let event = Event::OrderReduced {
+            order_id,
+            side,
+            price_tick,
+            reduced_qty: reduce_by,
+            remaining_qty: *qty,
+        };
+        (true, vec![event])
+    }
+
+    /// Cancels the resting orders of `account` (or every resting order),
+    /// bids best first, then asks best first, oldest first at each price.
+    fn mass_cancel(&mut self, account: Option<u32>) -> Vec<Event> {
+        let ids: Vec<u64> = self
+            .bids
+            .iter()
+            .rev()
+            .chain(self.asks.iter())
+            .flat_map(|(_, queue)| queue.iter().map(|&(id, _)| id))
+            .filter(|id| account.is_none_or(|account| self.accounts[id] == account))
+            .collect();
+        let mut events: Vec<Event> = ids.iter().flat_map(|&id| self.cancel(id).1).collect();
+        events.push(Event::MassCancelled {
+            account,
+            cancelled_orders: ids.len() as u64,
+        });
+        events
+    }
+
     fn resting_order(&self, order_id: u64) -> Option<RestingOrder> {
         let &(side, price_tick) = self.live.get(&order_id)?;
         let &(_, remaining_qty) = self.book(side)[&price_tick]
@@ -180,6 +306,7 @@ impl ReferenceBook {
             .expect("live order is queued at its level");
         Some(RestingOrder {
             order_id,
+            account: self.accounts[&order_id],
             side,
             price_tick,
             remaining_qty,
@@ -225,6 +352,11 @@ struct Coverage {
     maker_partial_fills: usize,
     cancels_found: usize,
     calls_beyond_batch_capacity: usize,
+    expired_remainders: usize,
+    post_only_rejections: usize,
+    reductions: usize,
+    self_trades_prevented: usize,
+    mass_cancelled_orders: u64,
 }
 
 fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
@@ -238,14 +370,9 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         let context = || format!("seed {seed}, step {step}: {op:?}");
         events.clear();
         let expected = match op {
-            Op::Place {
-                order_id,
-                side,
-                price_tick,
-                qty,
-            } => {
-                engine.process_order(order_id, side, price_tick, qty, &mut events);
-                model.place(order_id, side, price_tick, qty)
+            Op::Place(order) => {
+                engine.submit_order(order, &mut events);
+                model.place(order)
             }
             Op::Cancel { order_id } => {
                 let found = engine.cancel_order(order_id, &mut events);
@@ -253,6 +380,23 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
                 assert_eq!(found, expected_found, "{}", context());
                 coverage.cancels_found += usize::from(found);
                 expected
+            }
+            Op::Reduce {
+                order_id,
+                reduce_by,
+            } => {
+                let found = engine.reduce_order(order_id, reduce_by, &mut events);
+                let (expected_found, expected) = model.reduce(order_id, reduce_by);
+                assert_eq!(found, expected_found, "{}", context());
+                expected
+            }
+            Op::CancelAccount { account } => {
+                engine.cancel_account(account, &mut events);
+                model.mass_cancel(Some(account))
+            }
+            Op::CancelAll => {
+                engine.cancel_all(&mut events);
+                model.mass_cancel(None)
             }
         };
 
@@ -282,14 +426,16 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         }
 
         let taker_id = match op {
-            Op::Place { order_id, .. } | Op::Cancel { order_id } => order_id,
+            Op::Place(order) => Some(order.order_id),
+            Op::Cancel { order_id } | Op::Reduce { order_id, .. } => Some(order_id),
+            Op::CancelAccount { .. } | Op::CancelAll => None,
         };
         // The order this request named, and every maker it touched.
         let touched = events.iter().filter_map(|e| match e {
             Event::Trade { maker_order_id, .. } => Some(*maker_order_id),
             _ => None,
         });
-        for order_id in std::iter::once(taker_id).chain(touched) {
+        for order_id in taker_id.into_iter().chain(touched) {
             assert_eq!(
                 engine.resting_order(order_id),
                 model.resting_order(order_id),
@@ -313,9 +459,30 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         }
         coverage.maker_partial_fills += events
             .iter()
-            .filter(|e| matches!(e, Event::OrderPartiallyFilled { order_id, .. } if *order_id != taker_id))
+            .filter(|e| matches!(e, Event::OrderPartiallyFilled { order_id, .. } if Some(*order_id) != taker_id))
             .count();
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
+        coverage.expired_remainders +=
+            usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        if let Some(Event::MassCancelled {
+            cancelled_orders, ..
+        }) = events.last()
+        {
+            coverage.mass_cancelled_orders += cancelled_orders;
+        }
+        coverage.self_trades_prevented += events
+            .iter()
+            .filter(|e| matches!(e, Event::SelfTradePrevented { .. }))
+            .count();
+        coverage.reductions +=
+            usize::from(matches!(events.as_slice(), [Event::OrderReduced { .. }]));
+        coverage.post_only_rejections += usize::from(matches!(
+            events.as_slice(),
+            [Event::OrderRejected {
+                reason: RejectReason::PostOnlyWouldTrade,
+                ..
+            }]
+        ));
     }
 }
 
@@ -327,6 +494,17 @@ fn assert_all_paths_hit(coverage: &Coverage) {
     assert!(
         coverage.calls_beyond_batch_capacity > 0,
         "no call produced more than {MAX_EVENTS_PER_CALL} events"
+    );
+    assert!(coverage.expired_remainders > 0, "no expired remainders");
+    assert!(coverage.post_only_rejections > 0, "no post-only rejections");
+    assert!(coverage.reductions > 0, "no reductions");
+    assert!(
+        coverage.self_trades_prevented > 0,
+        "no self-trades prevented"
+    );
+    assert!(
+        coverage.mass_cancelled_orders > 0,
+        "no orders cancelled by a mass cancel"
     );
 }
 
