@@ -85,6 +85,7 @@ pub struct Order {
     pub next_idx: u32,        // next order in the same price queue (towards the tail)
     pub prev_idx: u32,        // previous order in the same price queue (towards the head)
     pub in_use: bool,         // is this slot currently holding a live order?
+    pub account: u32,         // who owns the order
 }
 ```
 
@@ -93,12 +94,12 @@ pub struct Order {
 ta được:
 
 ```text
- byte  0         8        16        24   28   32        36        40   41     48
-       +---------+---------+---------+----+----+--------+--------+----+------+
-       |order_id |remaining|sequence |tick|side|next_idx|prev_idx|in_ |      |
-       |  u64    | _qty u64|  u64    |u32 | u8 |  u32   |  u32   |use |      |
-       +---------+---------+---------+----+----+--------+--------+----+------+
-                                            ^^^ 3 byte padding              ^^^ 7 byte padding
+ byte  0         8        16        24   28   32        36        40   41   44        48
+       +---------+---------+---------+----+----+--------+--------+----+----+---------+
+       |order_id |remaining|sequence |tick|side|next_idx|prev_idx|in_ |    | account |
+       |  u64    | _qty u64|  u64    |u32 | u8 |  u32   |  u32   |use |    |   u32   |
+       +---------+---------+---------+----+----+--------+--------+----+----+---------+
+                                            ^^^ 3 byte padding          ^^^ 3 byte padding
        tổng size_of::<Order>() = 48 byte
 ```
 
@@ -109,19 +110,27 @@ hết cho 8.
 - **3 byte sau `side`.** `side` chiếm một byte, ở offset 28, nên byte trống kế
   tiếp là 29. `next_idx` là một `u32` và phải bắt đầu ở địa chỉ chia hết cho 4,
   nên trình biên dịch bỏ qua các byte từ 29 đến 31 và đặt nó ở 32.
-- **7 byte ở cuối.** Các trường kết thúc ở byte 41 (`in_use` nằm ở 40). Nhưng
-  `Order` chứa các `u64`, nên cả struct phải được căn lề 8 byte, và kích thước
-  của nó được làm tròn lên bội số của 8: 48. Nhờ vậy, trong một mảng các lệnh,
-  mọi phần tử (và mọi `u64` bên trong nó) cũng đều bắt đầu ở địa chỉ được căn
-  lề đúng.
+- **3 byte sau `in_use`.** Cũng y như vậy: `in_use` chiếm một byte, ở 40, và
+  `account` phải bắt đầu ở địa chỉ chia hết cho 4, nên nó được đặt ở 44 và kết
+  thúc đúng ở 48. Đó cũng là một bội số của 8, đúng như yêu cầu: `Order` chứa
+  các `u64`, nên cả struct được căn lề 8 byte và kích thước của nó được làm tròn
+  lên bội số của 8. Nhờ vậy, trong một mảng các lệnh, mọi phần tử (và mọi `u64`
+  bên trong nó) cũng đều bắt đầu ở địa chỉ được căn lề đúng.
+
+Trường `account` được thêm vào sau cùng, và nó chẳng tốn thêm gì: trước khi có
+nó, struct cũng kết thúc ở byte 41 và được làm tròn lên 48, với 7 byte padding ở
+cuối. `account` chuyển vào nằm trong chính những byte đó. Một bài test
+(`the_account_fits_in_existing_padding` trong `pool.rs`) ghim cố định kích
+thước, nên một trường nào đó làm struct phình to ra sẽ không thể lọt vào mà
+không ai hay.
 
 Vậy tại sao lại đòi dùng `repr(C)`? Nếu không có nó, Rust dùng bố cục mặc định
-và được tự do **sắp xếp lại thứ tự các trường** để giảm padding; với struct này,
-nó tự chọn một bố cục 40 byte. `repr(C)` bỏ đi 8 byte đó để đổi lấy một bố cục
-cố định và dễ đoán: hình vẽ phía trên được bảo đảm, chứ không phải một chi tiết
-của trình biên dịch có thể thay đổi, nhờ vậy ta vẽ ra được, đo được và dạy
-được. Cả hai lựa chọn đều hợp lý; các thí nghiệm trong ghi chú bên dưới sẽ so
-sánh chúng.
+và được tự do **sắp xếp lại thứ tự các trường** để giảm padding. Ở đây điều đó
+chẳng được lợi gì: tổng các trường là 42 byte, vẫn được làm tròn lên 48. (Trước
+khi có `account`, bố cục mặc định đạt 40 byte trong khi `repr(C)` cần 48.)
+`repr(C)` mang lại một bố cục cố định và dễ đoán: hình vẽ phía trên được bảo
+đảm, chứ không phải một chi tiết của trình biên dịch có thể thay đổi, nhờ vậy ta
+vẽ ra được, đo được và dạy được.
 
 > [!NOTE]
 > Chú thích trong mã nguồn nói rằng lệnh có kích thước "sized to fit within a
@@ -130,9 +139,9 @@ sánh chúng.
 > nhau, nhiều lệnh sẽ **nằm vắt ngang hai cache line** (nếu mảng bắt đầu đúng ở
 > ranh giới một line, lệnh số 1 chiếm các byte 48 đến 95, vượt qua ranh giới ở
 > byte 64). [Chương 11](11-limitations-and-exercises.md) có liệt kê hai thí
-> nghiệm dễ làm: sắp xếp lại các trường (hoặc bỏ `repr(C)` và để trình biên dịch
-> tự làm) để thu bản ghi xuống 40 byte, hoặc căn lề nó theo 64 byte để mỗi lệnh
-> sở hữu đúng một cache line.
+> nghiệm: bỏ trường `sequence`, vốn không có chỗ nào đọc tới, để thu bản ghi
+> xuống 40 byte, hoặc căn lề nó theo 64 byte để mỗi lệnh sở hữu đúng một cache
+> line.
 
 ## 3.4 Ý tưởng 2: free list (ngăn xếp các ô trống)
 
@@ -287,6 +296,11 @@ Khi một maker được khớp một phần, nó vẫn ở đầu hàng. Chỉ 
 Thứ tự trong hàng đợi (và do đó cả ưu tiên về thời gian của maker) không hề bị
 đụng tới. Một lệnh đã khớp một phần **giữ nguyên vị trí** ở đầu hàng.
 
+`Engine::reduce_order` dùng chính thao tác này khi một nhà giao dịch giảm số
+lượng của một lệnh đang nằm chờ (chương 6). Lệnh đó có thể nằm ở bất cứ đâu
+trong hàng đợi, không chỉ ở đầu hàng, và nó cũng giữ nguyên vị trí: `reduce_qty`
+không bao giờ đụng tới các liên kết.
+
 ## 3.6 Các bất biến (những điều luôn phải đúng)
 
 Đây là các quy tắc mà phần còn lại của engine dựa vào. Nếu một quy tắc bị phá
@@ -295,7 +309,7 @@ vỡ, sổ lệnh đã bị hỏng.
 | # | Bất biến | Được duy trì bởi |
 |---|---|---|
 | 1 | `level.head == NIL` ⇔ `level.tail == NIL` ⇔ `level.count == 0` ⇔ `level.total_qty == 0` | `push_back`, `remove` |
-| 2 | `level.total_qty` = tổng `remaining_qty` của mọi lệnh trong hàng đợi. (Vế "`total_qty == 0` ⇔ rỗng" của bất biến 1 còn dựa vào việc engine không bao giờ để lệnh có số lượng bằng 0 nằm chờ trong sổ: `process_order` từ chối `qty == 0`; bản thân `PriceLevel` không kiểm tra.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
+| 2 | `level.total_qty` = tổng `remaining_qty` của mọi lệnh trong hàng đợi. (Vế "`total_qty == 0` ⇔ rỗng" của bất biến 1 còn dựa vào việc engine không bao giờ để lệnh có số lượng bằng 0 nằm chờ trong sổ: `submit_order` từ chối `qty == 0`, và `reduce_order` hủy lệnh thay vì giảm nó về 0; bản thân `PriceLevel` không kiểm tra.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
 | 3 | Đi theo `head -> next_idx -> ...` sẽ thăm đúng `count` lệnh và kết thúc ở `tail` | `push_back`, `remove` |
 | 4 | `a.next_idx == b` ⇔ `b.prev_idx == a` | `push_back`, `remove` |
 | 5 | Một ô nằm trong free stack ⇔ `in_use == false` | `allocate`, `free` |
