@@ -23,8 +23,9 @@ câu hỏi đó thật **nhanh** và thật **ổn định**.
 
 ## 1.2 Lệnh
 
-**Lệnh** (order) là chỉ thị của một nhà giao dịch. Engine này chỉ hiểu một loại
-lệnh: **lệnh giới hạn** (limit order). Một lệnh giới hạn gồm bốn thông tin:
+**Lệnh** (order) là chỉ thị của một nhà giao dịch. Loại cơ bản nhất là **lệnh
+giới hạn** (limit order); các loại lệnh khác mà engine này hiểu đều là biến thể
+của nó (1.9). Một lệnh giới hạn gồm bốn thông tin:
 
 | Trường     | Ý nghĩa                                                        | Trong code                  |
 |------------|----------------------------------------------------------------|-----------------------------|
@@ -32,6 +33,7 @@ lệnh: **lệnh giới hạn** (limit order). Một lệnh giới hạn gồm b
 | `price`    | Mức giá *tệ nhất* mà nhà giao dịch chấp nhận.                  | `price_tick: u32`           |
 | `qty`      | Số lượng đơn vị (cổ phiếu, lô, hợp đồng...).                   | `qty: u64`                  |
 | `order_id` | Một nhãn duy nhất để gọi tên lệnh (ví dụ khi cần hủy).         | `order_id: u64`             |
+| `account`  | Ai đã đặt lệnh: một nhà giao dịch, một công ty, hay bất kỳ đơn vị nào mà bên gọi theo dõi. | `account: u32`              |
 
 "Duy nhất" ở đây nghĩa là *duy nhất trong số các lệnh còn nằm trong sổ*. Engine
 từ chối lệnh mới nếu id của nó trùng với một lệnh đang chờ. Nhưng khi một lệnh đã
@@ -154,6 +156,30 @@ nếu đó là lệnh cuối cùng ở mức giá ấy thì phải xóa luôn m�
 việc này trong O(1) là một trong những thách thức thiết kế chính (xem
 [chương 3 đến 5](03-order-pool.md)).
 
+Nhà giao dịch cũng có thể **giảm** số lượng của một lệnh đang chờ. Lệnh vẫn giữ
+nguyên chỗ của nó trong hàng đợi: một lệnh nhỏ đi không bao giờ vượt lên trước
+ai cả, nên để nó ở lại là công bằng. Tăng số lượng, hay đổi giá, thì sẽ không
+công bằng với các lệnh xếp hàng phía sau, nên muốn làm vậy nhà giao dịch phải hủy
+lệnh rồi gửi một lệnh mới, và lệnh mới này xếp vào cuối hàng đợi.
+
+Đôi khi mọi lệnh của một nhà giao dịch phải được rút đi cùng lúc: kết nối của họ
+bị đứt (khi đó nhiều sàn "hủy lệnh khi mất kết nối", *cancel on disconnect*),
+hoặc một hệ thống quản lý rủi ro quyết định ngắt hẳn. **Hủy hàng loạt** (mass
+cancel) làm việc đó cho một tài khoản, hoặc cho cả sổ lệnh vào cuối phiên hay khi
+giao dịch bị tạm dừng.
+
+### Giao dịch với chính mình
+
+Một nhà giao dịch lớn thường có cả lệnh mua lẫn lệnh bán trong sổ cùng lúc, đến
+từ các chiến lược khác nhau. Nếu một lệnh mua của họ gặp một lệnh bán của chính
+họ, một "giao dịch" được ghi nhận dù chẳng có gì chuyển từ chủ này sang chủ khác,
+nhưng phần còn lại của thị trường lại coi đó là hoạt động thật. Cố ý làm vậy được
+gọi là **giao dịch giả** (wash trading), và đó là hành vi thao túng thị trường bất
+hợp pháp. Vì thế các sàn cung cấp cơ chế **chống tự giao dịch** (self-trade
+prevention): khi một lệnh đến sắp giao dịch với một lệnh đang chờ của cùng tài
+khoản, giao dịch đó bị chặn, và nhà giao dịch chọn điều gì xảy ra thay vào đó:
+hủy lệnh đang chờ, hủy lệnh vừa đến, hoặc hủy cả hai.
+
 ## 1.8 Tick: giá là những số nguyên nhỏ
 
 Giá thật trông như `101.25`. Số dấu phẩy động không biểu diễn chính xác được
@@ -182,12 +208,33 @@ kế.
 
 | Có hỗ trợ                                              | Chưa hỗ trợ                                            |
 |--------------------------------------------------------|--------------------------------------------------------|
-| Lệnh giới hạn, mua và bán                              | Lệnh thị trường (market), lệnh dừng (stop)             |
-| Khớp một phần và khớp đủ                               | Các biến thể thời hạn hiệu lực (IOC, FOK, lệnh trong ngày) |
-| Cho phần chưa khớp nằm chờ trong sổ                    | Sửa / thay thế lệnh (hủy rồi đặt lệnh mới là được)     |
-| Hủy theo `order_id`                                    | Chống tự giao dịch với chính mình, giới hạn theo tài khoản |
+| Lệnh giới hạn, immediate-or-cancel, thị trường (market) và post-only | Lệnh dừng (stop), fill-or-kill, lệnh trong ngày |
+| Khớp một phần và khớp đủ                               | Lệnh tảng băng (iceberg, có phần số lượng ẩn)          |
+| Cho phần chưa khớp nằm chờ trong sổ                    | Tăng số lượng hoặc đổi giá ngay tại chỗ (hủy rồi đặt lệnh mới là được) |
+| Hủy theo `order_id`; giảm số lượng mà vẫn giữ ưu tiên  | Giới hạn theo tài khoản (vị thế, số lệnh đang mở)      |
+| Tài khoản, chống tự giao dịch, hủy hàng loạt           | Phiên giao dịch và tạm dừng giao dịch (cho việc này chỉ có `cancel_all`) |
 | Ưu tiên giá, rồi đến thời gian                         | Nhiều mã giao dịch trong một `Engine` (mỗi mã một engine) |
-| Truy vấn độ sâu (`depth_at`, `depth_snapshot`)         | Phiên đấu giá, cầu dao ngắt thị trường, phí            |
+| Truy vấn độ sâu và tra cứu lệnh                        | Phiên đấu giá, cầu dao ngắt thị trường, phí            |
+
+### Các loại lệnh
+
+Mọi loại lệnh đều giao dịch theo cùng một cách: giá tốt nhất trước, lệnh cũ nhất
+trước. Chúng khác nhau ở chỗ lệnh có được phép giao dịch hay không, và ở chuyện
+gì xảy ra với phần số lượng không giao dịch được ngay:
+
+| Loại | Giao dịch khi vừa đến | Số lượng còn dư | Trong code |
+|---|---|---|---|
+| **Giới hạn** (limit) | ở giá của nó hoặc tốt hơn | nằm chờ trong sổ | `OrderType::Limit` |
+| **Immediate-or-cancel** (IOC) | ở giá của nó hoặc tốt hơn | hết hạn, không bao giờ nằm chờ | `OrderType::ImmediateOrCancel` |
+| **Thị trường** (market) | ở bất kỳ giá nào | hết hạn, không bao giờ nằm chờ | `OrderType::Market` |
+| **Post-only** | không bao giờ: bị từ chối nếu sắp giao dịch | nằm chờ trong sổ | `OrderType::PostOnly` |
+
+Lệnh **thị trường** nói rằng "mua 10 ngay, giá bao nhiêu cũng được". Nó không có
+giá của riêng mình, nên có thể quét qua nhiều mức giá; đó là lý do các sàn thật
+bảo vệ nó bằng các dải giá (price band), việc mà engine này để lại cho bên gọi.
+Lệnh **post-only** dành cho các nhà tạo lập thị trường (market maker), những người
+muốn chắc chắn rằng họ chỉ luôn *thêm* lệnh vào sổ (và thường được hưởng phí thấp
+hơn nhờ vậy): nếu lệnh sắp giao dịch ngay khi vừa đến, nó bị từ chối.
 
 ### Lệnh sai thì sao?
 
@@ -200,6 +247,7 @@ Một số lệnh bị từ chối trước khi chạm được vào sổ. Engin
 | id là `u64::MAX` (dành riêng cho nội bộ, xem [chương 5](05-hash-map.md))          | `ReservedOrderId`    |
 | tick từ 4096 trở lên                                                              | `PriceOutOfRange`    |
 | cùng id với một lệnh vẫn đang chờ                                                 | `DuplicateOrderId`   |
+| kiểu post-only, và một mức giá sẽ giao dịch ngay                                  | `PostOnlyWouldTrade` |
 
 Một lệnh cũng có thể được chấp nhận và giao dịch bình thường, nhưng rồi **không
 còn chỗ trong sổ** để phần dư nằm chờ. Lúc đó nó bị từ chối với lý do
@@ -300,6 +348,11 @@ Sự kiện là cách engine nói chuyện với thế giới bên ngoài; xem
 | Best bid / ask  | Bid cao nhất / ask thấp nhất, là các mức giá hấp dẫn nhất ở mỗi phía     |
 | Spread          | Ask tốt nhất trừ bid tốt nhất                                            |
 | Lệnh giới hạn   | "Giao dịch ở mức giá này hoặc tốt hơn"                                   |
+| Lệnh thị trường | "Giao dịch ngay, ở bất kỳ giá nào"; phần không giao dịch được ngay sẽ hết hạn |
+| IOC             | Immediate-or-cancel: một lệnh giới hạn có phần dư hết hạn thay vì nằm chờ |
+| Post-only       | Một lệnh giới hạn bị từ chối nếu nó sẽ giao dịch ngay khi vừa đến        |
+| Tài khoản (account) | Ai đã đặt một lệnh; chống tự giao dịch và hủy hàng loạt dựa vào nó   |
+| Tự giao dịch (self-trade) | Giao dịch giữa hai lệnh của cùng một tài khoản; có thể được ngăn chặn |
 | Marketable      | Có thể giao dịch ngay với phía đối diện                                  |
 | Maker           | Lệnh đang chờ trong một giao dịch                                        |
 | Taker           | Lệnh vừa đến trong một giao dịch                                         |
