@@ -51,11 +51,10 @@ The header identifies the file and its format:
 | Offset | Size | Field |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
-| 8 | 4 | format version (`4`; versions `1` to `3` are still read) |
+| 8 | 4 | format version (`5`; versions `1` to `4` are still read) |
 | 12 | 4 | record size in bytes (`40`) |
 | 16 | 8 | engine capacity the log was written for (`0` = unknown) |
 | 24 | 8 | engine tick count (`0` = the default 4096, which every older log used) |
-| 24 | 8 | reserved, zero |
 
 Each record describes one request:
 
