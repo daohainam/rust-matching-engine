@@ -39,17 +39,19 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | Maker | Lệnh đang chờ trong một giao dịch. Nó đã nằm trong sổ từ trước. | [1](01-order-book-basics.md) |
 | Market data (dữ liệu thị trường) | Luồng dữ liệu công khai về các giao dịch và thay đổi của sổ lệnh mà sàn phát ra. | [2](02-architecture.md) |
 | Mass cancel (hủy hàng loạt) | Hủy mọi lệnh đang chờ của một tài khoản (ví dụ khi kết nối của nó bị ngắt: *cancel on disconnect*, hủy khi mất kết nối), hoặc mọi lệnh trong sổ (`cancel_account`, `cancel_all`). | [1](01-order-book-basics.md) |
-| Market order (lệnh thị trường) | Lệnh không có giá riêng: nó giao dịch ở bất cứ giá nào sổ lệnh đang chào, và phần dư hết hạn. Các sàn thật giới hạn mức nó được phép quét xa đến đâu (một dải giá, *price band*); engine này thì không (bài tập ở chương 11). | [1](01-order-book-basics.md) |
+| Market order (lệnh thị trường) | Lệnh không có giá riêng: nó giao dịch ở bất cứ giá nào sổ lệnh đang chào, và phần dư hết hạn. Các sàn thật giới hạn mức nó được phép quét xa đến đâu bằng một biên độ giá (price band), và engine này cũng vậy khi có đặt biên độ. | [1](01-order-book-basics.md) |
 | Matching engine (engine khớp lệnh) | Thành phần ghép lệnh mua với lệnh bán và quyết định giá giao dịch. Chính là toàn bộ repo này. | [1](01-order-book-basics.md) |
+| Pre-trade risk check / fat finger (kiểm tra rủi ro trước giao dịch / lỗi bấm nhầm) | Một bước kiểm tra mà lệnh phải vượt qua trước khi được phép giao dịch, để chặn những sai sót như gõ nhầm số lượng hay giá (một *lỗi bấm nhầm*, fat finger). Ở đây: một số lượng lệnh tối đa và một biên độ giá (`RiskLimits`). | [1](01-order-book-basics.md) |
 | Post-only (lệnh chỉ đặt chờ) | Lệnh giới hạn không được phép giao dịch khi vừa đến: nếu giá của nó chạm tới phía đối diện, nó bị từ chối thay vì khớp. Các nhà tạo lập thị trường (market maker) dùng nó để chắc chắn rằng họ chỉ bổ sung thanh khoản. | [1](01-order-book-basics.md) |
 | Price level (mức giá) | Tất cả các lệnh đang chờ ở một mức giá trên một phía của sổ, được giữ thành một hàng đợi FIFO. | [1](01-order-book-basics.md) |
+| Price band (biên độ giá) | Lệnh được phép vươn xa đến đâu so với giá tốt nhất phía đối diện; xa hơn thì bị từ chối, còn lệnh thị trường thì dừng lại ở mép biên độ. | [1](01-order-book-basics.md) |
 | Price-time priority (ưu tiên giá-thời gian) | Quy tắc khớp lệnh: giá tốt hơn được khớp trước; cùng giá thì lệnh đến sớm hơn được khớp trước. | [1](01-order-book-basics.md) |
 | Resting order (lệnh đang chờ) | Lệnh nằm trong sổ vì khi đến, nó không thể giao dịch ngay. | [1](01-order-book-basics.md) |
 | Self-trade prevention (chống tự giao dịch) | Quy tắc ngăn lệnh mua của một nhà giao dịch khớp với chính lệnh bán của họ. Lệnh đến chọn điều gì xảy ra thay vào đó: hủy lệnh đang chờ, hủy lệnh đến, hoặc hủy cả hai (`SelfTradePrevention`). | [1](01-order-book-basics.md) |
 | Spread | Ask tốt nhất trừ bid tốt nhất. | [1](01-order-book-basics.md) |
 | Sweep (quét qua nhiều mức giá) | Một taker giao dịch xuyên qua nhiều mức giá liên tiếp. | [6](06-matching-algorithm.md) |
 | Taker | Lệnh vừa đến trong một giao dịch. Nó "lấy đi" thanh khoản mà một maker để lại trong sổ. | [1](01-order-book-basics.md) |
-| Tick (bước giá) | Bước giá nhỏ nhất. Engine này chỉ làm việc với tick nguyên `0..=4095`; việc đổi sang giá thật là trách nhiệm của bên gọi. | [1](01-order-book-basics.md) |
+| Tick (bước giá) | Bước giá nhỏ nhất. Engine này chỉ làm việc với tick nguyên, mặc định là `0..=4095` và tối đa 2^24 cho mỗi engine (`Engine::with_ticks`); việc đổi sang giá thật là trách nhiệm của bên gọi. | [1](01-order-book-basics.md) |
 | Wash trade (giao dịch giả) | Giao dịch giữa hai lệnh của cùng một chủ sở hữu. Nó không làm thay đổi gì, nhưng trong mắt thị trường lại trông như hoạt động thật; nếu cố ý làm thì đó là hành vi thao túng bất hợp pháp. Xem chống tự giao dịch (self-trade prevention). | [1](01-order-book-basics.md) |
 
 ## Cấu trúc dữ liệu và thuật toán
@@ -62,7 +64,7 @@ Chuyển nhanh đến: [Giao dịch](#giao-dịch) · [Cấu trúc dữ liệu v
 | Backward-shift deletion (xóa bằng cách dịch lùi) | Cách xóa khỏi bảng địa chỉ mở mà không cần tombstone: các phần tử đứng sau chỗ trống được dịch lùi để lấp chỗ đó, nếu việc đó vẫn giữ cho chúng tìm thấy được. | [5](05-hash-map.md) |
 | Big-O (O(1), O(n)) | Khối lượng công việc tăng thế nào theo kích thước đầu vào. O(1) nghĩa là "công việc không đổi dù sổ lệnh lớn đến đâu"; O(n) nghĩa là "tỉ lệ với n". | [1](01-order-book-basics.md) |
 | Bit-scan (quét bit) | Lệnh CPU tìm bit được đặt thấp nhất hoặc cao nhất trong một word. Rust cung cấp nó qua `trailing_zeros` / `leading_zeros`. | [4](04-price-ladder-bitset.md) |
-| Bitset | Một mảng bit, mỗi phần tử một bit, ghi lại có/không cho từng phần tử. Ở đây: mỗi tick một bit, "có lệnh nào đang chờ ở mức giá này không?". | [4](04-price-ladder-bitset.md) |
+| Bitset | Một mảng bit, mỗi phần tử một bit, ghi lại có/không cho từng phần tử. Ở đây: mỗi tick một bit, "có lệnh nào đang chờ ở mức giá này không?", với các tầng tóm tắt nằm bên trên (một bitset *nhiều tầng*, hierarchical bitset). | [4](04-price-ladder-bitset.md) |
 | Deterministic (tất định) | Cùng đầu vào thì luôn cùng đầu ra. Không đồng hồ, số ngẫu nhiên hay thời điểm chạy của luồng nào có thể làm đổi kết quả. | [2](02-architecture.md) |
 | FIFO | *First in, first out* (vào trước, ra trước): hàng đợi mà phần tử cũ nhất rời đi trước. Mỗi mức giá là một hàng đợi FIFO. | [3](03-order-pool.md) |
 | Free list / free stack (danh sách / ngăn xếp ô trống) | Danh sách các ô của arena hiện không dùng. Ở đây nó là một ngăn xếp, nên ô vừa được giải phóng gần nhất sẽ được dùng lại trước. | [3](03-order-pool.md) |
