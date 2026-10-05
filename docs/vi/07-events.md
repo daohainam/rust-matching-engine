@@ -24,12 +24,14 @@ Nhờ vậy engine là một máy trạng thái (state machine) thuần túy và
 
 ```rust
 pub enum Event {
-    OrderAccepted        { order_id: u64 },
-    Trade                { maker_order_id: u64, taker_order_id: u64, price_tick: u32, qty: u64 },
+    OrderAccepted        { order_id: u64, side: Side, price_tick: u32, qty: u64 },
+    Trade                { trade_id: u64, maker_order_id: u64, taker_order_id: u64,
+                           taker_side: Side, price_tick: u32, qty: u64 },
     OrderPartiallyFilled { order_id: u64, remaining_qty: u64 },
     OrderFilled          { order_id: u64 },
-    OrderCancelled       { order_id: u64 },
+    OrderCancelled       { order_id: u64, side: Side, price_tick: u32, cancelled_qty: u64 },
     OrderRejected        { order_id: u64, reason: RejectReason },
+    CancelRejected       { order_id: u64 },
 }
 
 pub enum RejectReason {
@@ -46,18 +48,18 @@ pub enum RejectReason {
 
 | Sự kiện | Được phát ra khi | Nói về ai |
 |---|---|---|
-| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. | lệnh vừa đến |
-| `Trade` | Hai lệnh khớp với nhau. | cả maker **và** taker, ở giá của maker |
+| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện nhắc lại phía, giá giới hạn và số lượng của lệnh. | lệnh vừa đến |
+| `Trade` | Hai lệnh khớp với nhau. `taker_side` là phía của bên chủ động (aggressor); `trade_id` đánh số các giao dịch 1, 2, 3, ... | cả maker **và** taker, ở giá của maker |
 | `OrderPartiallyFilled` | Một lệnh đã giao dịch nhưng vẫn còn số lượng. | một maker (sau mỗi lần khớp một phần), hoặc taker (một lần, ở cuối) |
 | `OrderFilled` | Một lệnh không còn gì nữa. | một maker (khi nó bị khớp hết), hoặc taker |
-| `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu. | lệnh bị hủy |
+| `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu. Sự kiện cho biết lệnh đã nằm chờ ở đâu và bao nhiêu số lượng đã rời khỏi sổ. | lệnh bị hủy |
 | `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, hoặc không còn chỗ để nằm chờ. `reason` cho biết là lý do nào. | lệnh vừa đến |
+| `CancelRejected` | Một yêu cầu hủy không trỏ tới lệnh nào đang nằm chờ (lệnh chưa từng được chấp nhận, hoặc đã khớp hết, đã bị hủy hay bị từ chối). | id trong yêu cầu hủy |
 
 `Event` derive `Debug, Clone, Copy, PartialEq, Eq`, nên sao chép sự kiện rất rẻ
-và so sánh chúng trong test rất dễ. Một `Event` nặng 32 byte (biến thể lớn nhất là
-`Trade`, chứa `8 + 8 + 4 + 8 = 28` byte cộng với tag và padding). Thêm
-`RejectReason` vào `OrderRejected` không tốn thêm gì: `8 + 1` byte vẫn nằm vừa
-trong chỗ mà `Trade` vốn đã cần.
+và so sánh chúng trong test rất dễ. Một `Event` nặng 40 byte (biến thể lớn nhất là
+`Trade`, chứa `8 + 8 + 8 + 8 + 4 + 1 = 37` byte, cộng với tag, rồi làm tròn lên bội
+số của 8). Các biến thể khác đều nằm vừa trong chỗ mà `Trade` vốn đã cần.
 
 ## 7.2 Quy tắc về thứ tự
 
@@ -85,6 +87,29 @@ Những điểm cần nhớ:
   [mục 6.4](06-matching-algorithm.md#64-giai-đoạn-4-cho-phần-còn-lại-nằm-chờ-trong-sổ)).
 - Bản thân engine **không bao giờ làm rơi sự kiện**. Chỉ có sink có giới hạn, như
   `EventBatch`, mới có thể hết chỗ (mục 7.4).
+- Một lần gọi `cancel_order` phát ra **đúng một** sự kiện: `OrderCancelled` nếu
+  lệnh đang nằm chờ, `CancelRejected` nếu không. Kết quả `bool` của nó cũng cho
+  biết đúng điều đó, dành cho bên gọi chỉ muốn rẽ nhánh theo kết quả.
+
+### Theo dõi sổ lệnh chỉ bằng sự kiện
+
+Các sự kiện mang đủ thông tin để giữ một bản sao độ sâu của sổ lệnh mà không cần
+nhìn thấy các yêu cầu. Đó chính là việc mà một hệ thống phát dữ liệu thị trường
+hay một hệ thống quản lý rủi ro làm:
+
+| Sự kiện | Thay đổi trên bản sao |
+|---|---|
+| `OrderAccepted { side, price_tick, qty, .. }` | ghi nhớ các thông số này cho đến khi lần gọi kết thúc |
+| `Trade { taker_side, price_tick, qty, .. }` | mức giá của maker mất đi `qty`; mức đó nằm ở phía **đối diện** với `taker_side`, tại `price_tick` |
+| `OrderCancelled { side, price_tick, cancelled_qty, .. }` | mức giá đó mất đi `cancelled_qty` |
+| kết thúc một lần gọi `process_order` | trừ khi sự kiện cuối cùng của taker là `OrderFilled` hoặc `OrderRejected`, phần còn lại của nó (`qty` trừ đi các giao dịch của nó) giờ nằm chờ tại chính `price_tick` của nó |
+
+`trade_id` giúp xử lý các chỗ hổng và bản trùng lặp nói ở
+[mục 9.5](09-write-ahead-log.md#95-đọc-và-phát-lại): engine đánh số các giao dịch
+theo đúng thứ tự chúng xảy ra, và engine là tất định, nên phát lại cùng các yêu cầu
+đó sẽ gán ra đúng những id y hệt. Một bên tiêu thụ đã thấy giao dịch 41 có thể bỏ
+qua mọi giao dịch có id nhỏ hơn, còn một bước nhảy từ 41 lên 43 nghĩa là nó đã bỏ
+lỡ một giao dịch.
 
 ### Các chuỗi sự kiện mẫu
 
@@ -100,7 +125,7 @@ Các chuỗi này lấy thẳng từ unit test trong `engine.rs`.
 | Đầu vào không hợp lệ / trùng id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
 | Lệnh không nằm chờ được (arena đầy / tràn số) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (chưa có giao dịch nào) |
 | Hủy lệnh thành công | `Cancelled` |
-| Hủy một id không tồn tại | *(không có sự kiện nào; `bool` trả về là `false`)* |
+| Hủy một lệnh không nằm chờ | `CancelRejected` (và `bool` trả về là `false`) |
 
 ## 7.3 Trait `EventSink`
 
@@ -132,7 +157,10 @@ let mut engine = Engine::new(16);
 //    allocating once it has grown to fit the largest call.
 let mut events = Vec::new();
 engine.process_order(1, Side::Sell, 100, 5, &mut events);
-assert_eq!(events, [Event::OrderAccepted { order_id: 1 }]);
+assert_eq!(
+    events,
+    [Event::OrderAccepted { order_id: 1, side: Side::Sell, price_tick: 100, qty: 5 }]
+);
 
 // 2. A closure sees each event as it happens; this one counts trades.
 let mut trades = 0;
@@ -201,7 +229,7 @@ pub struct EventBatch {
 - `as_slice()`, `len()`, `is_empty()` và `IntoIterator for &EventBatch` giúp đọc
   dữ liệu một cách tiện lợi.
 
-**Kích thước** (đã đo): `64 × 32 + 8 + 8 = 2,064` byte.
+**Kích thước** (đã đo): `64 × 40 + 8 + 8 = 2,576` byte.
 
 Vậy vừa được bao nhiêu maker? Mỗi maker bị chạm tới tốn hai sự kiện (`Trade` cộng
 với `OrderFilled` hoặc `OrderPartiallyFilled` của maker), cộng thêm một
@@ -273,16 +301,24 @@ use matching_engine::{Engine, Event, Side};
 
 fn log_event(event: Event) {
     match event {
-        Event::OrderAccepted { order_id } => println!("accepted  #{order_id}"),
-        Event::Trade { maker_order_id, taker_order_id, price_tick, qty } => println!(
-            "trade     {qty} @ {price_tick} (maker #{maker_order_id}, taker #{taker_order_id})"
-        ),
+        Event::OrderAccepted { order_id, side, price_tick, qty } => {
+            println!("accepted  #{order_id}: {side:?} {qty} @ {price_tick}")
+        }
+        Event::Trade { trade_id, maker_order_id, taker_order_id, taker_side, price_tick, qty } => {
+            println!(
+                "trade {trade_id}   {qty} @ {price_tick}, {taker_side:?} aggressor \
+                 (maker #{maker_order_id}, taker #{taker_order_id})"
+            )
+        }
         Event::OrderPartiallyFilled { order_id, remaining_qty } => {
             println!("partial   #{order_id}, {remaining_qty} left")
         }
         Event::OrderFilled { order_id } => println!("filled    #{order_id}"),
-        Event::OrderCancelled { order_id } => println!("cancelled #{order_id}"),
+        Event::OrderCancelled { order_id, cancelled_qty, .. } => {
+            println!("cancelled #{order_id}, {cancelled_qty} removed")
+        }
         Event::OrderRejected { order_id, reason } => println!("rejected  #{order_id}: {reason:?}"),
+        Event::CancelRejected { order_id } => println!("cancel rejected: #{order_id} is not resting"),
     }
 }
 
@@ -305,8 +341,15 @@ engine.process_order(2, Side::Buy, 100, 4, &mut events);
 assert_eq!(
     events,
     [
-        Event::OrderAccepted { order_id: 2 },
-        Event::Trade { maker_order_id: 1, taker_order_id: 2, price_tick: 100, qty: 4 },
+        Event::OrderAccepted { order_id: 2, side: Side::Buy, price_tick: 100, qty: 4 },
+        Event::Trade {
+            trade_id: 1,
+            maker_order_id: 1,
+            taker_order_id: 2,
+            taker_side: Side::Buy,
+            price_tick: 100,
+            qty: 4,
+        },
         Event::OrderPartiallyFilled { order_id: 1, remaining_qty: 6 },
         Event::OrderFilled { order_id: 2 },
     ]
