@@ -65,7 +65,7 @@ sự kiện ([chương 7](docs/vi/07-events.md)).
 Thêm về API:
 
 ```rust
-use matching_engine::{Engine, Event, RejectReason, Side};
+use matching_engine::{Engine, Event, NewOrder, RejectReason, SelfTradePrevention, Side};
 
 let mut engine = Engine::new(10_000);
 let mut events: Vec<Event> = Vec::new();
@@ -80,9 +80,24 @@ assert_eq!(engine.best_ask(), None); // lowest resting sell tick
 assert_eq!(engine.depth_at(Side::Buy, 100), 10); // total quantity at one tick
 assert_eq!(engine.depth_snapshot(Side::Buy, 5), [(100, 10)]); // best levels first
 assert_eq!(engine.resting_order(1).map(|o| o.remaining_qty), Some(10)); // order status
+assert!(engine.reduce_order(1, 4, &mut events)); // 6 left, keeping its place in the queue
 assert!(engine.cancel_order(1, &mut events)); // true: the order was resting
 assert!(!engine.cancel_order(1, &mut events)); // false: it is already gone
-assert_eq!(events.last(), Some(&Event::CancelRejected { order_id: 1 })); // and says so
+assert!(matches!(events.last(), Some(Event::CancelRejected { order_id: 1, .. }))); // and says so
+
+// Besides limit orders: immediate-or-cancel, market and post-only orders.
+engine.submit_order(NewOrder::market(3, Side::Sell, 5), &mut events); // no bids left
+let expired = Event::OrderExpired { order_id: 3, expired_qty: 5 };
+assert_eq!(events.last(), Some(&expired)); // a market order never rests
+
+// Accounts: block trading with yourself, and cancel everything on disconnect.
+engine.submit_order(NewOrder::limit(4, Side::Sell, 110, 5).with_account(7), &mut events);
+let own_bid = NewOrder::limit(5, Side::Buy, 110, 5)
+    .with_account(7)
+    .with_self_trade_prevention(SelfTradePrevention::CancelIncoming);
+engine.submit_order(own_bid, &mut events); // would trade with its own ask: stopped
+assert!(matches!(events.last(), Some(Event::OrderExpired { order_id: 5, .. })));
+assert_eq!(engine.cancel_account(7, &mut events), 1); // the ask #4 goes
 ```
 
 Giá là **tick nguyên** trong khoảng `0..4096`; việc đổi qua lại giữa tick và giá
@@ -128,6 +143,7 @@ flowchart TB
 | Báo kết quả mà không cấp phát | Đổ sự kiện vào **`EventSink`** do bên gọi cung cấp | O(1) cho mỗi sự kiện | [7](docs/vi/07-events.md) |
 | Nạp lệnh cho engine từ một luồng khác | **Bộ đệm vòng SPSC** với hai handle `Producer` / `Consumer` riêng (Release/Acquire) | O(1), lock-free | [8](docs/vi/08-ring-buffer.md) |
 | Phục hồi sau sự cố | **WAL ánh xạ bộ nhớ** có checksum cho từng bản ghi + phát lại tất định | O(1) khấu hao cho mỗi lần ghi nối thêm | [9](docs/vi/09-write-ahead-log.md) |
+| Phục hồi mà không phải phát lại từ đầu | **Snapshot** của sổ lệnh trong một **checkpoint được ghi một cách nguyên tử**, rồi chỉ phát lại phần đuôi của log | O(sổ lệnh) cho mỗi checkpoint | [9.8](docs/vi/09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
 
 ## Lộ trình học
 
@@ -144,7 +160,7 @@ liên kết sang chương kế tiếp.
 | 6 | [Thuật toán khớp lệnh](docs/vi/06-matching-algorithm.md) | `process_order` và `cancel_order` từng dòng một, lưu đồ, một bản theo dõi trạng thái đầy đủ, các trường hợp biên |
 | 7 | [Sự kiện](docs/vi/07-events.md) | Ngữ nghĩa và thứ tự của sự kiện, trait `EventSink`, cách chọn sink, việc `EventBatch` cắt bớt sự kiện |
 | 8 | [Bộ đệm vòng](docs/vi/08-ring-buffer.md) | Hàng đợi SPSC, thứ tự bộ nhớ, false sharing, những gì hệ thống kiểu bắt buộc, phát hiện ngắt kết nối |
-| 9 | [Nhật ký ghi trước](docs/vi/09-write-ahead-log.md) | Vì sao cần ghi log, định dạng bản ghi, tệp ánh xạ bộ nhớ, an toàn khi sập máy và giới hạn của nó, cùng một chương trình hoàn chỉnh đã ghép nối |
+| 9 | [Nhật ký ghi trước](docs/vi/09-write-ahead-log.md) | Vì sao cần ghi log, định dạng bản ghi, tệp ánh xạ bộ nhớ, an toàn khi sập máy và giới hạn của nó, một chương trình hoàn chỉnh đã ghép nối, và checkpoint |
 | 10 | [Kiểm thử và hiệu năng](docs/vi/10-testing-and-performance.md) | Mỗi test chứng minh điều gì, kiểm thử đối chiếu, mẹo dùng counting allocator, CI, cách đọc kết quả benchmark |
 | 11 | [Giới hạn và bài tập](docs/vi/11-limitations-and-exercises.md) | Các điểm sắc cạnh đã biết, bài tập xếp theo độ khó, lần lại các bản sửa lỗi trong quá khứ từng commit một, tài liệu đọc thêm |
 
@@ -166,23 +182,26 @@ cũng có doc comment chi tiết (`cargo doc --open`).
 
 ```text
 src/
-  lib.rs         gốc của crate; re-export Engine, RestingOrder, Event, EventBatch, EventSink, RejectReason, Side
-  engine.rs      lõi khớp lệnh: process_order, cancel_order, tra cứu lệnh, các truy vấn độ sâu
+  lib.rs         gốc của crate; re-export Engine, NewOrder, OrderType, SelfTradePrevention, RestingOrder, Event, EventBatch, EventSink, RejectReason, CancelRejectReason, Side, Snapshot, SnapshotError, Checkpoint
+  engine.rs      lõi khớp lệnh: submit_order, giảm/hủy/hủy hàng loạt, chống tự giao dịch, tra cứu lệnh, các truy vấn độ sâu, snapshot/khôi phục
   pool.rs        arena chứa lệnh, free list, PriceLevel (hàng đợi FIFO intrusive)
   bitset.rs      thang giá bằng bitset hai tầng (bid / ask tốt nhất trong O(1))
   hashmap.rs     bảng băm địa chỉ mở có seed (order id -> ô trong arena)
   events.rs      enum Event, trait EventSink, sink có giới hạn EventBatch
   ringbuffer.rs  bộ đệm vòng SPSC lock-free với các handle Producer / Consumer
-  wal.rs         write-ahead log ánh xạ bộ nhớ, có checksum
+  wal.rs         write-ahead log ánh xạ bộ nhớ, có checksum và khóa cho bên ghi; phát lại
+  snapshot.rs    toàn bộ trạng thái của engine; các tệp checkpoint được ghi một cách nguyên tử
 tests/
   common/        hàm dùng chung: PRNG có seed, bộ sinh yêu cầu, tệp tạm
   model_check.rs kiểm thử đối chiếu với một sổ lệnh tham chiếu đơn giản
   wal_replay.rs  phát lại WAL tái tạo đúng mọi sự kiện
+  snapshot.rs    engine được khôi phục từ một snapshot chạy tiếp y hệt như bản gốc
   zero_alloc.rs  global allocator có đếm chứng minh không có cấp phát heap nào
   docs_sync.rs   chương 9 phải chứa examples/pipeline.rs nguyên văn
 examples/
   walkthrough.rs ví dụ minh họa của chương 1, in ra sự kiện và sổ lệnh
   pipeline.rs    bộ đệm vòng -> WAL -> engine -> phát lại, trong một chương trình
+  checkpoint.rs  phục hồi từ một checkpoint cộng với phần cuối của log
 benches/
   matching_engine_bench.rs   micro-benchmark bằng criterion
 docs/            các chương liệt kê ở trên, cùng glossary.md
@@ -198,8 +217,9 @@ docs/vi/         các chương đó bằng tiếng Việt (README.vi.md là READ
 | Số lệnh đang chờ | `order_capacity` truyền vào `Engine::new` | kích thước arena |
 | Số sự kiện mỗi lần gọi | không giới hạn với sink là `Vec` hoặc closure; `EventBatch` giữ 64 sự kiện và đếm phần còn lại | tùy bạn chọn `EventSink` nào |
 | Order id dành riêng | `u64::MAX` | giá trị đánh dấu "ô trống" của bảng băm |
-| Loại lệnh | chỉ lệnh giới hạn | phạm vi của dự án |
-| Phiên bản Rust | 1.88 trở lên | `rust-version` trong `Cargo.toml` |
+| Loại lệnh | lệnh giới hạn, immediate-or-cancel, lệnh thị trường, post-only | phạm vi của dự án |
+| Tài khoản | một `u32` cho mỗi lệnh, dùng cho chống tự giao dịch và hủy hàng loạt; không có giới hạn theo từng tài khoản | phạm vi của dự án |
+| Phiên bản Rust | 1.89 trở lên | `rust-version` trong `Cargo.toml` |
 
 Chi tiết, hệ quả và cách xử lý nằm ở
 [chương 11](docs/vi/11-limitations-and-exercises.md).
@@ -212,6 +232,7 @@ cargo test --test model_check   # the engine against a simple reference book
 cargo test --test zero_alloc    # verifies zero heap allocations on the hot path
 cargo run --example walkthrough # chapter 1's worked example, step by step
 cargo run --example pipeline    # the complete program from chapter 9
+cargo run --example checkpoint  # recovery from a checkpoint (chapter 9.8)
 cargo bench                     # criterion micro-benchmarks
 ```
 
