@@ -7,11 +7,10 @@ mod common;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use common::{watched_ticks, Op, OpGenerator};
-use matching_engine::engine::MAX_TICKS;
 use matching_engine::events::MAX_EVENTS_PER_CALL;
 use matching_engine::{
-    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder,
-    SelfTradePrevention, Side,
+    CancelRejectReason, Engine, Event, NewOrder, OrderType, RejectReason, RestingOrder, RiskLimits,
+    SelfTradePrevention, Side, DEFAULT_TICKS,
 };
 
 /// Resting orders at one price, oldest first: `(order_id, remaining_qty)`.
@@ -20,23 +19,27 @@ type Queue = VecDeque<(u64, u64)>;
 /// Price-time priority book written for obviousness, not speed.
 struct ReferenceBook {
     capacity: usize,
+    ticks: u32,
     bids: BTreeMap<u32, Queue>,
     asks: BTreeMap<u32, Queue>,
     live: HashMap<u64, (Side, u32)>,
     /// Account of every order that ever rested; a reused id overwrites it.
     accounts: HashMap<u64, u32>,
     trades: u64,
+    limits: RiskLimits,
 }
 
 impl ReferenceBook {
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, ticks: u32) -> Self {
         Self {
             capacity,
+            ticks,
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             live: HashMap::new(),
             accounts: HashMap::new(),
             trades: 0,
+            limits: RiskLimits::NONE,
         }
     }
 
@@ -50,19 +53,39 @@ impl ReferenceBook {
             qty,
             self_trade_prevention,
         } = order;
-        let price_tick = match (order_type, side) {
-            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
-            (OrderType::Market, Side::Sell) => 0,
+        let top = self.ticks - 1;
+        let price_tick = match (order_type, side, self.limits.price_band) {
+            (OrderType::Market, Side::Buy, Some(band)) => self
+                .best_ask()
+                .map_or(top, |ask| ask.saturating_add(band).min(top)),
+            (OrderType::Market, Side::Sell, Some(band)) => {
+                self.best_bid().map_or(0, |bid| bid.saturating_sub(band))
+            }
+            (OrderType::Market, Side::Buy, None) => top,
+            (OrderType::Market, Side::Sell, None) => 0,
             _ => price_tick,
+        };
+        let outside_band = match (self.limits.price_band, side) {
+            (Some(band), Side::Buy) => self
+                .best_ask()
+                .is_some_and(|ask| price_tick > ask.saturating_add(band)),
+            (Some(band), Side::Sell) => self
+                .best_bid()
+                .is_some_and(|bid| price_tick < bid.saturating_sub(band)),
+            (None, _) => false,
         };
         let invalid = if qty == 0 {
             Some(RejectReason::ZeroQuantity)
         } else if order_id == u64::MAX {
             Some(RejectReason::ReservedOrderId)
-        } else if price_tick as usize >= MAX_TICKS {
+        } else if price_tick >= self.ticks {
             Some(RejectReason::PriceOutOfRange)
         } else if self.live.contains_key(&order_id) {
             Some(RejectReason::DuplicateOrderId)
+        } else if qty > self.limits.max_order_qty {
+            Some(RejectReason::QuantityAboveLimit)
+        } else if outside_band {
+            Some(RejectReason::PriceOutsideBand)
         } else if order_type == OrderType::PostOnly
             && match side {
                 Side::Buy => self.best_ask().is_some_and(|ask| ask <= price_tick),
@@ -357,12 +380,13 @@ struct Coverage {
     reductions: usize,
     self_trades_prevented: usize,
     mass_cancelled_orders: u64,
+    risk_rejections: usize,
 }
 
-fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
-    let mut engine = Engine::new(capacity);
-    let mut model = ReferenceBook::new(capacity);
-    let mut generator = OpGenerator::new(seed);
+fn run(seed: u64, ops: usize, capacity: usize, ticks: u32, coverage: &mut Coverage) {
+    let mut engine = Engine::with_ticks(capacity, ticks as usize);
+    let mut model = ReferenceBook::new(capacity, ticks);
+    let mut generator = OpGenerator::with_ticks(seed, ticks);
     let mut events = Vec::new();
 
     for step in 0..ops {
@@ -398,13 +422,18 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
                 engine.cancel_all(&mut events);
                 model.mass_cancel(None)
             }
+            Op::SetRiskLimits(limits) => {
+                engine.set_risk_limits(limits);
+                model.limits = limits;
+                Vec::new()
+            }
         };
 
         assert_eq!(events, expected, "{}", context());
         assert_eq!(engine.best_bid(), model.best_bid(), "{}", context());
         assert_eq!(engine.best_ask(), model.best_ask(), "{}", context());
         assert_eq!(engine.live_order_count(), model.live.len(), "{}", context());
-        for tick in watched_ticks() {
+        for tick in watched_ticks(ticks) {
             for side in [Side::Buy, Side::Sell] {
                 assert_eq!(
                     engine.depth_at(side, tick),
@@ -428,7 +457,7 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         let taker_id = match op {
             Op::Place(order) => Some(order.order_id),
             Op::Cancel { order_id } | Op::Reduce { order_id, .. } => Some(order_id),
-            Op::CancelAccount { .. } | Op::CancelAll => None,
+            Op::CancelAccount { .. } | Op::CancelAll | Op::SetRiskLimits(_) => None,
         };
         // The order this request named, and every maker it touched.
         let touched = events.iter().filter_map(|e| match e {
@@ -464,6 +493,13 @@ fn run(seed: u64, ops: usize, capacity: usize, coverage: &mut Coverage) {
         coverage.calls_beyond_batch_capacity += usize::from(events.len() > MAX_EVENTS_PER_CALL);
         coverage.expired_remainders +=
             usize::from(matches!(events.last(), Some(Event::OrderExpired { .. })));
+        coverage.risk_rejections += usize::from(matches!(
+            events.as_slice(),
+            [Event::OrderRejected {
+                reason: RejectReason::QuantityAboveLimit | RejectReason::PriceOutsideBand,
+                ..
+            }]
+        ));
         if let Some(Event::MassCancelled {
             cancelled_orders, ..
         }) = events.last()
@@ -506,6 +542,7 @@ fn assert_all_paths_hit(coverage: &Coverage) {
         coverage.mass_cancelled_orders > 0,
         "no orders cancelled by a mass cancel"
     );
+    assert!(coverage.risk_rejections > 0, "no risk limit rejections");
 }
 
 #[test]
@@ -513,7 +550,7 @@ fn engine_matches_reference_book_when_capacity_is_tight() {
     // A 64-order arena fills constantly, so remainders are often rejected.
     let mut coverage = Coverage::default();
     for seed in 1..=4 {
-        run(seed, 20_000, 64, &mut coverage);
+        run(seed, 20_000, 64, DEFAULT_TICKS as u32, &mut coverage);
     }
     assert_all_paths_hit(&coverage);
 }
@@ -523,7 +560,18 @@ fn engine_matches_reference_book_with_ample_capacity() {
     // Deep books; remainders are rejected only when a level would overflow.
     let mut coverage = Coverage::default();
     for seed in 5..=8 {
-        run(seed, 20_000, 8_192, &mut coverage);
+        run(seed, 20_000, 8_192, DEFAULT_TICKS as u32, &mut coverage);
+    }
+    assert_all_paths_hit(&coverage);
+}
+
+#[test]
+fn engine_matches_reference_book_on_a_wide_ladder() {
+    // 300,000 ticks take four bitset levels; sweeps and oversized orders
+    // reach both ends of the ladder.
+    let mut coverage = Coverage::default();
+    for seed in 9..=10 {
+        run(seed, 20_000, 1_024, 300_000, &mut coverage);
     }
     assert_all_paths_hit(&coverage);
 }

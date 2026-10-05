@@ -70,11 +70,11 @@ Hãy nhìn các mũi tên: engine phụ thuộc vào `pool`, `bitset`, `hashmap`
 *bạn* nối quanh engine (chương 8 và 9 chỉ cách làm); `wal` biết đến engine, nhờ
 vậy nó có thể phát lại một log vào một engine.
 
-Crate tái xuất mười bốn tên mà hầu hết trường hợp sử dụng cần đến trong
+Crate tái xuất mười sáu tên mà hầu hết trường hợp sử dụng cần đến trong
 [`src/lib.rs`](../../src/lib.rs): `Engine`, `NewOrder`, `OrderType`,
-`SelfTradePrevention`, `RestingOrder`, `Event`, `EventSink`, `EventBatch`,
-`RejectReason`, `CancelRejectReason`, `Side`, `Snapshot`, `SnapshotError` và
-`Checkpoint`.
+`SelfTradePrevention`, `RiskLimits`, `RestingOrder`, `Event`, `EventSink`,
+`EventBatch`, `RejectReason`, `CancelRejectReason`, `Side`, `Snapshot`,
+`SnapshotError`, `Checkpoint`, và hằng số `DEFAULT_TICKS`.
 
 ## 2.3 Struct `Engine`, từng trường một
 
@@ -82,12 +82,13 @@ Crate tái xuất mười bốn tên mà hầu hết trường hợp sử dụng
 pub struct Engine {
     pool: OrderPool,              // every order lives here
     id_map: FlatHashMap,          // order_id -> index into pool
-    bid_bitset: TwoLevelBitset,   // which bid ticks are non-empty
-    ask_bitset: TwoLevelBitset,   // which ask ticks are non-empty
+    bid_bitset: TickBitset,       // which bid ticks are non-empty
+    ask_bitset: TickBitset,       // which ask ticks are non-empty
     bid_levels: Box<[PriceLevel]>,// bid_levels[tick] = FIFO queue of bids at that tick
     ask_levels: Box<[PriceLevel]>,// ask_levels[tick] = FIFO queue of asks at that tick
     sequence: u64,                // arrival counter; metadata only, never read by matching
     trades: u64,                  // trades so far; the last trade's trade_id
+    limits: RiskLimits,           // pre-trade checks every new order must pass
 }
 ```
 
@@ -98,9 +99,13 @@ Mỗi trường chỉ có đúng một trách nhiệm:
 | `pool`        | "Lệnh X nằm ở đâu, và ai đứng cạnh nó trong hàng đợi?"       | truy cập mảng theo chỉ số |
 | `id_map`      | "Ô arena nào đang giữ lệnh có id 12345?"                       | tra bảng băm, O(1) kỳ vọng |
 | `*_levels`    | "Những lệnh nào đang chờ ở tick giá T?"                        | `levels[T]`: một lần đọc mảng |
-| `*_bitset`    | "Mức giá không rỗng tốt nhất là mức nào?"                      | hai lần quét bit |
+| `*_bitset`    | "Mức giá không rỗng tốt nhất là mức nào?"                      | một lần quét bit cho mỗi tầng: hai lần với 4096 tick mặc định |
 | `sequence`    | "Engine đã nhận bao nhiêu lệnh?" (metadata phục vụ kiểm toán; thứ tự FIFO đến từ các liên kết trong hàng đợi chứ không phải từ con số này, xem [6.10](06-matching-algorithm.md#610-những-ghi-chú-thiết-kế-đáng-chú-ý)) | một phép cộng |
 | `trades`      | "Engine đã thực hiện bao nhiêu giao dịch?" Nó đánh số cho từng sự kiện `Trade` (`trade_id`), giống hệt nhau ở mọi lần phát lại. | một phép cộng cho mỗi giao dịch |
+| `limits`      | "Lệnh này có được phép giao dịch hay không?" Số lượng tối đa và biên độ giá (chương 6). | hai phép so sánh |
+
+Số tick giá không phải là một trường riêng: nó chính là độ dài của các mảng mức
+giá, được chọn trong `Engine::with_ticks` (4096 với `Engine::new`).
 
 ### Các mảnh ghép trỏ vào nhau như thế nào
 
@@ -235,7 +240,7 @@ từng lời giải đó bị thay thế.
 
 | Bài toán con | Lời giải trong sách giáo khoa | Vì sao chưa lý tưởng ở đây | Engine này làm gì |
 |---|---|---|---|
-| Giữ các giá được sắp xếp / tìm giá tốt nhất | `BTreeMap<Price, Level>` | O(log n), phải đi theo con trỏ qua các nút (pointer-chasing), cấp phát khi chèn | **Bitset hai tầng**: 2 lần quét bit, O(1), 520 byte |
+| Giữ các giá được sắp xếp / tìm giá tốt nhất | `BTreeMap<Price, Level>` | O(log n), phải đi theo con trỏ qua các nút (pointer-chasing), cấp phát khi chèn | **Bitset hai tầng** (nhiều tầng): một lần quét bit cho mỗi tầng, O(1); hai tầng và 520 byte cho 4096 tick |
 | Tìm hàng đợi của một mức giá | `HashMap<Price, Level>` | tốn công băm, cấp phát, đổi kích thước | **Mảng đánh chỉ số theo tick**: `levels[tick]` |
 | Hàng đợi FIFO các lệnh tại một mức giá | `VecDeque<Order>` hoặc `LinkedList<Order>` | `VecDeque` xóa phần tử ở giữa mất O(n); `LinkedList` cấp phát một nút cho mỗi lệnh | **Danh sách liên kết đôi intrusive** nằm trong arena: mọi thao tác đều O(1) |
 | Tìm lệnh theo id | `HashMap<u64, _>` (SipHash) | cấp phát, có thể đổi kích thước, hàm băm chậm hơn | **Bảng phẳng địa chỉ mở** (open addressing) với hàm băm số nguyên nhanh, cộng thêm seed ngẫu nhiên để chống các id bị cố ý chọn để gây va chạm |
@@ -246,26 +251,34 @@ Cái giá của tốc độ này là những **giới hạn cố định** đư�
 
 - tối đa `order_capacity` lệnh đang chờ (bạn chọn con số này khi gọi
   `Engine::new`),
-- đúng 4096 tick giá (một hằng số xác định lúc biên dịch).
+- số tick giá được chọn khi dựng engine (4096 với `Engine::new`, tối đa 2^24
+  với `Engine::with_ticks`).
 
 Sự kiện thì không bị giới hạn: một lời gọi có thể báo hàng nghìn lần khớp, và
 sink quyết định giữ lại, chuyển tiếp hay chỉ đếm chúng.
 
 ## 2.6 Dung lượng bộ nhớ
 
-Mọi thứ được cấp phát trong `Engine::new(order_capacity)`. Với sức chứa `N`:
+Mọi thứ được cấp phát trong `Engine::with_ticks(order_capacity, ticks)`
+(`Engine::new` cũng y như vậy, với 4096 tick). Với sức chứa `N` và 4096 tick mặc
+định:
 
 | Thành phần | Công thức | `N = 10,000` |
 |---|---|---|
 | Arena chứa lệnh | `N × 48 B` | 480,000 B |
 | Free stack (ngăn xếp các ô trống) | `N × 4 B` | 40,000 B |
 | Bảng băm | `next_pow2(2 × max(N,16)) × 16 B` | 32,768 × 16 = 524,288 B |
-| Các mức giá (bid + ask) | `2 × 4096 × 24 B` | 196,608 B |
-| Bản thân struct `Engine` | chứa hai bitset (`2 × 520 B`) cùng các con trỏ, bộ đếm và seed của hàm băm | 1,168 B |
-| **Tổng cộng** | | **1,242,064 B ≈ 1.24 MB** |
+| Các mức giá (bid + ask) | `2 × ticks × 24 B` | 2 × 4096 × 24 = 196,608 B |
+| Các bitset (bid + ask) | `2 × 8 B` cho mỗi word, tính mọi tầng (65 word với 4096 tick) | 2 × 520 = 1,040 B |
+| Bản thân struct `Engine` | các con trỏ, độ dài, bộ đếm, giới hạn và seed của hàm băm | 272 B |
+| **Tổng cộng** | | **1,242,208 B ≈ 1.24 MB** |
 
 (Kích thước của `Order` = 48 B, `PriceLevel` = 24 B, ô băm 16 B và
-`Engine` = 1,168 B đều được đo bằng `size_of`.)
+`Engine` = 272 B đều được đo bằng `size_of`.)
+
+Số tick làm một dòng trong bảng thay đổi rất nhiều: với 262,144 tick, riêng các
+mức giá đã chiếm 12.6 MB, gấp mười lần phần còn lại. Đó là lý do số tick được chọn
+cho từng mã giao dịch thay vì là một con số lớn cố định.
 
 Con số đó đủ nhỏ để nằm gọn trong cache L2/L3 của một CPU hiện đại, và đó là một
 phần lý do thiết kế này nhanh.

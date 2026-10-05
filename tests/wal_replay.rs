@@ -18,7 +18,7 @@ fn replaying_the_wal_reproduces_every_event() {
     let mut primary = Engine::new(CAPACITY);
     let mut primary_events = Vec::new();
     // A small preallocation forces the writer to grow several times.
-    let mut writer = WalWriter::create(&path.0, CAPACITY, 64).unwrap();
+    let mut writer = WalWriter::create(&path.0, &primary, 64).unwrap();
     let mut generator = OpGenerator::new(42);
     for sequence in 0..OPS {
         let record = match generator.next_op() {
@@ -30,6 +30,7 @@ fn replaying_the_wal_reproduces_every_event() {
             } => WalRecord::reduce(order_id, reduce_by, sequence),
             Op::CancelAccount { account } => WalRecord::cancel_account(account, sequence),
             Op::CancelAll => WalRecord::cancel_all(sequence),
+            Op::SetRiskLimits(limits) => WalRecord::set_risk_limits(limits, sequence),
         };
         // Write-ahead: the request is logged before the engine applies it.
         writer.append(record).unwrap();

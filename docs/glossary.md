@@ -35,17 +35,19 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | Maker | The resting order in a trade. It was in the book first. | [1](01-order-book-basics.md) |
 | Market data | The public feed of trades and book changes that an exchange publishes. | [2](02-architecture.md) |
 | Mass cancel | Cancelling every resting order of one account (for example when its connection drops: *cancel on disconnect*), or every order in the book (`cancel_account`, `cancel_all`). | [1](01-order-book-basics.md) |
-| Market order | An order with no price of its own: it trades at whatever prices the book offers, and its remainder expires. Real exchanges limit how far it may sweep (a price band); this engine does not (exercise in ch. 11). | [1](01-order-book-basics.md) |
+| Market order | An order with no price of its own: it trades at whatever prices the book offers, and its remainder expires. Real exchanges limit how far it may sweep with a price band, and so does this engine when one is set. | [1](01-order-book-basics.md) |
 | Matching engine | The component that pairs buy and sell orders and decides the trade price. This whole repository. | [1](01-order-book-basics.md) |
+| Pre-trade risk check / fat finger | A check an order must pass before it may trade, against mistakes such as a mistyped quantity or price (a *fat finger*). Here: a maximum order quantity and a price band (`RiskLimits`). | [1](01-order-book-basics.md) |
 | Post-only | A limit order that must not trade on arrival: if its price reaches the other side, it is rejected instead. Market makers use it to be sure they only add liquidity. | [1](01-order-book-basics.md) |
 | Price level | All orders resting at one price on one side, kept as a FIFO queue. | [1](01-order-book-basics.md) |
+| Price band | How far past the best opposing price an order may reach; further is rejected, and a market order stops at the edge. | [1](01-order-book-basics.md) |
 | Price-time priority | Matching rule: the better price trades first; at the same price, the order that arrived earlier trades first. | [1](01-order-book-basics.md) |
 | Resting order | An order that is waiting in the book because it could not trade (fully) when it arrived. | [1](01-order-book-basics.md) |
 | Self-trade prevention | A rule that stops a trader's buy from matching their own sell. The incoming order chooses what happens instead: cancel the resting order, cancel the incoming one, or both (`SelfTradePrevention`). | [1](01-order-book-basics.md) |
 | Spread | Best ask minus best bid. | [1](01-order-book-basics.md) |
 | Sweep | One taker trading through several price levels in a row. | [6](06-matching-algorithm.md) |
 | Taker | The incoming order in a trade. It "takes" liquidity that a maker left in the book. | [1](01-order-book-basics.md) |
-| Tick | The smallest price step. This engine works only with integer ticks `0..=4095`; converting to real prices is the caller's job. | [1](01-order-book-basics.md) |
+| Tick | The smallest price step. This engine works only with integer ticks, `0..=4095` by default and up to 2^24 per engine (`Engine::with_ticks`); converting to real prices is the caller's job. | [1](01-order-book-basics.md) |
 | Wash trade | A trade between two orders of the same owner. It moves nothing, but looks like real activity to the market; done on purpose it is illegal manipulation. See self-trade prevention. | [1](01-order-book-basics.md) |
 
 ## Data structures and algorithms
@@ -58,7 +60,7 @@ Jump to: [Trading](#trading) · [Data structures and algorithms](#data-structure
 | Backward-shift deletion | A way to delete from an open-addressing table without tombstones: entries after the hole move back to fill it, if that keeps them reachable. | [5](05-hash-map.md) |
 | Big-O (O(1), O(n)) | How the work grows with input size. O(1) means "the same amount of work no matter how big the book is"; O(n) means "proportional to n". | [1](01-order-book-basics.md) |
 | Bit-scan | A CPU instruction that finds the lowest or highest set bit in a word. Rust exposes it as `trailing_zeros` / `leading_zeros`. | [4](04-price-ladder-bitset.md) |
-| Bitset | An array of bits, one per item, recording yes/no for each. Here: one bit per tick, "is anything resting at this price?". | [4](04-price-ladder-bitset.md) |
+| Bitset | An array of bits, one per item, recording yes/no for each. Here: one bit per tick, "is anything resting at this price?", with summary levels on top (a *hierarchical* bitset). | [4](04-price-ladder-bitset.md) |
 | Deterministic | Same inputs, same outputs, every time. No clocks, randomness or thread timing can change a result. | [2](02-architecture.md) |
 | FIFO | *First in, first out*: a queue where the oldest item leaves first. Each price level is a FIFO queue. | [3](03-order-pool.md) |
 | Free list / free stack | A list of the arena slots not currently in use. Here it is a stack, so the most recently freed slot is reused first. | [3](03-order-pool.md) |

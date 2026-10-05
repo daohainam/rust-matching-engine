@@ -29,9 +29,10 @@ good exercises in their own right.
 
 | Limit | Detail |
 |---|---|
-| **4096 price ticks** | Fixed by the two-level bitset (`64 × 64`), checked at compile time. No tick-size or price offset logic; callers convert. |
+| **Price ticks chosen per engine** | 4096 by default, up to 2^24 with `Engine::with_ticks`; memory grows by about 48 bytes per tick. No tick-size or price offset logic; callers convert. |
 | **Fixed order capacity** | Chosen in `Engine::new`. A full arena rejects orders that would need to rest (orders that fully match still succeed). |
-| **Four order types** | Limit, immediate-or-cancel, market and post-only. No fill-or-kill, stop, iceberg or day orders. Quantity can be reduced in place, but raising it or changing the price means cancel + new, which loses priority. Market orders have no price protection. |
+| **Four order types** | Limit, immediate-or-cancel, market and post-only. No fill-or-kill, stop, iceberg or day orders. Quantity can be reduced in place, but raising it or changing the price means cancel + new, which loses priority. Market orders are protected only when a price band is set. |
+| **Risk limits are engine-wide** | One maximum quantity and one price band for every order. The band is measured from the best opposing price, so it does not apply when that side is empty; no per-account limits, no reference price such as the last trade. |
 | **Accounts are labels** | Every order has an account, used for self-trade prevention and mass cancels. There are no per-account limits (open orders, position, credit), and the engine keeps no list of an account's orders, so `cancel_account` walks the book. |
 | **One instrument per `Engine`** | Run several engines for several symbols. |
 | **Engine is not wired to the WAL or ring buffer** | The caller does it; [`examples/pipeline.rs`](../examples/pipeline.rs) shows how, and `WalRecord::apply_to`, `wal::replay` and `wal::replay_from` do the replaying. The WAL's `sequence` is caller-supplied and independent of the engine's own counter. |
@@ -107,7 +108,9 @@ still passes, and you have benchmark numbers for all three layouts.
 🟡 **6. Fast `next_set`.** Replace the linear `next_lower_active` /
 `next_higher_active` in `depth_snapshot` with bitset methods `prev_set(tick)` /
 `next_set(tick)`. *Hint: mask off the bits at and below (or above) `tick` in its
-word with a shift, check the word; if empty, use the summary word the same way.*
+word with a shift, check the word; if empty, go up one level and do the same with
+that word's bit, until some level has a bit beyond; then come back down as
+`lowest()` does, taking the lowest (or highest) bit at each level.*
 Unit-test against the old linear version with random bitsets.
 
 **Done when:** a test compares `next_set` / `prev_set` with the linear versions on
@@ -137,16 +140,17 @@ that walk fast. Remember that the WAL's order-type byte needs a new value.*
 quantity is there, and one that is killed with no trades and unchanged depth when
 it is not, and `model_check` passes with fill-or-kill orders in the generator.
 
-🟡 **9. Price protection for market orders.** A market order sweeps until it is
-filled, however far that takes it (1.9). Add a price band: a market order's limit
-becomes the best opposing price at arrival, plus (for a buy) or minus (for a sell)
-`band` ticks. *Hint: the limit is chosen in one place in `submit_order`; compute it
-from `best_ask` / `best_bid` there. Decide what happens on an empty opposing side,
-and where `band` lives: in `Engine::new`, or in each call.*
+🟡 **9. A band around the last trade.** The price band is measured from the best
+opposing price, so it vanishes when that side is empty, and it moves whenever a
+single order changes the best price. Exchanges usually measure it from a
+**reference price**, such as the last trade. Add that option. *Hint: the engine
+needs one more piece of state, the last trade price, which `match_incoming` knows
+whenever it emits a `Trade`. State means it must go into the snapshot, and the
+checkpoint format with it; the WAL needs nothing new, because a replay recomputes
+the last trade.*
 
-**Done when:** with a band of 5, a market buy against asks at 100, 101 and 150
-trades at 100 and 101 only and expires the rest, and a market order on an empty
-side still emits only acceptance and `OrderExpired`.
+**Done when:** with a band of 5 around the last trade at 100, a buy at 106 is
+rejected even when the ask side is empty, and `tests/snapshot.rs` still passes.
 
 🟡 **10. Amend: change the price or raise the quantity.** `reduce_order` keeps
 priority because the order gets smaller. Add `amend_order(id, new_price_tick,
@@ -188,17 +192,17 @@ shrinks to the smallest request sequence that reproduces it.
 [6.11](06-matching-algorithm.md#611-try-it-yourself)), proptest reports a failing
 sequence of only a few requests.
 
-🔴 **13. Three-level bitset.** Generalise `TwoLevelBitset` to `N` levels of `u64`
-(3 levels = 262,144 ticks). Keep `lowest()` and `highest()` loop-free for a fixed
-depth. Make `MAX_TICKS` follow, and update the compile-time check on `TICKS`.
-*Hint: the top level is still one `u64`; each bit now summarises 64 words of
-the middle level. `lowest()` becomes three bit-scans: top word, then the middle
-word it points to, then the bottom word. `set` and `clear` update up to three
-words; `clear` may only clear a summary bit once the word below it is zero.*
+🔴 **13. Where do the 45 nanoseconds go?** On a 300,000-tick ladder, placing an
+order costs about 45 ns more than on 4096 ticks (10.6). Chapter 10 guesses that
+cache misses on the 14 MB of price levels, not the two extra bit-scans, explain
+most of it. Test the guess. *Hint: add a benchmark on the wide ladder with prices
+clustered in a narrow band, like the default one, and compare; then use a
+profiler that counts cache misses (`perf stat -e cache-misses` on Linux, VTune or
+the Windows Performance Analyzer elsewhere). For a third point, shrink
+`PriceLevel` (do you need `count`?) and see whether the gap narrows.*
 
-**Done when:** the existing bitset tests pass with three levels, a new test finds
-`lowest()` and `highest()` among ticks near 0, 4,096 and 262,143, and
-`model_check` still passes.
+**Done when:** you have numbers for clustered and spread prices on both ladders,
+and can say in two sentences how much of the gap is cache misses.
 
 🔴 **14. Shard by symbol.** Run four `Engine`s on four threads, each fed by its own
 ring buffer, routing requests by a symbol id. Verify that the books are
@@ -301,7 +305,7 @@ git switch main                                      # come back (stash or commi
 ```
 
 `a192ebc` has the **old API**, so the chapters, which describe the current code,
-will not match it exactly; use them for the ideas. R7 to R12 were solved much
+will not match it exactly; use them for the ideas. R7 to R14 were solved much
 later: start those from the commit just before the named one
 (`git switch --detach <hash>~1`).
 
@@ -340,7 +344,7 @@ neither: its commit message explains why a new `OrderExpired` event fits best.*
 
 🟡 **R8. Market orders.** A buy at tick 4095 crosses every ask, but rests its
 remainder there, which is not what a market order means. Build real market orders
-on top of IOC. *Solved by `feat(engine): add market orders`; exercise 9 adds the
+on top of IOC. *Solved by `feat(engine): add market orders`; R13 adds the
 price protection real exchanges use.*
 
 🟡 **R9. Reduce quantity in place.** Let a trader lower an order's quantity without
@@ -374,6 +378,19 @@ otherwise. Checkpoints, the other half of the recovery story, came right after,
 in `feat(engine): snapshot and restore the book` and the two commits that follow
 it; exercises 16 and 17 build on them.*
 
+🟡 **R13. Price protection for market orders.** A market order sweeps until it is
+filled, however far that takes it. Add a price band: a market order's limit
+becomes the best opposing price at arrival, plus (for a buy) or minus (for a sell)
+`band` ticks. *Solved by `feat(engine): add pre-trade risk limits`, which made the
+band a risk limit for every order and gave market orders its edge as their limit;
+exercise 9 measures the band from the last trade instead.*
+
+🔴 **R14. Beyond 4096 ticks.** Generalise the two-level bitset to more levels, so
+an engine can have more than 4096 ticks. *Solved by `refactor(bitset): size the
+price ladder at run time`, which chose any number of levels at run time instead of
+a fixed three, and `feat(engine)!: choose the number of price ticks per engine`.
+Compare the commit's benchmark notes with chapter 10.6, and see exercise 13.*
+
 ### Every fix, with its commit
 
 Find a commit by its subject, then show it:
@@ -395,7 +412,7 @@ git log --oneline --grep "detect double frees"   # then: git show <hash>
 | `engine.rs` | The last maker's `OrderFilled` was reported while its drained price was still in the bitset, so a caught sink panic left a stale best price. | `fix(engine): update the price index before reporting a maker fill` | [6.3](06-matching-algorithm.md#63-match_incoming-the-heart-of-the-engine) |
 | `hashmap.rs` | `get`, `insert` and `remove` looped forever on a full table, and the size computation could wrap in release builds. | `fix(hashmap): panic instead of hanging when the table would fill`, `fix(hashmap): check the table size computation for overflow` | [5.5](05-hash-map.md#55-sizing-why-the-table-is-never-full) |
 | `pool.rs` | A double free was caught only by `debug_assert!`, and `count -= 1` wrapped silently in release builds. | `fix(pool): detect double frees in release builds`, `fix(pool): check the level order count for underflow` | [3.7](03-order-pool.md#37-defensive-checks) |
-| `bitset.rs` | The `TICKS` limit was only a comment. | `fix(bitset): enforce the TICKS limits at compile time` | [4.6](04-price-ladder-bitset.md#46-why-4096-ticks) |
+| `bitset.rs` | The `TICKS` limit was only a comment. | `fix(bitset): enforce the TICKS limits at compile time` | [4.6](04-price-ladder-bitset.md#46-why-4096-ticks-and-how-to-get-more) |
 | `wal.rs` | Readers mapped the log a second time, which could race a live writer. | `fix(wal): read logs with plain file I/O` | [9.3](09-write-ahead-log.md#93-memory-mapped-files-in-one-minute) |
 | `ringbuffer.rs` | A consumer could not tell a finished producer from a slow one and spun forever. | `feat(ringbuffer): detect a dropped producer or consumer` | [8.5](08-ring-buffer.md#telling-nothing-yet-from-nothing-ever-again) |
 | docs | The README and chapters described an old API, and nothing noticed. | `docs(readme): fix the examples for the current API and compile them` (README doctest), `docs(ch08): move the complete program into examples/pipeline.rs` (`tests/docs_sync.rs`) | [10.7](10-testing-and-performance.md#107-continuous-integration) |

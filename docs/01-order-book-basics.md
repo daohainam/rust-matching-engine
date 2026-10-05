@@ -186,9 +186,14 @@ unacceptable when money changes hands, so exchanges use
                              tick 4095-> price 1123.75
 ```
 
-This engine works **only in ticks**: `price_tick` is a `u32` between `0` and
-`4095` inclusive (4096 distinct prices). Converting between real prices and
-ticks (`price = offset + tick * tick_size`) is the **caller's job**.
+This engine works **only in ticks**: `price_tick` is a `u32` from `0` up to the
+engine's tick count, which is 4096 unless you choose another one with
+`Engine::with_ticks` (up to about 16.7 million). The example above needs
+4096 ticks to reach 1123.75; a share around 100.00 traded in steps of 0.01 needs
+more than 10,000. Converting between real prices and ticks
+(`price = offset + tick * tick_size`) is the **caller's job**.
+
+The chapters use the default 4096 ticks in their examples.
 
 Why this matters for the design: if the set of possible prices is small and
 dense, we can use **arrays indexed by tick** instead of trees or hash maps.
@@ -205,6 +210,24 @@ dense, we can use **arrays indexed by tick** instead of trees or hash maps.
 | Accounts, self-trade prevention, mass cancel           | Trading sessions and halts (only `cancel_all` for them) |
 | Price-time priority                                    | More than one instrument per `Engine` (use one each)   |
 | Depth queries and order lookup                         | Auctions, circuit breakers, fees                       |
+| A tick count chosen per engine, up to 2^24             | Prices that are not whole ticks                        |
+| Pre-trade risk limits: maximum quantity, price band    | Per-account risk (positions, credit)                   |
+
+### Risk limits: stopping the fat finger
+
+A trader who types 10000 instead of 100, or a buy price ten times too high, can
+do real damage in microseconds: the order trades against everything it reaches.
+Exchanges therefore check every order against **pre-trade risk limits** before it
+may trade. This engine has two:
+
+- a **maximum order quantity**;
+- a **price band**: an order may reach at most a few ticks past the best price
+  on the other side. A buy limited at 150 when the best ask is 100 is refused
+  outright, and a market order stops at the edge of the band instead of
+  sweeping the whole book.
+
+The limits are part of the engine's state and can change during the day, for
+example when a market gets volatile.
 
 ### Order types
 
@@ -221,7 +244,8 @@ not trade at once:
 
 A **market** order says "buy 10 now, whatever it costs". It has no price of its
 own, so it may sweep through many levels; that is why real exchanges protect it
-with price bands, which this engine leaves to the caller. A **post-only** order
+with price bands, as this engine does when one is set (see *Risk limits* above). A
+**post-only** order
 is for market makers, who want to be sure they only ever *add* orders to the
 book (and often pay lower fees for it): if it would trade on arrival, it is
 refused instead.
@@ -235,8 +259,10 @@ Some orders are refused before they can touch the book. The engine reports an
 |---|---|
 | a quantity of 0 | `ZeroQuantity` |
 | the id `u64::MAX` (reserved for internal use, see [chapter 5](05-hash-map.md)) | `ReservedOrderId` |
-| a price tick of 4096 or more | `PriceOutOfRange` |
+| a price tick outside the engine's range (4096 or more by default) | `PriceOutOfRange` |
 | the same id as an order that is still resting | `DuplicateOrderId` |
+| a quantity above the engine's maximum order quantity | `QuantityAboveLimit` |
+| a price further past the best opposing price than the price band allows | `PriceOutsideBand` |
 | post-only, and a price that would trade at once | `PostOnlyWouldTrade` |
 
 An order can also be accepted and trade normally, but then find **no room** to
@@ -344,13 +370,14 @@ Events are how the engine talks to the outside world; see
 | Post-only       | A limit order that is refused if it would trade on arrival               |
 | Account         | Who placed an order; self-trade prevention and mass cancels use it       |
 | Self-trade      | A trade between two orders of the same account; can be prevented         |
+| Price band      | How far past the best opposing price an order may reach                  |
 | Marketable      | Able to trade immediately against the opposite side                      |
 | Maker           | The resting order in a trade                                             |
 | Taker           | The incoming order in a trade                                            |
 | Price level     | All orders resting at one price                                          |
 | Depth           | Total quantity available at a price level (or across several)            |
 | Fill            | An execution; *partial fill* means some quantity is left                 |
-| Tick            | Smallest price step; this engine uses integer ticks 0 to 4095            |
+| Tick            | Smallest price step; this engine uses integer ticks, 0 to 4095 by default |
 | Price-time priority | Better price first, then earlier arrival                             |
 | Arena           | A big pre-allocated array that objects live in (chapter 3)               |
 | Hot path        | The code that runs for every order; the part that must be fastest        |

@@ -44,8 +44,10 @@ pub enum RejectReason {
     // Found before acceptance: the order is rejected alone, the book unchanged.
     ZeroQuantity,          // qty was 0
     ReservedOrderId,       // order_id was u64::MAX
-    PriceOutOfRange,       // price_tick was 4096 or more
+    PriceOutOfRange,       // price_tick was not below the engine's tick count
     DuplicateOrderId,      // a resting order already has this id
+    QuantityAboveLimit,    // qty was above the risk limit max_order_qty
+    PriceOutsideBand,      // the price reached past the risk limit price_band
     PostOnlyWouldTrade,    // a post-only order's price reaches the other side
     // The remainder could not rest: always after OrderAccepted.
     BookFull,              // every arena slot is in use
@@ -60,14 +62,14 @@ pub enum CancelRejectReason {
 
 | Sự kiện | Được phát ra khi | Nói về ai |
 |---|---|---|
-| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện nhắc lại tài khoản, phía, loại lệnh, giá giới hạn và số lượng của lệnh (với lệnh thị trường, giá giới hạn là mức tệ nhất mà phía của nó cho phép). | lệnh vừa đến |
+| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện nhắc lại tài khoản, phía, loại lệnh, giá giới hạn và số lượng của lệnh (với lệnh thị trường, đó là giá giới hạn mà nó được gán: mép của biên độ giá (price band), hoặc mức giá tệ nhất mà phía của nó cho phép). | lệnh vừa đến |
 | `Trade` | Hai lệnh khớp với nhau. `taker_side` là phía của bên chủ động (aggressor); `trade_id` đánh số các giao dịch 1, 2, 3, ... | cả maker **và** taker, ở giá của maker |
 | `OrderPartiallyFilled` | Một lệnh đã giao dịch nhưng vẫn còn số lượng. | một maker (sau mỗi lần khớp một phần), hoặc taker (một lần, ở cuối) |
 | `OrderFilled` | Một lệnh không còn gì nữa. | một maker (khi nó bị khớp hết), hoặc taker |
 | `OrderExpired` | Phần còn lại của một lệnh immediate-or-cancel hoặc lệnh thị trường bị bỏ đi; nó chưa bao giờ vào sổ. | taker (một lần, ở cuối cùng) |
 | `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu (hoặc bị giảm đi toàn bộ số lượng còn lại). Sự kiện cho biết lệnh đã nằm chờ ở đâu và bao nhiêu số lượng đã rời khỏi sổ. | lệnh bị hủy |
 | `OrderReduced` | Số lượng của một lệnh đang chờ được giảm theo yêu cầu; lệnh vẫn giữ nguyên vị trí trong hàng đợi. | lệnh bị giảm |
-| `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, một lệnh post-only sẽ gây ra giao dịch, hoặc không còn chỗ để nằm chờ. `reason` cho biết là lý do nào. | lệnh vừa đến |
+| `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, vi phạm một giới hạn rủi ro, một lệnh post-only sẽ gây ra giao dịch, hoặc không còn chỗ để nằm chờ. `reason` cho biết là lý do nào. | lệnh vừa đến |
 | `SelfTradePrevented` | Một lệnh vừa đến gặp một lệnh đang chờ của chính tài khoản đó, và chế độ chống tự giao dịch (self-trade prevention) của nó đã chặn giao dịch. Theo sau là `OrderCancelled` của maker, `OrderExpired` của taker, hoặc cả hai, tùy theo chế độ. | cả taker **và** maker |
 | `MassCancelled` | Một lần gọi `cancel_account` (`account: Some(..)`) hoặc `cancel_all` (`None`) đã xong; `cancelled_orders` đếm số sự kiện `OrderCancelled` đứng trước nó. | yêu cầu đó |
 | `CancelRejected` | Một yêu cầu hủy hoặc giảm lệnh bị từ chối: không có lệnh đang chờ nào mang id đó, hoặc lượng giảm bằng 0. `reason` cho biết là lý do nào. | id trong yêu cầu |
@@ -104,7 +106,7 @@ Những điểm cần nhớ:
   một taker, hãy cộng `qty` của các sự kiện `Trade` của nó lại.
 - Một taker không giao dịch lần nào mà chỉ nằm chờ thì chỉ tạo ra **duy nhất**
   `OrderAccepted`. Không có sự kiện riêng kiểu "lệnh đang nằm chờ".
-- Lệnh bị từ chối trước khi được chấp nhận (đầu vào sai, hoặc lệnh post-only
+- Lệnh bị từ chối trước khi được chấp nhận (đầu vào sai, vi phạm một giới hạn rủi ro, hoặc lệnh post-only
   sẽ gây ra giao dịch) thì sự kiện đến **một mình**; lệnh bị từ chối vì hết dung
   lượng thì sự kiện đến **sau** `OrderAccepted`, và chỉ với lệnh chưa
   giao dịch lần nào (xem
@@ -154,6 +156,7 @@ Các chuỗi này lấy thẳng từ unit test trong `engine.rs`.
 | Taker lớn hơn maker; phần còn lại nằm chờ | `Accepted`, `Trade`, `Filled(maker)`, `PartiallyFilled(taker, left)` |
 | Taker quét qua nhiều mức giá | `Accepted`, rồi mỗi lần khớp có `Trade` + sự kiện của maker, cuối cùng là sự kiện cuối của taker |
 | Đầu vào không hợp lệ / trùng id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
+| Lệnh có số lượng vượt mức tối đa, hoặc có giá vượt ra ngoài biên độ giá | `Rejected(QuantityAboveLimit / PriceOutsideBand)` |
 | Lệnh post-only có giá chạm tới phía đối diện | `Rejected(PostOnlyWouldTrade)` |
 | Lệnh không nằm chờ được (arena đầy / tràn số) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (chưa có giao dịch nào) |
 | Lệnh IOC hoặc lệnh thị trường còn số lượng | `Accepted`, rồi mỗi lần khớp có `Trade` + sự kiện của maker, rồi `PartiallyFilled(taker, left)` nếu nó đã giao dịch, cuối cùng là `Expired(left)` |

@@ -30,6 +30,27 @@ fn bench_resting_orders(c: &mut Criterion) {
     });
 }
 
+fn bench_resting_orders_wide_ladder(c: &mut Criterion) {
+    c.bench_function("place_10k_resting_orders_300k_ticks", |b| {
+        // The same work as `place_10k_resting_orders`, on a ladder of
+        // 300,000 ticks: four bitset levels instead of two, and prices
+        // spread over the whole ladder.
+        b.iter_batched(
+            || (Engine::with_ticks(20_000, 300_000), EventBatch::new()),
+            |(mut engine, mut events)| {
+                for i in 0..10_000u64 {
+                    let tick = (i * 29 % 300_000) as u32;
+                    events.clear();
+                    engine.process_order(i, Side::Buy, tick, 10, &mut events);
+                    black_box(&events);
+                }
+                engine
+            },
+            criterion::BatchSize::LargeInput,
+        );
+    });
+}
+
 fn bench_matching_throughput(c: &mut Criterion) {
     c.bench_function("cross_spread_matching", |b| {
         // Seed the ask queue before each sample; the timed closure consumes
@@ -87,6 +108,7 @@ fn bench_cancel(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_resting_orders,
+    bench_resting_orders_wide_ladder,
     bench_matching_throughput,
     bench_cancel
 );

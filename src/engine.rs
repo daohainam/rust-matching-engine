@@ -7,15 +7,16 @@
 //! up front in [`Engine::new`], and execution reports are streamed to a
 //! caller-supplied [`EventSink`] instead of being collected internally.
 
-use crate::bitset::{TwoLevelBitset, TICKS};
+use crate::bitset::{TickBitset, MAX_LADDER_TICKS};
 use crate::events::{CancelRejectReason, Event, EventSink, RejectReason};
 use crate::hashmap::FlatHashMap;
 use crate::pool::{OrderPool, PriceLevel, Side, NIL};
 use crate::snapshot::{Snapshot, SnapshotError};
 
-/// The maximum representable price tick (exclusive), mirroring the dense
-/// tick space tracked by [`TwoLevelBitset`].
-pub const MAX_TICKS: usize = TICKS;
+/// The number of price ticks of an engine made with [`Engine::new`]: valid
+/// ticks are `0..4096`. For this size the [`TickBitset`] has two levels.
+/// [`Engine::with_ticks`] chooses another number.
+pub const DEFAULT_TICKS: usize = 4096;
 
 /// Which side is the aggressive taker, determining which bitset extremum
 /// (lowest vs. highest) and marketability comparison to use when crossing
@@ -110,6 +111,42 @@ impl SelfTradePrevention {
     }
 }
 
+/// Pre-trade risk limits: checks every new order must pass before it may
+/// trade. They catch "fat finger" mistakes, such as an extra zero on the
+/// quantity or a price far through the market, before they cost anything.
+///
+/// Limits are engine state, set with [`Engine::set_risk_limits`]. They
+/// change the outcome of later orders, so a change must be logged like any
+/// other request for a replay to reproduce the book.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RiskLimits {
+    /// The largest quantity one order may have; a larger order is rejected
+    /// with [`QuantityAboveLimit`](RejectReason::QuantityAboveLimit).
+    pub max_order_qty: u64,
+    /// How many ticks past the best opposing price an order may reach: a
+    /// buy may be priced at most `best ask + band`, a sell at least
+    /// `best bid - band`, or it is rejected with
+    /// [`PriceOutsideBand`](RejectReason::PriceOutsideBand). A market order
+    /// gets exactly that price as its limit, so it can sweep no further.
+    /// With no opposing order there is no reference, and no band applies.
+    /// `None` means no band at all.
+    pub price_band: Option<u32>,
+}
+
+impl RiskLimits {
+    /// No limits: any quantity, any price. The default.
+    pub const NONE: Self = Self {
+        max_order_qty: u64::MAX,
+        price_band: None,
+    };
+}
+
+impl Default for RiskLimits {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
 /// A request to submit an order, as [`Engine::submit_order`] takes it.
 ///
 /// Start from [`limit`](Self::limit) or [`market`](Self::market) and adjust
@@ -189,8 +226,8 @@ impl NewOrder {
 pub struct Engine {
     pool: OrderPool,
     id_map: FlatHashMap,
-    bid_bitset: TwoLevelBitset,
-    ask_bitset: TwoLevelBitset,
+    bid_bitset: TickBitset,
+    ask_bitset: TickBitset,
     bid_levels: Box<[PriceLevel]>,
     ask_levels: Box<[PriceLevel]>,
     /// Counts accepted orders and is stamped into each resting order as
@@ -199,6 +236,8 @@ pub struct Engine {
     sequence: u64,
     /// Number of trades executed so far; the last one's `trade_id`.
     trades: u64,
+    /// The checks every new order must pass.
+    limits: RiskLimits,
 }
 
 impl Engine {
@@ -212,20 +251,59 @@ impl Engine {
     /// The ID map uses a randomly seeded hash, so crafted order IDs cannot
     /// force collisions; matching results never depend on the seed.
     ///
+    /// The book has [`DEFAULT_TICKS`] (4096) price ticks; use
+    /// [`with_ticks`](Self::with_ticks) for another number.
+    ///
     /// # Panics
     /// Panics if `order_capacity` is zero or does not fit in a `u32` arena
     /// index (`order_capacity >= u32::MAX`).
     pub fn new(order_capacity: usize) -> Self {
+        Self::with_ticks(order_capacity, DEFAULT_TICKS)
+    }
+
+    /// Creates an empty book for up to `order_capacity` resting orders, with
+    /// price ticks `0..ticks`.
+    ///
+    /// Choose `ticks` for the instrument: the price range divided by the
+    /// tick size. Memory grows with it, two price levels of 24 bytes per
+    /// tick, so 4096 ticks take 196 KB and 262,144 ticks 12.6 MB; every
+    /// operation stays O(1), with one more bit-scan for every factor of 64.
+    ///
+    /// # Panics
+    /// Panics if `order_capacity` is invalid (see [`new`](Self::new)), or if
+    /// `ticks` is zero or above [`MAX_LADDER_TICKS`] (2^24).
+    pub fn with_ticks(order_capacity: usize, ticks: usize) -> Self {
         Self {
             pool: OrderPool::new(order_capacity),
             id_map: FlatHashMap::with_capacity(order_capacity),
-            bid_bitset: TwoLevelBitset::new(),
-            ask_bitset: TwoLevelBitset::new(),
-            bid_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
-            ask_levels: vec![PriceLevel::empty(); MAX_TICKS].into_boxed_slice(),
+            bid_bitset: TickBitset::new(ticks),
+            ask_bitset: TickBitset::new(ticks),
+            bid_levels: vec![PriceLevel::empty(); ticks].into_boxed_slice(),
+            ask_levels: vec![PriceLevel::empty(); ticks].into_boxed_slice(),
             sequence: 0,
             trades: 0,
+            limits: RiskLimits::NONE,
         }
+    }
+
+    /// Returns the pre-trade risk limits new orders are checked against.
+    #[inline(always)]
+    pub fn risk_limits(&self) -> RiskLimits {
+        self.limits
+    }
+
+    /// Replaces the pre-trade risk limits; orders already resting are not
+    /// affected. Like an order, this is a request that changes later
+    /// results: log it, so that a replay applies it at the same point.
+    pub fn set_risk_limits(&mut self, limits: RiskLimits) {
+        self.limits = limits;
+    }
+
+    /// Returns how many price ticks the book has: valid ticks are
+    /// `0..tick_count()`.
+    #[inline(always)]
+    pub fn tick_count(&self) -> usize {
+        self.bid_bitset.ticks()
     }
 
     /// Returns the highest price tick containing at least one resting bid.
@@ -249,7 +327,7 @@ impl Engine {
     /// Returns the total resting quantity at `tick` on the requested `side`.
     ///
     /// This is an aggregate across every order queued at that price. An empty
-    /// price level, or a `tick` at or above [`MAX_TICKS`], returns zero.
+    /// price level, or a `tick` outside the book's range, returns zero.
     #[inline]
     pub fn depth_at(&self, side: Side, tick: u32) -> u64 {
         let levels = match side {
@@ -287,10 +365,11 @@ impl Engine {
     /// order-processing path. Finding each level after the best one searches
     /// the intervening ticks; unlike [`best_bid`](Self::best_bid) and
     /// [`best_ask`](Self::best_ask), the work is not strictly proportional
-    /// only to the number of returned levels. At most [`MAX_TICKS`] levels
-    /// exist, so a larger `levels` (e.g. `usize::MAX`) returns every level.
+    /// only to the number of returned levels. At most
+    /// [`tick_count`](Self::tick_count) levels exist, so a larger `levels`
+    /// (e.g. `usize::MAX`) returns every level.
     pub fn depth_snapshot(&self, side: Side, levels: usize) -> Vec<(u32, u64)> {
-        let mut out = Vec::with_capacity(levels.min(MAX_TICKS));
+        let mut out = Vec::with_capacity(levels.min(self.tick_count()));
         match side {
             Side::Buy => {
                 let mut tick = self.bid_bitset.highest();
@@ -316,16 +395,16 @@ impl Engine {
         out
     }
 
-    fn next_lower_active(&self, bitset: &TwoLevelBitset, tick: usize) -> Option<usize> {
+    fn next_lower_active(&self, bitset: &TickBitset, tick: usize) -> Option<usize> {
         // Used for later bid levels after the best bid; inspect only lower
         // ticks and stop as soon as another active one is found.
         (0..tick).rev().find(|&t| bitset.test(t))
     }
 
-    fn next_higher_active(&self, bitset: &TwoLevelBitset, tick: usize) -> Option<usize> {
+    fn next_higher_active(&self, bitset: &TickBitset, tick: usize) -> Option<usize> {
         // Used for later ask levels after the best ask; inspect only higher
         // ticks and stop as soon as another active one is found.
-        (tick + 1..MAX_TICKS).find(|&t| bitset.test(t))
+        (tick + 1..self.tick_count()).find(|&t| bitset.test(t))
     }
 
     /// Checks an incoming order before it can touch the book, returning the
@@ -343,14 +422,48 @@ impl Engine {
             Err(RejectReason::ZeroQuantity)
         } else if order_id == crate::hashmap::RESERVED_KEY {
             Err(RejectReason::ReservedOrderId)
-        } else if (price_tick as usize) >= MAX_TICKS {
+        } else if (price_tick as usize) >= self.tick_count() {
             Err(RejectReason::PriceOutOfRange)
         } else if self.id_map.get(order_id).is_some() {
             Err(RejectReason::DuplicateOrderId)
+        } else if qty > self.limits.max_order_qty {
+            Err(RejectReason::QuantityAboveLimit)
+        } else if self.is_outside_band(side, price_tick) {
+            Err(RejectReason::PriceOutsideBand)
         } else if order_type == OrderType::PostOnly && self.is_marketable(side, price_tick) {
             Err(RejectReason::PostOnlyWouldTrade)
         } else {
             Ok(())
+        }
+    }
+
+    /// Whether an order on `side` limited at `price_tick` reaches more than
+    /// the price band past the best opposing price.
+    fn is_outside_band(&self, side: Side, price_tick: u32) -> bool {
+        let Some(band) = self.limits.price_band else {
+            return false;
+        };
+        match side {
+            Side::Buy => self
+                .best_ask()
+                .is_some_and(|ask| price_tick > ask.saturating_add(band)),
+            Side::Sell => self
+                .best_bid()
+                .is_some_and(|bid| price_tick < bid.saturating_sub(band)),
+        }
+    }
+
+    /// The limit a market order on `side` gets: as far as the price band
+    /// allows past the best opposing price, or the end of the ladder.
+    fn market_limit(&self, side: Side) -> u32 {
+        let top = self.tick_count() as u32 - 1;
+        match (side, self.limits.price_band) {
+            (Side::Buy, Some(band)) => self
+                .best_ask()
+                .map_or(top, |ask| ask.saturating_add(band).min(top)),
+            (Side::Sell, Some(band)) => self.best_bid().map_or(0, |bid| bid.saturating_sub(band)),
+            (Side::Buy, None) => top,
+            (Side::Sell, None) => 0,
         }
     }
 
@@ -423,9 +536,8 @@ impl Engine {
         } = order;
         // A market order may trade at any price: give it the worst limit
         // its side allows, and every later step treats it as usual.
-        let price_tick = match (order_type, side) {
-            (OrderType::Market, Side::Buy) => MAX_TICKS as u32 - 1,
-            (OrderType::Market, Side::Sell) => 0,
+        let price_tick = match order_type {
+            OrderType::Market => self.market_limit(side),
             _ => price_tick,
         };
         let order = NewOrder {
@@ -590,8 +702,10 @@ impl Engine {
         }
         Snapshot {
             capacity: self.capacity(),
+            tick_count: self.tick_count(),
             accepted_orders: self.sequence,
             trades: self.trades,
+            risk_limits: self.limits,
             orders,
         }
     }
@@ -603,12 +717,15 @@ impl Engine {
     /// The new engine emits exactly the events the original would have for
     /// any later request (its hash seed differs, which never matters).
     /// A snapshot that could not come from a live book is refused with a
-    /// [`SnapshotError`] instead of becoming a corrupt one: a bad capacity,
-    /// too many orders, an order no engine would rest, or a crossed book.
+    /// [`SnapshotError`] instead of becoming a corrupt one: a bad capacity
+    /// or tick count, too many orders, an order no engine would rest, or a crossed book.
     pub fn restore(snapshot: &Snapshot) -> Result<Engine, SnapshotError> {
         let capacity = snapshot.capacity;
         if capacity == 0 || capacity >= u32::MAX as usize {
             return Err(SnapshotError::InvalidCapacity(capacity));
+        }
+        if !(1..=MAX_LADDER_TICKS).contains(&snapshot.tick_count) {
+            return Err(SnapshotError::InvalidTickCount(snapshot.tick_count));
         }
         if snapshot.orders.len() > capacity {
             return Err(SnapshotError::TooManyOrders {
@@ -616,15 +733,16 @@ impl Engine {
                 capacity,
             });
         }
-        let mut engine = Engine::new(capacity);
+        let mut engine = Engine::with_ticks(capacity, snapshot.tick_count);
         engine.sequence = snapshot.accepted_orders;
         engine.trades = snapshot.trades;
+        engine.limits = snapshot.risk_limits;
         for &order in &snapshot.orders {
             let check = if order.remaining_qty == 0 {
                 Err(RejectReason::ZeroQuantity)
             } else if order.order_id == crate::hashmap::RESERVED_KEY {
                 Err(RejectReason::ReservedOrderId)
-            } else if order.price_tick as usize >= MAX_TICKS {
+            } else if order.price_tick as usize >= engine.tick_count() {
                 Err(RejectReason::PriceOutOfRange)
             } else if engine.id_map.get(order.order_id).is_some() {
                 Err(RejectReason::DuplicateOrderId)
@@ -659,7 +777,7 @@ impl Engine {
     fn match_incoming<S: EventSink + ?Sized>(
         pool: &mut OrderPool,
         levels: &mut [PriceLevel],
-        bitset: &mut TwoLevelBitset,
+        bitset: &mut TickBitset,
         id_map: &mut FlatHashMap,
         trades: &mut u64,
         taker: &NewOrder,
@@ -849,7 +967,8 @@ impl Engine {
     ///
     /// The engine keeps no list of orders per account, so this walks the
     /// whole book: O(ticks between the best and worst price + resting
-    /// orders), at most 4096 ticks. It does not allocate.
+    /// orders), at most [`tick_count`](Self::tick_count) ticks. It does not
+    /// allocate.
     pub fn cancel_account<S: EventSink + ?Sized>(&mut self, account: u32, sink: &mut S) -> u64 {
         self.mass_cancel(Some(account), sink)
     }
@@ -1115,7 +1234,7 @@ mod tests {
         let mut engine = Engine::new(16);
         place(&mut engine, 1, Side::Sell, 0, 1);
         place(&mut engine, 2, Side::Sell, 2_000, 2);
-        place(&mut engine, 3, Side::Sell, MAX_TICKS as u32 - 1, 3);
+        place(&mut engine, 3, Side::Sell, DEFAULT_TICKS as u32 - 1, 3);
         // The tick passed in is ignored, even an out-of-range one.
         let events = submit(&mut engine, 4, Side::Buy, OrderType::Market, u32::MAX, 10);
         assert_eq!(
@@ -1125,7 +1244,7 @@ mod tests {
                 account: 0,
                 side: Side::Buy,
                 order_type: OrderType::Market,
-                price_tick: MAX_TICKS as u32 - 1,
+                price_tick: DEFAULT_TICKS as u32 - 1,
                 qty: 10
             })
         );
@@ -1138,7 +1257,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(traded, [(0, 1), (2_000, 2), (MAX_TICKS as u32 - 1, 3)]);
+        assert_eq!(traded, [(0, 1), (2_000, 2), (DEFAULT_TICKS as u32 - 1, 3)]);
         assert_eq!(
             events.last(),
             Some(&Event::OrderExpired {
@@ -1714,8 +1833,10 @@ mod tests {
         };
         let snapshot = |capacity, orders: Vec<RestingOrder>| Snapshot {
             capacity,
+            tick_count: DEFAULT_TICKS,
             accepted_orders: 0,
             trades: 0,
+            risk_limits: RiskLimits::NONE,
             orders,
         };
         let restore = |s: &Snapshot| Engine::restore(s).err();
@@ -1771,6 +1892,116 @@ mod tests {
                 best_ask: 20
             })
         );
+    }
+
+    #[test]
+    fn a_wide_ladder_trades_and_restores_far_beyond_4096_ticks() {
+        let ticks = 300_000; // four bitset levels
+        let mut engine = Engine::with_ticks(16, ticks);
+        assert_eq!(engine.tick_count(), ticks);
+        place(&mut engine, 1, Side::Sell, 250_000, 5);
+        place(&mut engine, 2, Side::Sell, 4_096, 5);
+        place(&mut engine, 3, Side::Buy, 100, 5);
+        assert_eq!(
+            (engine.best_bid(), engine.best_ask()),
+            (Some(100), Some(4_096))
+        );
+
+        let rejected = place(&mut engine, 4, Side::Buy, ticks as u32, 1);
+        assert!(matches!(
+            rejected[..],
+            [Event::OrderRejected {
+                reason: RejectReason::PriceOutOfRange,
+                ..
+            }]
+        ));
+
+        let mut restored = Engine::restore(&engine.snapshot()).unwrap();
+        assert_eq!(restored.tick_count(), ticks);
+        // A market buy sweeps both asks, up to the top of this ladder.
+        let sweep = |engine: &mut Engine| {
+            let mut events = Vec::new();
+            engine.submit_order(NewOrder::market(5, Side::Buy, 10), &mut events);
+            events
+        };
+        let events = sweep(&mut restored);
+        assert_eq!(events, sweep(&mut engine));
+        assert!(matches!(
+            events[0],
+            Event::OrderAccepted {
+                price_tick: 299_999,
+                ..
+            }
+        ));
+        assert_eq!(restored.best_ask(), None);
+    }
+
+    #[test]
+    fn risk_limits_reject_oversized_orders_and_prices_far_through_the_market() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 50);
+        place(&mut engine, 2, Side::Buy, 90, 50);
+        engine.set_risk_limits(RiskLimits {
+            max_order_qty: 10,
+            price_band: Some(2),
+        });
+        let reason = |events: Vec<Event>| match events[..] {
+            [Event::OrderRejected { reason, .. }] => Some(reason),
+            _ => None,
+        };
+        let too_big = reason(place(&mut engine, 3, Side::Buy, 100, 11));
+        assert_eq!(too_big, Some(RejectReason::QuantityAboveLimit));
+        let buy_too_high = reason(place(&mut engine, 4, Side::Buy, 103, 1));
+        assert_eq!(buy_too_high, Some(RejectReason::PriceOutsideBand));
+        let sell_too_low = reason(place(&mut engine, 5, Side::Sell, 87, 1));
+        assert_eq!(sell_too_low, Some(RejectReason::PriceOutsideBand));
+        // Exactly at the edge of the band is allowed, and trades as usual.
+        assert_eq!(reason(place(&mut engine, 6, Side::Buy, 102, 10)), None);
+        assert_eq!(reason(place(&mut engine, 7, Side::Sell, 88, 10)), None);
+        // Orders resting before the limits came are untouched.
+        assert_eq!(engine.depth_at(Side::Sell, 100), 40);
+        assert_eq!(engine.depth_at(Side::Buy, 90), 40);
+    }
+
+    #[test]
+    fn the_price_band_stops_a_market_order_sweep() {
+        let mut engine = Engine::new(16);
+        place(&mut engine, 1, Side::Sell, 100, 1);
+        place(&mut engine, 2, Side::Sell, 101, 1);
+        place(&mut engine, 3, Side::Sell, 150, 1);
+        engine.set_risk_limits(RiskLimits {
+            price_band: Some(5),
+            ..RiskLimits::NONE
+        });
+        let mut events = Vec::new();
+        engine.submit_order(NewOrder::market(4, Side::Buy, 5), &mut events);
+        assert!(matches!(
+            events[0],
+            Event::OrderAccepted {
+                price_tick: 105,
+                ..
+            }
+        ));
+        let traded: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Trade { price_tick, .. } => Some(*price_tick),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(traded, [100, 101]);
+        assert_eq!(
+            events.last(),
+            Some(&Event::OrderExpired {
+                order_id: 4,
+                expired_qty: 3
+            })
+        );
+        assert_eq!(engine.best_ask(), Some(150));
+
+        // The limits are part of the state a snapshot keeps.
+        let restored = Engine::restore(&engine.snapshot()).unwrap();
+        assert_eq!(restored.risk_limits(), engine.risk_limits());
     }
 
     #[test]
@@ -1905,7 +2136,7 @@ mod tests {
     #[test]
     fn rejects_out_of_range_price_tick() {
         let mut engine = Engine::new(16);
-        let events = place(&mut engine, 1, Side::Sell, MAX_TICKS as u32, 5);
+        let events = place(&mut engine, 1, Side::Sell, DEFAULT_TICKS as u32, 5);
         assert_eq!(
             events.as_slice(),
             &[Event::OrderRejected {
@@ -2092,7 +2323,7 @@ mod tests {
         place(&mut engine, 1, Side::Buy, 100, 5);
         place(&mut engine, 2, Side::Sell, 200, 7);
 
-        assert_eq!(engine.depth_at(Side::Buy, MAX_TICKS as u32), 0);
+        assert_eq!(engine.depth_at(Side::Buy, DEFAULT_TICKS as u32), 0);
         assert_eq!(engine.depth_at(Side::Sell, u32::MAX), 0);
         assert_eq!(engine.depth_snapshot(Side::Buy, usize::MAX), vec![(100, 5)]);
         assert_eq!(

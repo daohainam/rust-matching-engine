@@ -61,6 +61,9 @@ hay để hiểu những hành vi mà module đó cam kết.
 | `cancel_all_empties_the_book_and_always_reports` | `cancel_all` làm trống sổ, và trên một sổ trống vẫn phát ra `MassCancelled` với số đếm bằng 0. |
 | `a_restored_engine_keeps_priority_and_counters` | Snapshot liệt kê các bid từ tốt nhất trở đi, rồi đến các ask, lệnh cũ nhất trước ở mỗi mức giá; engine được khôi phục khớp một cú quét theo đúng thứ tự đó, với trade id tiếp nối chỗ mà engine gốc đã dừng. |
 | `restore_refuses_snapshots_no_live_book_could_have` | `restore` từ chối dung lượng bằng 0, quá nhiều lệnh, id trùng, số lượng bằng 0, một mức giá sẽ bị tràn và một sổ bị chéo giá (crossed book), mỗi trường hợp với một `SnapshotError` riêng. |
+| `a_wide_ladder_trades_and_restores_far_beyond_4096_ticks` | Một engine có 300,000 tick cho lệnh nằm chờ và tìm thấy chúng ở các tick 100, 4096 và 250,000, từ chối tick 300,000, giữ nguyên số tick của nó qua một snapshot, và cho một lệnh mua thị trường mức giới hạn 299,999. |
+| `risk_limits_reject_oversized_orders_and_prices_far_through_the_market` | `max_order_qty` và biên độ giá từ chối lệnh với lý do riêng của từng cái, ở cả hai phía; một lệnh nằm đúng ở mép của biên độ vẫn giao dịch, và các lệnh đang chờ không bị động đến. |
+| `the_price_band_stops_a_market_order_sweep` | Với biên độ 5, một lệnh mua thị trường gặp các ask ở 100, 101 và 150 nhận mức giới hạn 105, giao dịch ở 100 và 101, rồi cho phần còn lại hết hạn; một snapshot giữ lại các giới hạn. |
 | `crosses_multiple_ask_price_levels_in_price_time_priority` | Lệnh mua quét qua các ask từ mức rẻ nhất đi lên. |
 | `trade_names_the_aggressor_side` | `Trade` của một taker bán báo `taker_side: Sell`. |
 | `crosses_multiple_bid_price_levels_for_incoming_sell` | Lệnh bán quét qua các bid từ mức cao nhất đi xuống (trường hợp đối xứng). |
@@ -83,12 +86,12 @@ hay để hiểu những hành vi mà module đó cam kết.
 | Module | Các test | Chứng minh điều gì |
 |---|---|---|
 | `pool.rs` | `the_account_fits_in_existing_padding`, `allocate_and_free_roundtrip`, `exhausts_capacity`, `fifo_queue_push_and_remove_head_mid_tail`, `double_free_is_detected`, `removing_from_an_empty_level_is_detected` | `Order` vẫn giữ kích thước 48 byte; các ô đã giải phóng có thể cấp phát lại và `live_count` theo dõi đúng; dung lượng tối đa được thực thi; danh sách liên kết vẫn nhất quán khi xóa ở đầu, giữa và cuối; giải phóng hai lần (double free) và một thao tác xóa bất khả thi đều panic trong mọi build profile. |
-| `bitset.rs` | `empty_bitset_has_no_extrema`, `set_and_query_single_tick`, `tracks_lowest_and_highest_across_groups` | `lowest`/`highest` đúng khi vượt qua ranh giới word 64 tick (các tick 0, 63, 64, 2000, 4095) và sau khi xóa bit. |
+| `bitset.rs` | `empty_bitset_has_no_extrema`, `set_and_query_single_tick`, `tracks_lowest_and_highest_across_groups`, `the_number_of_levels_follows_the_number_of_ticks`, `a_ladder_too_long_for_four_levels_is_rejected`, `agrees_with_an_ordered_set_at_every_size` | `lowest`/`highest` đúng khi vượt qua ranh giới word 64 tick (các tick 0, 63, 64, 2000, 4095) và sau khi xóa bit; bitset dùng từ 1 đến 4 tầng, đúng khi cần đến; và ở tám kích thước từ 1 đến 300,000 tick, hàng nghìn lần đặt và xóa bit ngẫu nhiên cho cùng câu trả lời với một `BTreeSet`. |
 | `hashmap.rs` | `insert_get_remove`, `update_existing_key`, `survives_many_collisions_and_deletions`, `insert_rejects_reserved_sentinel_key_in_all_build_profiles`, `get_and_remove_are_safe_for_reserved_sentinel_key`, `keys_crafted_for_one_seed_spread_out_under_another`, `seeded_maps_behave_identically`, `insert_refuses_to_fill_the_last_empty_slot`, `absurd_capacity_is_rejected_instead_of_wrapping` | Các thao tác cơ bản và xóa bằng cách dịch lùi (backward-shift deletion) khi có va chạm; khóa dành riêng được xử lý đúng; các id được chế tạo nhắm vào một seed sẽ phân tán đều dưới seed khác (chương 5); seed không bao giờ làm đổi kết quả; bảng đầy và kích thước vô lý đều báo lỗi rõ ràng thay vì bị treo hay tràn vòng (wrap). |
 | `events.rs` | `full_batch_counts_dropped_events_until_cleared`, `closures_and_vectors_are_sinks` | Một `EventBatch` đầy sẽ đếm số sự kiện bị bỏ cho đến khi gọi `clear`; closure và `Vec` dùng được làm sink. |
 | `ringbuffer.rs` | `push_pop_single_thread`, `capacity_rounds_up_to_a_power_of_two`, `zero_capacity_is_rejected`, `spsc_across_threads_preserves_order`, `consumer_reports_disconnect_only_after_draining`, `producer_sees_a_dropped_consumer` | Thứ tự FIFO, hành vi khi đầy/rỗng và quay vòng (wrap-around); 100,000 giá trị đi qua hai luồng thật, đủ cả và đúng thứ tự (và test fail nhanh nếu producer dừng); việc ngắt kết nối chỉ được báo khi không còn gì để đọc. |
-| `wal.rs` | `encode_decode_roundtrip`, `decode_rejects_zeroed_and_corrupted_records`, `append_grow_finalize_and_read_back`, `dropping_a_writer_finalizes_it`, `finalizing_an_empty_log_keeps_only_the_header`, `create_refuses_to_overwrite_an_existing_log`, `read_stops_at_zeroed_preallocated_tail`, `read_stops_before_a_torn_record`, `read_ignores_a_partial_trailing_record`, `open_append_resumes_after_the_last_valid_record`, `open_append_upgrades_older_logs`, `a_record_for_account_zero_keeps_its_version_2_bytes`, `open_append_refuses_a_log_written_for_another_capacity`, `a_second_writer_is_refused_while_the_first_is_live`, `replay_rebuilds_the_book_with_the_recorded_capacity`, `replay_from_finishes_what_a_snapshot_started`, `rejects_files_without_a_valid_header` | Bản ghi thuộc mọi loại, mọi loại lệnh, mọi chế độ chống tự giao dịch và mọi tài khoản đều mã hóa rồi giải mã vẫn nguyên vẹn; một loại lệnh hay chế độ không xác định, và việc lật một bit ở bất kỳ đâu trong 40 byte, đều bị phát hiện; bản ghi cho tài khoản 0 giống từng byte với bản mà phiên bản 2 đã ghi; việc mở rộng tệp, `finalize` và `Drop` đều để lại đúng phần header cộng các bản ghi; `create` không bao giờ đụng vào một tệp đã tồn tại; các reader dừng ở bản ghi toàn số 0, bị ghi dở hoặc dở dang đầu tiên; `open_append` ghi tiếp sau bản ghi hợp lệ cuối cùng, nâng cấp một log cũ hơn mà nó ghi tiếp (ghi lại dung lượng của log đó), và từ chối một log được ghi cho dung lượng khác mà không đụng vào nó; writer thứ hai nhận `WouldBlock` còn writer thứ nhất vẫn chạy tiếp; `replay` dựng engine với dung lượng đã được ghi lại và từ chối log không có thông tin đó; `replay_from` chỉ áp dụng các bản ghi đứng sau một snapshot; header sai cho lỗi `InvalidData`. |
-| `snapshot.rs` | `encode_decode_roundtrip`, `damage_anywhere_is_detected`, `writing_replaces_the_checkpoint_in_one_step` | Checkpoint mã hóa rồi giải mã vẫn nguyên vẹn, dù có lệnh hay không; mọi bit bị lật và mọi lần cắt cụt đều bị phát hiện; việc ghi thay thế checkpoint cũ và không để lại tệp `.tmp` nào, kể cả khi một lần ghi bị sập trước đó đã để lại một tệp như vậy. |
+| `wal.rs` | `encode_decode_roundtrip`, `decode_rejects_zeroed_and_corrupted_records`, `append_grow_finalize_and_read_back`, `dropping_a_writer_finalizes_it`, `finalizing_an_empty_log_keeps_only_the_header`, `create_refuses_to_overwrite_an_existing_log`, `read_stops_at_zeroed_preallocated_tail`, `read_stops_before_a_torn_record`, `read_ignores_a_partial_trailing_record`, `open_append_resumes_after_the_last_valid_record`, `open_append_upgrades_older_logs`, `a_record_for_account_zero_keeps_its_version_2_bytes`, `open_append_refuses_a_log_written_for_another_capacity`, `a_second_writer_is_refused_while_the_first_is_live`, `replay_rebuilds_the_book_with_the_recorded_capacity`, `replay_from_finishes_what_a_snapshot_started`, `rejects_files_without_a_valid_header` | Bản ghi thuộc mọi loại, mọi loại lệnh, mọi chế độ chống tự giao dịch và mọi tài khoản đều mã hóa rồi giải mã vẫn nguyên vẹn; một loại lệnh hay chế độ không xác định, và việc lật một bit ở bất kỳ đâu trong 40 byte, đều bị phát hiện; bản ghi cho tài khoản 0 giống từng byte với bản mà phiên bản 2 đã ghi; việc mở rộng tệp, `finalize` và `Drop` đều để lại đúng phần header cộng các bản ghi; `create` không bao giờ đụng vào một tệp đã tồn tại; các reader dừng ở bản ghi toàn số 0, bị ghi dở hoặc dở dang đầu tiên; `open_append` ghi tiếp sau bản ghi hợp lệ cuối cùng, nâng cấp một log cũ hơn mà nó ghi tiếp (ghi lại dung lượng của log đó), và từ chối một log được ghi cho dung lượng hoặc số tick khác mà không đụng vào nó; writer thứ hai nhận `WouldBlock` còn writer thứ nhất vẫn chạy tiếp; `replay` dựng engine với dung lượng và số tick đã được ghi lại, và từ chối log không có dung lượng; bản ghi giới hạn rủi ro mã hóa rồi giải mã vẫn nguyên vẹn; `replay_from` chỉ áp dụng các bản ghi đứng sau một snapshot; header sai cho lỗi `InvalidData`. |
+| `snapshot.rs` | `encode_decode_roundtrip`, `a_version_1_checkpoint_is_still_read`, `damage_anywhere_is_detected`, `writing_replaces_the_checkpoint_in_one_step` | Checkpoint mã hóa rồi giải mã vẫn nguyên vẹn, dù có lệnh hay không, cùng với số tick và các giới hạn rủi ro của nó; một checkpoint cũ hơn được đọc lại với các giá trị mặc định; mọi bit bị lật và mọi lần cắt cụt đều bị phát hiện; việc ghi thay thế checkpoint cũ và không để lại tệp `.tmp` nào, kể cả khi một lần ghi bị sập trước đó đã để lại một tệp như vậy. |
 
 Các test sự cố của WAL không làm sập thứ gì cả. Chúng tự tay ghi ra các
 **crash image** (một header hợp lệ, theo sau là những byte do ta chọn: phần đuôi
@@ -132,6 +135,8 @@ dùng seed cố định, nên mỗi lần chạy đều tái lập được. Nó
 - các lần hủy lệnh và giảm số lượng (cộng lại khoảng 30%), nhắm vào id còn sống,
   id đã khớp hết, id chưa từng được cấp, và cả id dành riêng; lần giảm đôi khi
   bằng 0 và thường bằng toàn bộ phần còn lại hoặc hơn;
+- hiếm khi có lần thay đổi giới hạn rủi ro (khoảng một trên 500 yêu cầu): một
+  số lượng tối đa, một biên độ giá, cả hai hoặc không có cái nào;
 - thỉnh thoảng có lần hủy hàng loạt (khoảng một trên 200 yêu cầu), chủ yếu cho
   một tài khoản, đôi khi cho cả sổ lệnh;
 - thỉnh thoảng có các đầu vào biên (edge input): số lượng bằng 0, tick ngoài
@@ -143,7 +148,10 @@ tốt nhất và ask tốt nhất, số lệnh còn sống, độ sâu tại m�
 dùng, và `resting_order` của lệnh mà yêu cầu nhắc tới cùng mọi maker đã giao dịch
 với nó. Cứ mỗi 1,000 yêu cầu, nó còn so sánh toàn bộ `depth_snapshot`. Test chạy 4 seed ×
 20,000 yêu cầu với arena chật (64 lệnh, nên phần còn lại của lệnh thường bị từ
-chối) và thêm 4 seed với arena rộng rãi (8,192 lệnh, nên sổ trở nên sâu).
+chối) và thêm 4 seed với arena rộng rãi (8,192 lệnh, nên sổ trở nên sâu), tất cả
+đều với 4096 tick mặc định, và thêm 2 seed trên một **thang giá 300,000 tick**
+(bốn tầng bitset), nơi các cú quét và các lệnh quá cỡ chạm tới cả hai đầu của
+thang giá.
 
 Hai chi tiết khiến test này đáng tin:
 
@@ -151,8 +159,8 @@ Hai chi tiết khiến test này đáng tin:
   chạm tới bao nhiêu lần (đầu vào bị từ chối, phần còn lại bị từ chối, maker bị
   khớp một phần, hủy lệnh thành công, lời gọi tạo ra hơn 64 sự kiện, phần còn lại
   bị hết hạn, lệnh post-only bị từ chối, lần giảm số lượng, lần tự giao dịch bị
-  ngăn chặn, lệnh bị gỡ bởi một lần hủy hàng loạt) và fail nếu có bộ đếm nào bằng
-  0. Nếu ai đó sửa bộ sinh khiến một đường đi lặng lẽ không
+  ngăn chặn, lệnh bị gỡ bởi một lần hủy hàng loạt, lần từ chối do giới hạn rủi
+  ro) và fail nếu có bộ đếm nào bằng 0. Nếu ai đó sửa bộ sinh khiến một đường đi lặng lẽ không
   còn được chạy tới, thay đổi đó không thể lọt qua mà không ai hay biết.
 - **Lỗi tái lập được.** Mọi thông báo assertion đều kèm seed, bước và yêu cầu,
   nên có thể phát lại chính xác một lần fail.
@@ -314,12 +322,13 @@ $env:RUSTFLAGS = "-C target-cpu=native"; cargo bench  # PowerShell
 ## 10.6 Các benchmark
 
 [`benches/matching_engine_bench.rs`](../../benches/matching_engine_bench.rs) dùng
-thư viện [criterion](https://docs.rs/criterion). Có ba benchmark, mỗi cái chạy
+thư viện [criterion](https://docs.rs/criterion). Có bốn benchmark, mỗi cái chạy
 trên một engine mới:
 
 | Benchmark | Chuẩn bị (không tính giờ) | Phần việc được tính giờ | Số lệnh mỗi lần chạy |
 |---|---|---|---|
 | `place_10k_resting_orders` | engine rỗng, dung lượng 20,000 | 10,000 lệnh mua, mỗi lệnh ở tick `i % 4000`; không lệnh nào vượt spread nên lệnh nào cũng nằm chờ | 10,000 |
+| `place_10k_resting_orders_300k_ticks` | như trên, với 300,000 tick | như trên, ở các tick `i × 29 % 300,000`, trải khắp toàn bộ thang giá | 10,000 |
 | `cross_spread_matching` | 5,000 ask cỡ 1 ở tick 100 | 5,000 lệnh mua cỡ 1 ở tick 100; mỗi lệnh ăn đúng một maker | 5,000 |
 | `cancel_orders` | 10,000 lệnh mua đang chờ | hủy cả 10,000 lệnh theo id | 10,000 |
 
@@ -372,6 +381,27 @@ nếu việc khởi tạo và sao chép batch đó chiếm một phần lớn ch
 là một bằng chứng đo được cho điểm đã nói ở chương 7, rằng "không cấp phát" không
 có nghĩa là "không tốn chi phí". Vì chỉ có một lần chạy trên laptop, hãy hiểu đây
 là "nhanh hơn rõ rệt", đừng coi các tỷ lệ phần trăm là chính xác.
+
+Khi thang giá được mở rộng để có số tầng bất kỳ (mục 4.6), một lần chạy trên cùng
+chiếc máy đó cho kết quả:
+
+| Benchmark | Thời gian báo cáo (estimate) | Số lệnh | ≈ mỗi lệnh |
+|---|---|---|---|
+| `place_10k_resting_orders` | 557 µs | 10,000 | ≈ 56 ns |
+| `place_10k_resting_orders_300k_ticks` | 1.01 ms | 10,000 | ≈ 101 ns |
+| `cross_spread_matching` | 381 µs | 5,000 | ≈ 76 ns |
+| `cancel_orders` | 127 µs | 10,000 | ≈ 13 ns |
+
+Có hai bài học ẩn trong các con số này. Thứ nhất, criterion đã so sánh bitset
+tổng quát hóa với bitset hai tầng cố định (`cargo bench -- --save-baseline before`,
+rồi `-- --baseline before`) và **không thấy thay đổi nào** ở việc đặt lệnh và
+khớp lệnh: với 4096 tick, vòng lặp chạy đúng hai bước như trước. Thứ hai, thang
+giá rộng tốn thêm khoảng 45 ns cho mỗi lệnh, và có lẽ không phải vì hai lần quét
+bit thêm của nó: các lệnh của nó trải trên 14 MB mức giá, nên phần lớn chúng bị
+trượt cache (cache miss). (`cancel_orders` cũng trông nhanh hơn trước nhiều,
+nhưng nhiều khả năng đó là nhờ benchmark chứ không phải nhờ engine: `Engine` thu
+nhỏ từ 1,168 xuống 272 byte khi các bitset chuyển lên heap, và bộ khung chạy
+(harness) của criterion di chuyển engine giữa bước setup và routine.)
 
 > [!IMPORTANT]
 > Hãy coi các số này là bản phác thảo về bậc độ lớn, **không phải một lời hứa**.
