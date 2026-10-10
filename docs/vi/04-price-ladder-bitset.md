@@ -5,9 +5,9 @@
 > **Gặp từ lạ?** Mọi thuật ngữ trong các chương đều được giải thích trong
 > [bảng thuật ngữ](glossary.md).
 
-Nguồn: [`src/bitset.rs`](../../src/bitset.rs)
+Mã nguồn: [`src/bitset.rs`](../../src/bitset.rs)
 
-Module này liên tục trả lời một câu hỏi, mỗi lần chỉ tốn O(1):
+Mô-đun này liên tục trả lời một câu hỏi, với độ phức tạp O(1):
 
 > **"Hiện giờ, mức giá tốt nhất có ít nhất một lệnh là mức nào?"**
 
@@ -21,15 +21,15 @@ cách làm:
 
 | Cách làm | Chi phí để tìm giá tốt nhất | Ghi chú |
 |---|---|---|
-| Duyệt `levels[0..ticks]` để tìm mức không rỗng đầu tiên | tối đa một bước cho mỗi tick | Đơn giản, nhưng quá chậm và khó đoán trước. |
-| Cây có thứ tự (`BTreeMap`) | O(log n) | Phải lần theo con trỏ; có cấp phát khi chèn/xóa. |
+| Duyệt `levels[0..ticks]` để tìm mức không rỗng đầu tiên | tối đa một bước cho mỗi tick | Đơn giản, nhưng chậm và có thời gian xử lý khó dự đoán. |
+| Cây lưu khóa có thứ tự (`BTreeMap`) | O(nhật ký n) | Phải lần theo con trỏ; có cấp phát khi chèn/xóa. |
 | Lưu sẵn giá trị "tốt nhất", tính lại khi mức đó hết lệnh | thường O(1), đôi khi O(n) | Chính những lần quét lại hiếm hoi này tạo ra các đợt tăng vọt độ trễ mà ta muốn tránh. |
 | **Bitset kèm quét bit** | **O(1), luôn luôn** | Mỗi tick một bit; CPU tìm một bit bật chỉ bằng một chỉ thị (instruction). |
 
 ## 4.2 Ý tưởng 1: mỗi tick một bit
 
 Ta giữ một bit cho mỗi tick: `1` = "có ít nhất một lệnh đang nằm chờ ở đây",
-`0` = trống. Chương này trước hết xét một engine có 4096 tick mặc định (4.2
+`0` = trống. Chương này trước hết xét một bộ khớp lệnh có 4096 tick mặc định (4.2
 đến 4.5), rồi cho thấy cùng ý tưởng đó mở rộng ra số tick bất kỳ như thế nào
 (4.6). 4096 tick cần 4096 bit = 64 word, mỗi word 64 bit.
 
@@ -44,7 +44,7 @@ Ta giữ một bit cho mỗi tick: `1` = "có ít nhất một lệnh đang nằ
 thị CPU: **đếm số bit 0 ở cuối** (count trailing zeros). Để tìm bit bật cao
 nhất: **đếm số bit 0 ở đầu** (count leading zeros). Trên CPU hiện đại, cả hai đều
 chỉ là một chỉ thị, nhưng chỉ làm việc trên *một* word 64 bit. Duyệt cả 64 word
-thì vẫn tốn tới 64 bước. Ý tưởng 2 sẽ loại bỏ chỗ này.
+thì vẫn tốn tới 64 bước. Ý tưởng 2 sẽ loại bỏ bước duyệt này.
 
 ### Quét bit trong 30 giây
 
@@ -61,10 +61,10 @@ Dùng số 8 bit để minh họa cho gọn:
 ```
 
 Với `u64`, bit bật cao nhất nằm ở vị trí `63 - leading_zeros`. Trong Rust, hai
-phép này là các method `u64::trailing_zeros` và `u64::leading_zeros`. Trình
+phép này là các phương thức `u64::trailing_zeros` và `u64::leading_zeros`. Trình
 biên dịch dịch chúng thành một hoặc hai chỉ thị (ví dụ `tzcnt`/`bsf` và
 `lzcnt`/`bsr` trên x86-64, `clz` hoặc `rbit` + `clz` trên ARM). Chỉ thị cụ thể
-phụ thuộc vào nền tảng đích lúc biên dịch; build với `-C target-cpu=native` sẽ
+phụ thuộc vào nền tảng đích lúc biên dịch; biên dịch với `-C target-cpu=native` sẽ
 cho phép trình biên dịch dùng các chỉ thị mới nhất.
 
 ## 4.3 Ý tưởng 2: thêm một word tóm tắt ở trên
@@ -97,13 +97,13 @@ words: [u64; 64],       // level 1: bit b of words[g] set <=> tick g*64+b is act
 
 Kích thước: `8 + 64 × 8 = 520 bytes`. Cả cấu trúc chỉ trải trên 9 đến 10 cache
 line, và trên thực tế mỗi thao tác chỉ chạm tới word summary cộng với một hoặc
-hai word khác. (`TickBitset` thật giữ 65 word này trong một mảng duy nhất, để
-cùng một đoạn code cũng chạy được với nhiều tầng hơn; 4.6 sẽ cho thấy cách làm.)
+hai word khác. (Triển khai `TickBitset` thực tế giữ 65 word này trong một mảng duy nhất, để
+cùng một đoạn mã cũng chạy được với nhiều tầng hơn; 4.6 sẽ cho thấy cách làm.)
 
 ### Đổi tick thành vị trí (word, bit)
 
 Vì `64 = 2^6`, phép chia và phép lấy dư biến thành một phép dịch bit và một phép
-mask:
+AND với mặt nạ bit (mask):
 
 ```rust
 let word_idx = tick >> 6;    // tick / 64
@@ -116,10 +116,10 @@ Ví dụ với `tick = 1234`: `1234 >> 6 = 19` (vì 19 × 64 = 1216) và
 
 ## 4.4 Các thao tác
 
-> Các đoạn code trích trong phần này trình bày tường minh trường hợp hai tầng để
-> từng bước đều rõ ràng. [`src/bitset.rs`](../../src/bitset.rs) thực hiện đúng các bước đó
+> Các đoạn mã trích trong phần này minh họa riêng trường hợp hai tầng để
+> làm rõ từng bước. [`src/bitset.rs`](../../src/bitset.rs) thực hiện đúng các bước đó
 > trong một vòng lặp ngắn qua các tầng (4.6); với 4096 tick, tức là có hai tầng,
-> vòng lặp làm đúng y như những gì trình bày ở đây.
+> vòng lặp thực hiện đúng các bước được trình bày ở đây.
 
 ### `set(tick)`: đánh dấu một tick có lệnh
 
@@ -129,8 +129,8 @@ self.summary         |= 1u64 << word_idx;  // level 2: mark its word non-empty
 ```
 
 Bật một bit đã bật thì không có gì thay đổi, nên `set` có tính **idempotent**
-(gọi nhiều lần cũng như gọi một lần). Engine gọi nó mỗi khi có một lệnh nằm chờ
-trong sổ, kể cả khi mức giá đó đã có lệnh từ trước. Mã nguồn thậm chí còn dừng
+(gọi nhiều lần cũng như gọi một lần). Bộ khớp lệnh gọi nó mỗi khi có một lệnh nằm chờ
+trong sổ, kể cả khi mức giá đó đã có lệnh từ trước. Triển khai còn dừng
 sớm: nếu word đó đã có bit bật từ trước thì bit summary cũng đã được bật, nên
 không còn gì phải làm nữa.
 
@@ -162,10 +162,10 @@ if self.words[word_idx] == 0 {                   // ...only if the word is now a
 }
 ```
 
-Câu `if` này rất quan trọng. Word 1 có thể chứa cả tick 100 **và** tick 101. Khi
+Điều kiện `if` này rất quan trọng. Word 1 có thể chứa cả tick 100 **và** tick 101. Khi
 xóa tick 100, ta **không** được xóa bit summary. Nếu xóa, summary sẽ báo word 1
 rỗng trong khi tick 101 vẫn còn lệnh (một "âm tính giả", false negative), và
-engine sẽ không bao giờ nhìn thấy lệnh ở 101.
+bộ khớp lệnh sẽ không bao giờ nhìn thấy lệnh ở 101.
 
 ### `test(tick)`: tick có lệnh không?
 
@@ -209,9 +209,9 @@ Summary giờ là `{31}`, và `lowest()` trả về 2000.
 hai tầng bao phủ được 64 × 64 tick. Vì thế, 4096 là giá trị mặc định
 (`DEFAULT_TICKS`), và trong một thời gian dài đó cũng là kích thước duy nhất:
 bitset từng là một struct hai tầng cố định, và một phép kiểm tra lúc biên dịch
-ngăn không cho ai làm nó lớn hơn.
+ngăn việc tăng kích thước.
 
-Các mã giao dịch (instrument) thật cần nhiều hơn thế. Một cổ phiếu có giá quanh
+Các mã giao dịch (instrument) trong thực tế cần nhiều hơn thế. Một cổ phiếu có giá quanh
 100.00 với bước giá (tick size) 0.01 đã cần 10,000 tick chỉ để lên tới 100.00.
 Có thể mở rộng bằng cách **thêm một tầng phía trên mỗi khi tầng bên dưới có hơn
 một word**, giống như cách thêm word summary ban đầu.
@@ -261,7 +261,7 @@ quy tắc ở 4.4 áp dụng cho mọi tầng. `highest()` giống `lowest()` nh
 `63 - leading_zeros`.
 
 Với hai tầng, các vòng lặp thực hiện đúng những bước ở 4.4; benchmark (chương
-10) không cho thấy chi phí đo được do tính tổng quát này. Mỗi tầng bổ sung làm
+10) không ghi nhận chi phí tăng thêm do việc hỗ trợ nhiều tầng. Mỗi tầng bổ sung làm
 tăng thêm một lần quét bit, nhưng độ phức tạp vẫn là O(1); dung lượng bộ nhớ
 cũng tăng theo. Mỗi tick cần hai mức giá, mỗi mức 24 byte, nên 4096 tick tốn
 196 KB và 262,144 tick tốn 12.6 MB. Bộ nhớ, chứ không phải số lần quét bit, mới
@@ -272,20 +272,20 @@ Giờ đây, giới hạn kích thước được kiểm tra khi tạo bitset th
 vì chỉ khi đó mới biết kích thước cần dùng: `TickBitset::new` panic nếu số tick
 bằng 0 hoặc lớn hơn `MAX_LADDER_TICKS` (2^24, bốn tầng).
 
-## 4.7 Engine dùng nó như thế nào
+## 4.7 Bộ khớp lệnh dùng nó như thế nào
 
-`Engine` sở hữu **hai** bitset, mỗi phía một cái:
+`Engine` sở hữu **hai** bitset, mỗi phía một bitset:
 
 | Bitset | Bit được bật khi... | Giá tốt nhất là... | Truy vấn |
 |---|---|---|---|
 | `bid_bitset` | một bid nằm chờ ở tick đó | tick được bật **cao nhất** | `highest()` (`Engine::best_bid`) |
 | `ask_bitset` | một ask nằm chờ ở tick đó | tick được bật **thấp nhất** | `lowest()` (`Engine::best_ask`) |
 
-Bit được cập nhật tại đúng ba chỗ:
+Bit được cập nhật trong đúng ba trường hợp:
 
 1. **Lệnh nằm chờ trong sổ** (`rest`, được `submit_order` và `restore` dùng,
    sau khi `push_back` thành công): `set(tick)`.
-2. **Mức giá bị khớp cạn** (`match_incoming`, khi `level.is_empty()`, dù lệnh
+2. **Mức giá không còn lệnh sau khi khớp** (`match_incoming`, khi `level.is_empty()`, dù lệnh
    maker cuối cùng đã được khớp hết hay bị gỡ bởi cơ chế chống tự giao dịch
    (self-trade prevention)): `clear(tick)`.
 3. **Lệnh cuối cùng ở một mức giá bị hủy** (`remove_cancelled`, được dùng bởi
@@ -298,11 +298,11 @@ tử không rỗng.
 
 > [!NOTE]
 > `Engine::depth_snapshot` cần tìm mức không rỗng *kế tiếp* sau mức tốt nhất.
-> Code hiện tại làm việc đó bằng cách gọi `test(t)` lần lượt trên từng tick
+> Mã hiện tại làm việc đó bằng cách gọi `test(t)` lần lượt trên từng tick
 > (`next_lower_active` / `next_higher_active`), tức là quét tuyến tính, dù
-> bitset có thể trả lời nhanh hơn: che (mask) các bit từ `t` trở xuống (với ask,
+> bitset có thể trả lời nhanh hơn: loại bỏ bằng mặt nạ (mask) các bit từ `t` trở xuống (với ask,
 > vì ask quét lên) hoặc từ `t` trở lên (với bid, vì bid quét xuống), rồi quét
-> phần bit còn lại. Đây là một tối ưu khá đơn giản nhưng có nhiều điều để học
+> phần bit còn lại. Đây là một bài tập tối ưu khá đơn giản và hữu ích
 > (xem phần bài tập). Nó không nằm trên hot path xử lý lệnh.
 
 ## 4.8 Tóm tắt
@@ -316,13 +316,13 @@ tử không rỗng.
 
 ## 4.9 Tự thực hành
 
-Chạy các unit test của bitset:
+Chạy các kiểm thử đơn vị của bitset:
 
 ```sh
 cargo test bitset::
 ```
 
-Sau đó hãy tự viết một test nhỏ ở cuối module `tests` trong
+Sau đó hãy tự viết một kiểm thử nhỏ ở cuối mô-đun `tests` trong
 [`src/bitset.rs`](../../src/bitset.rs): trong một `TickBitset::new(4096)`, bật
 các tick `5`, `70` và `4000`, đoán trước `lowest()` và `highest()` trả về gì và
 những bit nào của summary đang bật, rồi kiểm tra bằng `assert_eq!`. Xóa tick `5`

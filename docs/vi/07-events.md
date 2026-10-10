@@ -1,4 +1,4 @@
-# 7. Sự kiện (events): engine báo cáo những gì đã xảy ra
+# 7. Sự kiện (events): bộ khớp lệnh báo cáo những gì đã xảy ra
 
 > *Bản gốc tiếng Anh: [07-events.md](../07-events.md)*
 
@@ -7,13 +7,13 @@
 
 Mã nguồn: [`src/events.rs`](../../src/events.rs)
 
-Engine không in ra gì cả, không ghi vào socket, và cũng không quyết định kết quả
-của nó đi đâu. Mỗi lần gọi `process_order` hoặc `cancel_order` đều nhận thêm một
-tham số, gọi là **event sink** (nơi nhận sự kiện), và engine đưa từng sự kiện cho
+Bộ khớp lệnh không in dữ liệu, không ghi vào socket và không quyết định nơi
+nhận kết quả xử lý. Mỗi lần gọi `process_order` hoặc `cancel_order` đều nhận thêm một
+tham số, gọi là **event sink** (bộ nhận sự kiện), và bộ khớp lệnh gửi từng sự kiện đến
 sink ngay khi sự kiện phát sinh. Bên gọi tự quyết định làm gì với chúng (phát dữ
-liệu thị trường, cập nhật tài khoản, ghi log...).
+liệu thị trường, cập nhật tài khoản, ghi nhật ký...).
 
-Nhờ vậy engine là một máy trạng thái (state machine) thuần túy và tất định
+Nhờ vậy bộ khớp lệnh là một máy trạng thái (state machine) thuần túy và tất định
 (deterministic):
 
 ```text
@@ -60,24 +60,24 @@ pub enum CancelRejectReason {
 }
 ```
 
-| Sự kiện | Được phát ra khi | Nói về ai |
+| Sự kiện | Được phát ra khi | Đối tượng liên quan |
 |---|---|---|
-| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện nhắc lại tài khoản, phía, loại lệnh, giá giới hạn và số lượng của lệnh (với lệnh thị trường, đó là giá giới hạn mà nó được gán: mép của biên độ giá (price band), hoặc mức giá tệ nhất mà phía của nó cho phép). | lệnh vừa đến |
+| `OrderAccepted` | Một lệnh mới đã qua bước kiểm tra hợp lệ. Sự kiện chứa tài khoản, phía, loại lệnh, giá giới hạn và số lượng của lệnh (với lệnh thị trường, đó là giá giới hạn mà nó được gán: mép của biên độ giá (price band), hoặc mức giá tệ nhất mà phía của nó cho phép). | lệnh vừa đến |
 | `Trade` | Hai lệnh khớp với nhau. `taker_side` là phía của bên chủ động (aggressor); `trade_id` đánh số các giao dịch 1, 2, 3, ... | cả maker **và** taker, ở giá của maker |
 | `OrderPartiallyFilled` | Một lệnh đã giao dịch nhưng vẫn còn số lượng. | một maker (sau mỗi lần khớp một phần), hoặc taker (một lần, ở cuối) |
-| `OrderFilled` | Một lệnh không còn gì nữa. | một maker (khi nó bị khớp hết), hoặc taker |
+| `OrderFilled` | Một lệnh đã khớp hết số lượng. | một maker (khi nó bị khớp hết), hoặc taker |
 | `OrderExpired` | Phần còn lại của một lệnh immediate-or-cancel hoặc lệnh thị trường bị bỏ đi; nó chưa bao giờ vào sổ. | taker (một lần ở cuối) |
-| `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu (hoặc bị giảm đi toàn bộ số lượng còn lại). Sự kiện cho biết lệnh đã nằm chờ ở đâu và bao nhiêu số lượng đã rời khỏi sổ. | lệnh bị hủy |
-| `OrderReduced` | Số lượng của một lệnh đang chờ được giảm theo yêu cầu; lệnh vẫn giữ nguyên vị trí trong hàng đợi. | lệnh bị giảm |
-| `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, vi phạm một giới hạn rủi ro, một lệnh post-only sẽ gây ra giao dịch, hoặc không còn chỗ để nằm chờ. `reason` cho biết là lý do nào. | lệnh vừa đến |
+| `OrderCancelled` | Một lệnh đang chờ bị hủy theo yêu cầu (hoặc bị giảm đi toàn bộ số lượng còn lại). Sự kiện cho biết lệnh đã nằm chờ ở đâu và số lượng bị loại khỏi sổ. | lệnh bị hủy |
+| `OrderReduced` | Số lượng của một lệnh đang chờ được giảm theo yêu cầu; lệnh vẫn giữ nguyên vị trí trong hàng đợi. | lệnh bị giảm số lượng |
+| `OrderRejected` | Một lệnh bị từ chối: đầu vào sai, vi phạm một giới hạn rủi ro, một lệnh post-only sẽ gây ra giao dịch, hoặc không còn chỗ để nằm chờ. `reason` cho biết lý do. | lệnh vừa đến |
 | `SelfTradePrevented` | Một lệnh mới sắp khớp với lệnh đang chờ của cùng tài khoản, nhưng chế độ chống tự giao dịch (self-trade prevention) đã chặn giao dịch. Theo sau là `OrderCancelled` của maker, `OrderExpired` của taker, hoặc cả hai, tùy theo chế độ. | cả taker **và** maker |
-| `MassCancelled` | Một lần gọi `cancel_account` (`account: Some(..)`) hoặc `cancel_all` (`None`) đã xong; `cancelled_orders` đếm số sự kiện `OrderCancelled` đứng trước nó. | yêu cầu đó |
-| `CancelRejected` | Một yêu cầu hủy hoặc giảm lệnh bị từ chối: không có lệnh đang chờ nào mang id đó, hoặc lượng giảm bằng 0. `reason` cho biết là lý do nào. | id trong yêu cầu |
+| `MassCancelled` | Một lần gọi `cancel_account` (`account: Some(..)`) hoặc `cancel_all` (`None`) đã hoàn tất; `cancelled_orders` đếm số sự kiện `OrderCancelled` đứng trước nó. | yêu cầu đó |
+| `CancelRejected` | Một yêu cầu hủy hoặc giảm lệnh bị từ chối: không có lệnh đang chờ nào mang ID đó, hoặc lượng giảm bằng 0. `reason` cho biết lý do. | ID trong yêu cầu |
 
-`Event` derive `Debug, Clone, Copy, PartialEq, Eq`, nên sao chép sự kiện rất rẻ
-và so sánh chúng trong test rất dễ. Một `Event` nặng 40 byte (biến thể lớn nhất là
+`Event` dùng `derive` để triển khai `Debug, Clone, Copy, PartialEq, Eq`, nên
+việc sao chép ít tốn chi phí và có thể dễ dàng so sánh sự kiện trong kiểm thử. Một `Event` chiếm 40 byte (biến thể lớn nhất là
 `Trade`, chứa `8 + 8 + 8 + 8 + 4 + 1 = 37` byte, cộng với tag, rồi làm tròn lên bội
-số của 8). Các biến thể khác đều nằm vừa trong chỗ mà `Trade` vốn đã cần.
+số của 8). Các biến thể khác đều nằm vừa trong vùng nhớ dành cho `Trade`.
 
 ## 7.2 Quy tắc về thứ tự
 
@@ -94,9 +94,9 @@ sau:
 
 Những điểm cần nhớ:
 
-- Một `Trade` **luôn được theo ngay sau** bởi sự kiện mô tả trạng thái mới của
+- Ngay sau một `Trade` **luôn là** sự kiện mô tả trạng thái mới của
   *maker*.
-- Khi có chống tự giao dịch, một `SelfTradePrevented` thế chỗ cho một `Trade`
+- Khi có chống tự giao dịch, một `SelfTradePrevented` thay cho một `Trade`
   trong chuỗi đó. Theo sau nó là `OrderCancelled` của chính maker cùng tài khoản
   (chế độ `CancelResting` và `CancelBoth`), và với `CancelIncoming` và
   `CancelBoth` thì việc khớp lệnh dừng lại tại đó: sự kiện cuối của taker và
@@ -107,11 +107,11 @@ Những điểm cần nhớ:
 - Một taker không giao dịch lần nào mà chỉ nằm chờ thì chỉ tạo ra **duy nhất**
   `OrderAccepted`. Không có sự kiện riêng kiểu "lệnh đang nằm chờ".
 - Lệnh bị từ chối trước khi được chấp nhận (đầu vào sai, vi phạm một giới hạn rủi ro, hoặc lệnh post-only
-  sẽ gây ra giao dịch) thì sự kiện đến **một mình**; lệnh bị từ chối vì hết dung
-  lượng thì sự kiện đến **sau** `OrderAccepted`, và chỉ với lệnh chưa
+  có thể khớp ngay) thì chỉ phát **một sự kiện từ chối**; lệnh bị từ chối vì hết dung
+  lượng thì sự kiện từ chối xuất hiện **sau** `OrderAccepted`, và chỉ với lệnh chưa
   giao dịch lần nào (xem
   [mục 6.4](06-matching-algorithm.md#64-giai-đoạn-4-cho-phần-còn-lại-nằm-chờ-trong-sổ)).
-- Bản thân engine **không bao giờ làm rơi sự kiện**. Chỉ có sink có giới hạn, như
+- Bản thân bộ khớp lệnh **không bao giờ bỏ sót sự kiện**. Chỉ có sink có giới hạn, như
   `EventBatch`, mới có thể hết chỗ (mục 7.4).
 - Một lần gọi `cancel_order` hoặc `reduce_order` phát ra **đúng một** sự kiện:
   `OrderCancelled` hoặc `OrderReduced` nếu nó làm thay đổi sổ lệnh,
@@ -124,8 +124,8 @@ Những điểm cần nhớ:
 
 ### Theo dõi sổ lệnh chỉ bằng sự kiện
 
-Các sự kiện mang đủ thông tin để giữ một bản sao độ sâu của sổ lệnh mà không cần
-nhìn thấy các yêu cầu. Đó chính là việc mà một hệ thống phát dữ liệu thị trường
+Các sự kiện mang đủ thông tin để duy trì một bản sao độ sâu của sổ lệnh mà không cần
+đọc các yêu cầu đầu vào. Đó chính là việc mà một hệ thống phát dữ liệu thị trường
 hay một hệ thống quản lý rủi ro làm:
 
 | Sự kiện | Thay đổi trên bản sao |
@@ -137,25 +137,25 @@ hay một hệ thống quản lý rủi ro làm:
 | `SelfTradePrevented`, `MassCancelled` | không có gì: các sự kiện `OrderCancelled` quanh chúng mang theo các thay đổi |
 | kết thúc một lần gọi `submit_order` | trừ khi sự kiện cuối cùng của taker là `OrderFilled`, `OrderExpired` hoặc `OrderRejected`, phần còn lại của nó (`qty` trừ đi các giao dịch của nó) giờ nằm chờ tại chính `price_tick` của nó |
 
-`trade_id` giúp xử lý các chỗ hổng và bản trùng lặp nói ở
-[mục 9.5](09-write-ahead-log.md#95-đọc-và-phát-lại): engine đánh số các giao dịch
-theo đúng thứ tự chúng xảy ra, và engine là tất định, nên phát lại cùng các yêu cầu
-đó sẽ gán ra đúng những id y hệt. Một bên tiêu thụ đã thấy giao dịch 41 có thể bỏ
-qua mọi giao dịch có id nhỏ hơn, còn một bước nhảy từ 41 lên 43 nghĩa là nó đã bỏ
+`trade_id` giúp xử lý các giao dịch bị thiếu hoặc bị gửi lặp nói ở
+[mục 9.5](09-write-ahead-log.md#95-đọc-và-phát-lại): bộ khớp lệnh đánh số các giao dịch
+theo đúng thứ tự chúng xảy ra, và bộ khớp lệnh là tất định, nên phát lại cùng các yêu cầu
+đó sẽ gán đúng các ID như trước. Một bên tiêu thụ đã thấy giao dịch 41 có thể bỏ
+qua mọi giao dịch có ID nhỏ hơn, còn một bước nhảy từ 41 lên 43 nghĩa là nó đã bỏ
 lỡ một giao dịch.
 
 ### Các chuỗi sự kiện mẫu
 
-Các chuỗi này lấy thẳng từ unit test trong `engine.rs`.
+Các chuỗi này được lấy trực tiếp từ kiểm thử đơn vị trong `engine.rs`.
 
 | Tình huống | Sự kiện |
 |---|---|
 | Lệnh nằm chờ, không có gì khớp | `Accepted` |
-| Khớp vừa khít, taker bằng maker | `Accepted`, `Trade`, `Filled(maker)`, `Filled(taker)` |
+| Khớp vừa đủ, taker bằng maker | `Accepted`, `Trade`, `Filled(maker)`, `Filled(taker)` |
 | Taker nhỏ hơn maker | `Accepted`, `Trade`, `PartiallyFilled(maker, left)`, `Filled(taker)` |
 | Taker lớn hơn maker; phần còn lại nằm chờ | `Accepted`, `Trade`, `Filled(maker)`, `PartiallyFilled(taker, left)` |
 | Taker quét qua nhiều mức giá | `Accepted`, rồi mỗi lần khớp có `Trade` + sự kiện của maker, cuối cùng là sự kiện cuối của taker |
-| Đầu vào không hợp lệ / trùng id | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
+| Đầu vào không hợp lệ / trùng ID | `Rejected(ZeroQuantity / ReservedOrderId / PriceOutOfRange / DuplicateOrderId)` |
 | Lệnh có số lượng vượt mức tối đa, hoặc có giá vượt ra ngoài biên độ giá | `Rejected(QuantityAboveLimit / PriceOutsideBand)` |
 | Lệnh post-only có giá chạm tới phía đối diện | `Rejected(PostOnlyWouldTrade)` |
 | Lệnh không nằm chờ được (arena đầy / tràn số) | `Accepted`, `Rejected(BookFull / LevelQuantityOverflow)` (chưa có giao dịch nào) |
@@ -183,8 +183,8 @@ ba loại sink, và bạn cũng có thể tự cài đặt cho kiểu của riê
 
 | Sink | Có cấp phát không? | Giữ lại | Dùng khi |
 |---|---|---|---|
-| `Vec<Event>` | chỉ khi nó đang lớn lên; tái sử dụng nó (bằng `clear`) thì sau giai đoạn khởi động nó sẽ không cấp phát nữa | mọi sự kiện | test, bên gọi đơn giản, bất cứ chỗ nào cần danh sách đầy đủ |
-| closure `FnMut(Event)` | chỉ khi bản thân closure cấp phát | không giữ gì | chuyển tiếp thẳng từng sự kiện đi nơi khác: vào hàng đợi, bộ đếm, log |
+| `Vec<Event>` | chỉ khi tăng dung lượng; tái sử dụng nó (bằng `clear`) thì sau giai đoạn khởi động nó sẽ không cấp phát nữa | mọi sự kiện | kiểm thử, bên gọi đơn giản, bất cứ chỗ nào cần danh sách đầy đủ |
+| closure `FnMut(Event)` | chỉ khi bản thân closure cấp phát | không giữ lại sự kiện | chuyển tiếp thẳng từng sự kiện đi nơi khác: vào hàng đợi, bộ đếm, nhật ký |
 | `EventBatch` | **không bao giờ** | 64 sự kiện đầu tiên của một lần gọi, và đếm số còn lại | bên gọi tuyệt đối không được cấp phát, và có kiểm tra xem sự kiện có bị cắt bớt không |
 
 Dưới đây là cả ba cách chạy thực tế. Ví dụ y hệt có trong rustdoc của
@@ -230,8 +230,8 @@ assert_eq!(batch.as_slice().last(), Some(&Event::OrderFilled { order_id: 3 }));
 
 ### Tại sao dùng sink thay vì giá trị trả về?
 
-Một phiên bản đầu của engine trả về một `EventBatch` cố định 64 ô sau mỗi lần
-gọi. Thiết kế đó phải trả hai cái giá, và cả hai đều đáng để học:
+Một phiên bản đầu của bộ khớp lệnh trả về một `EventBatch` cố định 64 ô sau mỗi lần
+gọi. Thiết kế đó có hai hạn chế, và cả hai đều là bài học hữu ích:
 
 1. **Mất sự kiện mà không báo.** Một taker quét qua 32 maker trở lên sẽ tạo ra
    hơn 64 sự kiện. Sổ lệnh vẫn được cập nhật đúng, nhưng các sự kiện của những
@@ -241,17 +241,17 @@ gọi. Thiết kế đó phải trả hai cái giá, và cả hai đều đáng 
    gọi đều khởi tạo và sao chép một mảng 2 KiB, kể cả với lệnh chỉ tạo ra một sự
    kiện.
 
-Với sink, engine không cần biết trước một lần gọi sẽ tạo ra bao nhiêu sự kiện. Và
+Với sink, bộ khớp lệnh không cần biết trước một lần gọi sẽ tạo ra bao nhiêu sự kiện. Và
 vì `process_order` là generic theo kiểu của sink (`S: EventSink + ?Sized`), trình
 biên dịch tạo ra một bản chuyên biệt cho từng loại sink (đơn hình hóa,
-monomorphization) và inline `emit`: một sink dạng closure không tốn hơn đoạn code
+monomorphization) và inline `emit`: một sink dạng closure không tốn hơn đoạn mã
 viết tay.
 
 ## 7.4 Chuyện gì xảy ra khi có quá nhiều sự kiện?
 
-Engine không bao giờ làm rơi sự kiện, nhưng một sink **có giới hạn** thì có thể
-hết chỗ. `EventBatch` sinh ra cho trường hợp đó: một mảng cố định, không cấp phát,
-và trung thực về chuyện tràn.
+Bộ khớp lệnh không bao giờ bỏ sót sự kiện, nhưng một sink **có giới hạn** thì có thể
+hết chỗ. `EventBatch` được thiết kế cho trường hợp này: một mảng cố định, không cấp phát,
+và báo rõ khi không đủ chỗ lưu sự kiện.
 
 ```rust
 pub const MAX_EVENTS_PER_CALL: usize = 64;
@@ -271,16 +271,16 @@ pub struct EventBatch {
 
 - `push` (được gọi qua `emit`) ghi vào `events[len]` khi còn chỗ; nếu hết chỗ,
   nó chỉ tăng `dropped`. Phương thức này không bao giờ panic hay cấp phát.
-- `dropped()` cho biết có bao nhiêu sự kiện không vừa, và `is_truncated()` chính
+- `dropped()` cho biết có bao nhiêu sự kiện không lưu được, và `is_truncated()` chính
   là `dropped() > 0`. **Hãy kiểm tra nó sau mỗi lần gọi** khi bạn dùng batch.
 - `clear()` đặt `len` và `dropped` về 0 mà không xóa sạch mảng, nên tái sử dụng
-  batch rất rẻ: tạo sẵn một cái từ đầu và gọi `clear()` trước mỗi lần gọi engine.
+  batch ít tốn chi phí: tạo sẵn một batch từ đầu và gọi `clear()` trước mỗi lần gọi bộ khớp lệnh.
 - `as_slice()`, `len()`, `is_empty()` và `IntoIterator for &EventBatch` giúp đọc
   dữ liệu một cách tiện lợi.
 
 **Kích thước** (đã đo): `64 × 40 + 8 + 8 = 2,576` byte.
 
-Vậy EventBatch ghi nhận đầy đủ được bao nhiêu maker? Mỗi maker bị chạm tới tạo
+Vậy `EventBatch` lưu đầy đủ sự kiện cho tối đa bao nhiêu maker? Mỗi maker được khớp tạo
 ra hai sự kiện (`Trade` cộng với `OrderFilled` hoặc `OrderPartiallyFilled` của
 maker), cộng thêm một
 `OrderAccepted` ở đầu và một sự kiện cuối của taker:
@@ -297,24 +297,24 @@ maker), cộng thêm một
 | 32 | 66 | 64 | 2 (`OrderFilled` của maker cuối cùng và `OrderFilled` của taker) |
 | 40 | 82 | 64 | 18 |
 
-Dòng 40 maker chính là unit test `bounded_batch_sink_reports_truncation`. Test
-nằm cạnh nó, `deep_sweep_reports_every_execution`, chạy cùng màn quét đó vào một
-`Vec<Event>` và kiểm tra rằng cả 40 giao dịch lẫn 40 lần khớp của maker đều đến
-nơi, với `OrderFilled` của taker đứng cuối.
+Dòng 40 maker chính là kiểm thử đơn vị `bounded_batch_sink_reports_truncation`. Kiểm thử
+nằm cạnh nó, `deep_sweep_reports_every_execution`, chạy cùng chuỗi khớp lệnh đó với một
+`Vec<Event>` và kiểm tra rằng cả 40 giao dịch lẫn 40 lần khớp của maker đều được
+ghi nhận, với `OrderFilled` của taker đứng cuối.
 
-Khi một batch báo là đã bị cắt bớt, sổ lệnh vẫn hoàn toàn đúng; chỉ có báo cáo là
+Khi một batch báo có sự kiện bị bỏ qua, sổ lệnh vẫn hoàn toàn đúng; chỉ có báo cáo là
 không đầy đủ. Bạn có các lựa chọn sau:
 
 1. Dùng sink không giới hạn (`Vec`, hoặc closure chuyển tiếp từng sự kiện đi
    tiếp).
-2. Coi `is_truncated()` là một lỗi trong code của bạn, chẳng hạn bằng cách dựng
+2. Coi `is_truncated()` là một lỗi trong mã của bạn, chẳng hạn bằng cách dựng
    lại bản sao sổ lệnh của bạn từ `depth_snapshot`.
 3. Giới hạn một lệnh được quét qua bao nhiêu mức, ngay từ trước khi nó tới
-   engine.
+   bộ khớp lệnh.
 
 ## 7.5 Khi sink bị panic
 
-Sink là nơi duy nhất engine gọi code mà nó không kiểm soát. Vì vậy, engine tuân
+Sink là nơi duy nhất bộ khớp lệnh gọi mã mà nó không kiểm soát. Vì vậy, bộ khớp lệnh tuân
 theo một quy tắc đơn giản: **chỉ gọi `emit` giữa những lần thay đổi trạng thái
 đã hoàn tất.** Đó là lý do trong vòng lặp khớp lệnh, mức giá vừa cạn được xóa
 khỏi bitset *trước khi* báo lần khớp cuối cùng của maker
@@ -323,23 +323,23 @@ khi sink chạy.
 
 Dù vậy, sink vẫn không nên panic. Nếu nó panic:
 
-- Nếu chương trình được build với `panic = "abort"`, tiến trình sẽ dừng hẳn. Có
-  thể khôi phục bằng cách phát lại (replay) write-ahead log, như sau mọi sự cố
-  crash (chương 9). Release profile của crate này có đặt tùy chọn đó, nhưng nó chỉ áp
-  dụng cho các binary build từ chính package này (test, example và bench của
-  nó). Cargo bỏ qua profile của dependency, nên nếu bạn dùng engine như một thư
+- Nếu chương trình được biên dịch với `panic = "abort"`, tiến trình sẽ dừng hẳn. Có
+  thể khôi phục bằng cách phát lại (replay) write-ahead log, như sau các sự cố
+  dừng đột ngột (chương 9). Cấu hình release của crate này có đặt tùy chọn đó, nhưng nó chỉ áp
+  dụng cho các tệp thực thi được biên dịch từ chính package này (kiểm thử, ví dụ và benchmark
+  của package). Cargo bỏ qua cấu hình biên dịch của các dependency, nên nếu bạn dùng bộ khớp lệnh như một thư
   viện thì `Cargo.toml` của *bạn* mới là nơi quyết định; xem
-  [mục 10.5](10-testing-and-performance.md#105-các-build-profile).
+  [mục 10.5](10-testing-and-performance.md#105-các-cấu-hình-biên-dịch-build-profile).
 - Nếu panic bị bắt lại (bằng `catch_unwind`), sổ lệnh vẫn nhất quán, nhưng yêu cầu
   bị gián đoạn mới chỉ được áp dụng **một phần**: một số giao dịch đã xảy ra,
-  còn phần dư của taker thì chưa bao giờ nằm chờ trong sổ. Lúc này engine khác với
-  kết quả mà việc phát lại các yêu cầu đã ghi log sẽ tạo ra, nên **hãy bỏ nó đi
-  và dựng lại từ log**.
+  còn phần dư của taker thì chưa bao giờ nằm chờ trong sổ. Lúc này bộ khớp lệnh khác với
+  kết quả mà việc phát lại các yêu cầu đã ghi nhật ký sẽ tạo ra, nên **hãy loại bỏ trạng thái hiện tại
+  và khôi phục từ nhật ký**.
 
 Kiểu của Rust thể hiện rõ tình huống này: `&mut Engine` không phải `UnwindSafe`,
 nên `catch_unwind` từ chối closure cho đến khi bạn bọc nó trong
-`AssertUnwindSafe`. Đó chính là chữ ký của bạn dưới câu "tôi biết trạng thái có
-thể đã được cập nhật dở". Unit test `panicking_sink_leaves_the_book_consistent`
+`AssertUnwindSafe`. Lớp bọc này thể hiện rằng bạn chấp nhận khả năng trạng thái đã
+được cập nhật một phần. Kiểm thử đơn vị `panicking_sink_leaves_the_book_consistent`
 làm đúng việc này.
 
 ## 7.6 Nhận và xử lý sự kiện
@@ -392,8 +392,8 @@ let ioc = NewOrder::limit(2, Side::Buy, 100, 14).with_type(OrderType::ImmediateO
 engine.submit_order(ioc, &mut log_event);
 ```
 
-Kiểm thử bằng sự kiện cũng trực tiếp không kém; các test của chính engine được viết
-theo cách này (chúng bọc hai dòng gọi engine trong một hàm trợ giúp nhỏ tên
+Kiểm thử thông qua sự kiện cũng đơn giản; các kiểm thử của chính bộ khớp lệnh được viết
+theo cách này (chúng bọc hai dòng gọi bộ khớp lệnh trong một hàm trợ giúp nhỏ tên
 `place`):
 
 ```rust
@@ -430,7 +430,7 @@ assert_eq!(
 
 ## 7.7 Tự thực hành
 
-Chạy các test về sự kiện và hai test của engine có so sánh các loại sink:
+Chạy các kiểm thử về sự kiện và hai kiểm thử của bộ khớp lệnh có so sánh các loại sink:
 
 ```sh
 cargo test events::

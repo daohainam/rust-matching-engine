@@ -7,26 +7,26 @@
 
 Mã nguồn: [`src/pool.rs`](../../src/pool.rs)
 
-Module này trả lời hai câu hỏi:
+Mô-đun này trả lời hai câu hỏi:
 
 1. **Các lệnh được lưu ở đâu trong bộ nhớ?** Trong một mảng lớn được cấp phát
    sẵn (một *arena*).
 2. **Làm sao giữ đúng thứ tự đến của các lệnh ở cùng mức giá?** Dùng danh sách
-   liên kết có các liên kết là chỉ số mảng (danh sách liên kết *intrusive*).
+   liên kết với chỉ số mảng làm liên kết (danh sách liên kết *intrusive*).
 
 ## 3.1 Bài toán
 
 Mỗi mức giá cần một hàng đợi lệnh: lệnh mới được thêm vào cuối hàng, lệnh được
 khớp lấy từ đầu hàng, còn lệnh bị hủy có thể bị xóa ở *bất kỳ vị trí nào*. Cách
-làm hiển nhiên trong Rust là dùng `VecDeque<Order>` hoặc `LinkedList<Order>`,
+làm quen thuộc trong Rust là dùng `VecDeque<Order>` hoặc `LinkedList<Order>`,
 nhưng:
 
 - `VecDeque` xóa phần tử ở giữa mất O(n) (mọi phần tử phía sau phải dịch lên).
-- `LinkedList` cấp phát một nút trên heap cho mỗi lệnh, và các nút cuối cùng nằm
+- `LinkedList` cấp phát một nút trên heap cho mỗi lệnh, và các nút thường nằm
   rải rác khắp bộ nhớ.
-- Cả hai đều cấp phát trên hot path (đoạn code chạy cho mọi lệnh).
+- Cả hai đều cấp phát trên hot path (đoạn mã chạy cho mọi lệnh).
 
-Ta muốn có: **thêm vào cuối O(1), lấy ra từ đầu O(1), xóa ở giữa O(1), không
+Mục tiêu là: **thêm vào cuối O(1), lấy ra từ đầu O(1), xóa ở giữa O(1), không
 cấp phát.**
 
 ## 3.2 Ý tưởng 1: arena
@@ -48,26 +48,26 @@ Vì sao dùng chỉ số thay vì con trỏ?
 - Một chỉ số `u32` chiếm **4 byte**, còn con trỏ chiếm **8**. Mỗi lệnh có hai
   liên kết, nên tiết kiệm được 8 byte cho mỗi lệnh, và nhờ đó nhiều lệnh hơn nằm
   vừa trong cache.
-- Các lệnh nằm **sát cạnh nhau** trong bộ nhớ, thứ mà prefetcher (bộ nạp trước)
-  của CPU rất thích.
-- Không `unsafe`, không lifetime: chỉ số chỉ là một con số, nên borrow checker
-  (bộ kiểm tra mượn của trình biên dịch) không gây vướng mắc. Một cấu trúc tự
+- Các lệnh nằm **liền nhau** trong bộ nhớ, giúp prefetcher (bộ nạp trước)
+  của CPU hoạt động hiệu quả.
+- Không cần `unsafe` hay tham số lifetime: chỉ số chỉ là một con số, nên tránh
+  được các ràng buộc của borrow checker (bộ kiểm tra mượn). Một cấu trúc tự
   tham chiếu gồm các tham chiếu `&mut Order` không thể biểu diễn bằng Rust an toàn.
 
-Đánh đổi là **trình biên dịch không kiểm tra chỉ số còn hợp lệ hay không.** Giả
-sử có đoạn code giữ chỉ số ô `7` cho lệnh `#42`, rồi `#42` bị hủy và ô 7 được
-giao cho lệnh mới `#99`. Chỉ số cũ vẫn "dùng được": `pool.get(7)` trả về dữ liệu
+Đổi lại, **trình biên dịch không kiểm tra chỉ số còn hợp lệ hay không.** Giả
+sử có đoạn mã giữ chỉ số ô `7` cho lệnh `#42`, rồi `#42` bị hủy và ô 7 được
+cấp cho lệnh mới `#99`. Chỉ số cũ vẫn "dùng được": `pool.get(7)` trả về dữ liệu
 của `#99` mà không báo lỗi. Đây là
 phiên bản "chỉ số" của *con trỏ treo* (dangling pointer), thường gọi là **chỉ số
 cũ** (stale index). Nó không thể gây ra hành vi không xác định (undefined
 behavior, UB), vì ô nhớ luôn chứa một `Order` hợp lệ, nhưng nó có thể âm thầm
 đọc hoặc sửa nhầm lệnh.
 
-Engine tránh lỗi này nhờ một quy ước: không bao giờ giữ chỉ số qua nhiều lời gọi.
-Các tham chiếu duy nhất tồn tại lâu hơn một lần gọi là mục trong bảng băm và các
+Bộ khớp lệnh tránh lỗi này nhờ một quy ước: không bao giờ giữ chỉ số qua nhiều lời gọi.
+Các chỉ số duy nhất được lưu qua nhiều lần gọi là các mục trong bảng băm và các
 liên kết của hàng đợi; cả hai đều bị xóa ngay khi ô được giải phóng. Chỉ `free`
 kiểm tra cờ `in_use` của ô (mục 3.7), còn `get` thì không. Nếu cần an toàn hơn,
-có thể dùng **chỉ số có thế hệ** (generational index): mỗi ô lưu một bộ đếm tăng
+có thể dùng **chỉ số kèm số thế hệ** (generational index): mỗi ô lưu một bộ đếm tăng
 lên mỗi lần được dùng lại, và bộ đếm đó cũng trở thành một phần của chỉ số, nhờ
 đó chỉ số cũ không còn hợp lệ.
 
@@ -89,7 +89,7 @@ pub struct Order {
 ```
 
 `#[repr(C)]` giữ các trường theo đúng thứ tự khai báo. Trình biên dịch chèn thêm
-*padding* (byte đệm) để mỗi trường được căn lề (aligned). Đo bằng `offset_of!`
+*padding* (byte đệm) để mỗi trường được căn chỉnh (aligned). Đo bằng `offset_of!`
 ta được:
 
 ```text
@@ -102,7 +102,7 @@ ta được:
        tổng size_of::<Order>() = 48 byte
 ```
 
-Hai khoảng trống đó xuất hiện vì mỗi kiểu dữ liệu có một **yêu cầu căn lề**
+Hai khoảng trống đó xuất hiện vì mỗi kiểu dữ liệu có một **yêu cầu căn chỉnh**
 (alignment): `u32` phải bắt đầu ở địa chỉ chia hết cho 4, `u64` ở địa chỉ chia
 hết cho 8.
 
@@ -112,22 +112,22 @@ hết cho 8.
 - **3 byte sau `in_use`.** Cũng y như vậy: `in_use` chiếm một byte, ở 40, và
   `account` phải bắt đầu ở địa chỉ chia hết cho 4, nên nó được đặt ở 44 và kết
   thúc đúng ở 48. Đó cũng là một bội số của 8, đúng như yêu cầu: `Order` chứa
-  các `u64`, nên cả struct được căn lề 8 byte và kích thước của nó được làm tròn
+  các `u64`, nên cả struct được căn chỉnh 8 byte và kích thước của nó được làm tròn
   lên bội số của 8. Nhờ vậy, trong một mảng các lệnh, mọi phần tử (và mọi `u64`
-  bên trong nó) cũng đều bắt đầu ở địa chỉ được căn lề đúng.
+  bên trong nó) cũng đều bắt đầu ở địa chỉ được căn chỉnh đúng.
 
 Trường `account` được thêm vào sau cùng mà không làm tăng kích thước: trước đó,
 struct cũng kết thúc ở byte 41 và được làm tròn lên 48, với 7 byte padding ở
-cuối. `account` tận dụng chính khoảng padding này. Một bài test
-(`the_account_fits_in_existing_padding` trong `pool.rs`) cố định kích thước
-này, nhờ đó mọi trường mới làm struct lớn hơn đều khiến test thất bại.
+cuối. `account` tận dụng chính khoảng padding này. Một kiểm thử
+(`the_account_fits_in_existing_padding` trong `pool.rs`) kiểm tra kích thước
+này, nhờ đó mọi trường mới làm struct lớn hơn đều khiến kiểm thử thất bại.
 
 Vậy tại sao cần dùng `repr(C)`? Nếu không có nó, Rust dùng bố cục mặc định và có
 thể **sắp xếp lại thứ tự các trường** để giảm padding. Trong trường hợp này,
 tổng các trường chiếm 42 byte nhưng kích thước vẫn được làm tròn lên 48 byte.
 (Trước khi có `account`, bố
 cục mặc định chiếm 40 byte, còn `repr(C)` cần 48.) `repr(C)` tạo ra bố cục cố
-định, dễ đoán: hình vẽ phía trên được bảo đảm, không phụ thuộc vào chi tiết có
+định, dễ đoán: bố cục trong hình phía trên được bảo đảm, không phụ thuộc vào chi tiết có
 thể thay đổi của trình biên dịch. Nhờ vậy, ta có thể vẽ, đo và giải thích bố cục.
 
 > [!NOTE]
@@ -138,12 +138,12 @@ thể thay đổi của trình biên dịch. Nhờ vậy, ta có thể vẽ, đo
 > ranh giới một line, lệnh số 1 chiếm các byte 48 đến 95, vượt qua ranh giới ở
 > byte 64). [Chương 11](11-limitations-and-exercises.md) có liệt kê hai thí
 > nghiệm: bỏ trường `sequence`, vốn không có chỗ nào đọc tới, để thu bản ghi
-> xuống 40 byte, hoặc căn lề nó theo 64 byte để mỗi lệnh sở hữu đúng một cache
+> xuống 40 byte, hoặc căn chỉnh nó theo 64 byte để mỗi lệnh chiếm đúng một cache
 > line.
 
 ## 3.4 Ý tưởng 2: free list (ngăn xếp các ô trống)
 
-Làm sao tìm một ô chưa dùng trong O(1)? Giữ một **ngăn xếp các chỉ số trống**:
+Làm sao tìm một ô chưa dùng trong O(1)? Giữ một **ngăn xếp chứa chỉ số của các ô trống**:
 
 ```rust
 pub struct OrderPool {
@@ -182,7 +182,7 @@ trong cache, một lợi thế nhỏ mà không tốn thêm chi phí.
 
 ### Khi cấp phát thất bại
 
-Nếu `free_top == 0`, arena đã đầy và `allocate` trả về `None`. Engine phát sự
+Nếu `free_top == 0`, arena đã đầy và `allocate` trả về `None`. Bộ khớp lệnh phát sự
 kiện `OrderRejected` với lý do `BookFull` (chỉ khi phần còn lại của lệnh cần nằm
 chờ trong sổ; lệnh khớp hết thì không cần ô nào).
 
@@ -223,7 +223,7 @@ pub const NIL: u32 = u32::MAX;
 
 `NIL` đóng vai trò của con trỏ null. Ta dùng một giá trị đánh dấu đặc biệt
 (sentinel) thay vì `Option<u32>`, vì `Option<u32>` chiếm **8 byte** (4 byte cho
-giá trị cộng với một thẻ đánh dấu kèm padding để căn lề), tức là làm kích thước
+giá trị cộng với một thẻ đánh dấu kèm padding để căn chỉnh), tức là làm kích thước
 của cả hai liên kết tăng gấp đôi. Đó cũng là lý do `OrderPool::new` yêu cầu
 `capacity < u32::MAX`: giá trị `u32::MAX` được giữ riêng.
 
@@ -251,7 +251,7 @@ Thêm ô `idx` vào cuối hàng đợi (tail). Có hai trường hợp:
    sau:     A <-> B <-> C <-> X       head=A  tail=X
 ```
 
-Cập nhật sổ sách: `count += 1` và `total_qty += X.remaining_qty`. Phép cộng này
+Cập nhật các bộ đếm: `count += 1` và `total_qty += X.remaining_qty`. Phép cộng này
 dùng `checked_add` (xem 3.7).
 
 ### Thao tác 2: `remove` (xóa ở đầu, giữa hoặc cuối)
@@ -269,7 +269,7 @@ Vì mỗi nút đều biết cả hai nút lân cận, việc xóa không bao gi
     next là NIL nên tail = B ; B.next = NIL  =>   A <-> B   tail=B
 ```
 
-Đoạn code dưới đây thực hiện các bước đó:
+Đoạn mã dưới đây thực hiện các bước đó:
 
 ```rust
 if prev != NIL { pool.get_mut(prev).next_idx = next; } else { self.head = next; }
@@ -280,7 +280,7 @@ Sau đó, các liên kết của chính nút bị xóa được đặt lại th�
 và `total_qty` bị giảm đi (bằng phép trừ có kiểm tra, xem 3.7).
 
 Đây chính là lý do danh sách phải liên kết **đôi**: để hủy `B` trong O(1), ta
-phải với tới được `A` (để cập nhật `A.next`) mà không cần đi từ đầu danh sách.
+phải truy cập được `A` (để cập nhật `A.next`) mà không cần đi từ đầu danh sách.
 
 ### Thao tác 3: `reduce_qty` (khớp một phần)
 
@@ -301,57 +301,57 @@ thay đổi các liên kết.
 
 ## 3.6 Các bất biến (những điều luôn phải đúng)
 
-Đây là các quy tắc mà phần còn lại của engine dựa vào. Nếu bất kỳ quy tắc nào bị
+Đây là các quy tắc mà phần còn lại của bộ khớp lệnh dựa vào. Nếu bất kỳ quy tắc nào bị
 vi phạm, sổ lệnh đã hỏng.
 
 | # | Bất biến | Được duy trì bởi |
 |---|---|---|
 | 1 | `level.head == NIL` ⇔ `level.tail == NIL` ⇔ `level.count == 0` ⇔ `level.total_qty == 0` | `push_back`, `remove` |
-| 2 | `level.total_qty` = tổng `remaining_qty` của mọi lệnh trong hàng đợi. (Vế "`total_qty == 0` ⇔ rỗng" của bất biến 1 còn dựa vào việc engine không bao giờ để lệnh có số lượng bằng 0 nằm chờ trong sổ: `submit_order` từ chối `qty == 0`, và `reduce_order` hủy lệnh thay vì giảm nó về 0; bản thân `PriceLevel` không kiểm tra.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
+| 2 | `level.total_qty` = tổng `remaining_qty` của mọi lệnh trong hàng đợi. (Vế "`total_qty == 0` ⇔ rỗng" của bất biến 1 còn dựa vào việc bộ khớp lệnh không bao giờ để lệnh có số lượng bằng 0 nằm chờ trong sổ: `submit_order` từ chối `qty == 0`, và `reduce_order` hủy lệnh thay vì giảm nó về 0; bản thân `PriceLevel` không kiểm tra.) | `push_back` (+), `remove` (−), `reduce_qty` (−) |
 | 3 | Đi theo `head -> next_idx -> ...` sẽ thăm đúng `count` lệnh và kết thúc ở `tail` | `push_back`, `remove` |
 | 4 | `a.next_idx == b` ⇔ `b.prev_idx == a` | `push_back`, `remove` |
 | 5 | Một ô nằm trong free stack ⇔ `in_use == false` | `allocate`, `free` |
-| 6 | Mọi lệnh đang sống đều nằm trong đúng một hàng đợi **và** có một mục trong `id_map` | `Engine` |
+| 6 | Mọi lệnh đang hoạt động đều nằm trong đúng một hàng đợi **và** có một mục trong `id_map` | `Engine` |
 
-## 3.7 Các kiểm tra phòng thủ
+## 3.7 Các kiểm tra bảo vệ
 
-Pool xử lý ba tình huống bất thường sau; cả ba đều được thể hiện rõ trong code:
+Kho chứa lệnh xử lý ba tình huống bất thường sau; cả ba đều được thể hiện rõ trong mã:
 
 **Tràn số khi chèn (overflow).** `push_back` dùng `checked_add` cho `total_qty`.
-Nếu client độc hại hoặc bị lỗi gửi số lượng khiến tổng ở mức giá vượt quá
+Nếu chương trình phía khách bị lỗi hoặc cố ý gửi số lượng khiến tổng ở mức giá vượt quá
 `u64::MAX`, `push_back` trả về `false` *mà không thay đổi trạng thái nào*.
-Phương thức này được đánh dấu `#[must_use]`, và engine phản ứng bằng
+Phương thức này được đánh dấu `#[must_use]`, và bộ khớp lệnh phản ứng bằng
 cách xóa mục `id_map` của lệnh, giải phóng ô, rồi phát sự kiện `OrderRejected`
 với lý do `LevelQuantityOverflow`.
 
 **Trừ quá mức (underflow) khi xóa / giảm.** `remove` giảm cả `count` và
 `total_qty`, còn `reduce_qty` giảm `remaining_qty` và `total_qty`; cả hai đều
-dùng `.checked_sub(..).expect(..)`. Nếu sổ sách không nhất quán,
+dùng `.checked_sub(..).expect(..)`. Nếu các bộ đếm không nhất quán,
 chương trình panic ngay lập tức với một thông báo nêu tên bất biến bị phá vỡ,
 thay vì âm thầm để một bộ đếm bị "quay vòng" (wrap) thành một con số khổng lồ.
 
-**Free hai lần (double free).** `OrderPool::free` dùng `assert!` để kiểm tra cờ
+**Giải phóng hai lần (double free).** `OrderPool::free` dùng `assert!` để kiểm tra cờ
 `in_use` của ô. Nếu không có kiểm tra này, giải phóng cùng một ô hai lần sẽ đẩy
 nó vào free stack hai lần, và sau đó hai lệnh khác nhau có thể nhận cùng một ô,
-âm thầm làm hỏng hàng đợi của cả hai. Engine không bao giờ làm vậy; kiểm tra này
-có mặt để lỗi trong code mới (chẳng hạn khi làm bài tập) bị phát hiện ngay tại
-lời gọi sai, thay vì đến sau này mới lộ ra.
+âm thầm làm hỏng hàng đợi của cả hai. Bộ khớp lệnh không bao giờ làm vậy; kiểm tra này
+giúp phát hiện lỗi ngay tại lời gọi sai khi bổ sung mã mới, chẳng hạn trong
+bài tập, thay vì để lỗi xuất hiện ở một thao tác về sau.
 
 > [!NOTE]
 > **Vì sao dùng `assert!` mà không phải `debug_assert!`?** `debug_assert!` bị
-> loại khỏi bản build release, nơi các lỗi này cũng cần được phát hiện. Bản
-> build release cũng thôi kiểm tra tràn số học, nên một câu lệnh trần
-> `count -= 1` sẽ âm thầm bị wrap ở đó. Mỗi kiểm tra chỉ tốn một nhánh rẽ dễ dự
-> đoán trên dữ liệu vốn đã nằm trong cache. Profile release của crate đặt
-> `panic = "abort"`, khiến tiến trình chấm dứt ngay khi panic trong binary được
-> build theo cấu hình đó (xem
-> [chương 10](10-testing-and-performance.md#105-các-build-profile) về lưu ý đối với
-> thư viện). Đó là chủ ý: với một hệ thống tài chính, dừng lại ầm ĩ còn hơn tiếp
+> loại khỏi bản dựng release, nơi các lỗi này cũng cần được phát hiện. Bản
+> dựng release cũng tắt kiểm tra tràn số học mặc định, nên câu lệnh
+> `count -= 1` có thể âm thầm quay vòng giá trị. Mỗi kiểm tra chỉ tốn một nhánh rẽ dễ dự
+> đoán trên dữ liệu vốn đã nằm trong cache. Cấu hình release của crate đặt
+> `panic = "abort"`, khiến tiến trình chấm dứt ngay khi panic trong tệp thực thi được
+> biên dịch theo cấu hình đó (xem
+> [chương 10](10-testing-and-performance.md#105-các-cấu-hình-biên-dịch-build-profile) về lưu ý đối với
+> thư viện). Đó là chủ ý: với một hệ thống tài chính, dừng ngay và báo lỗi rõ ràng còn hơn tiếp
 > tục chạy với một sổ lệnh đã hỏng.
 
-## 3.8 Đi qua một lượt với ví dụ xuyên suốt
+## 3.8 Theo dõi ví dụ xuyên suốt
 
-Ta bắt đầu với một engine rỗng có sức chứa 16 rồi phát lại ba lệnh đầu tiên của
+Ta bắt đầu với một bộ khớp lệnh rỗng có dung lượng 16 lệnh rồi phát lại ba lệnh đầu tiên của
 ví dụ minh họa. Mỗi lời gọi còn nhận sink sự kiện làm tham số cuối cùng
 (`&mut events`); tham số này được lược khỏi bảng để các dòng gọn hơn.
 
@@ -361,7 +361,7 @@ ví dụ minh họa. Mỗi lời gọi còn nhận sink sự kiện làm tham s�
 | 2 | `process_order(2, Sell, 101, 3)` | `allocate` -> ô 1 | `ask[101]`: ô 1 |
 | 3 | `process_order(3, Sell, 101, 4)` | `allocate` -> ô 2; `push_back` nối `1 -> 2` | `ask[101]`: ô 1, ô 2 (`total_qty = 7`) |
 | 4 | `cancel_order(2)` *(giả định)* | `remove(slot 1)`: head trở thành ô 2; `free(1)` | `ask[101]`: chỉ còn ô 2 (`total_qty = 4`) |
-| 5 | `process_order(7, Sell, 100, 1)` *(id mới; `#4` đã dùng ở chương 1)* | `allocate` lấy ra ô 1, ô **được giải phóng gần nhất** | `ask[100]`: ô 1 |
+| 5 | `process_order(7, Sell, 100, 1)` *(ID mới; `#4` đã dùng ở chương 1)* | `allocate` lấy ra ô 1, ô **được giải phóng gần nhất** | `ask[100]`: ô 1 |
 
 Bước 5 cho thấy việc dùng lại theo LIFO (vào sau, ra trước): ô 1 được giải phóng
 ở bước 4 và là ô đầu tiên được cấp lại.
@@ -371,14 +371,14 @@ Bước 5 cho thấy việc dùng lại theo LIFO (vào sau, ra trước): ô 1 
 - **Arena**: các lệnh nằm trong một mảng cố định và được truy cập bằng chỉ số `u32`.
 - **Free stack**: allocate và free đều O(1), ô được giải phóng gần nhất được
   dùng lại trước.
-- **Danh sách liên kết đôi intrusive**: các liên kết nằm ngay trong lệnh, cho ra
-  push-back, pop-front và remove-from-middle đều O(1) mà không cấp phát.
+- **Danh sách liên kết đôi intrusive**: các liên kết nằm ngay trong lệnh, nên việc
+  thêm vào cuối, lấy từ đầu và xóa ở giữa đều có độ phức tạp O(1), không cấp phát.
 - **`PriceLevel`** lưu sẵn `count` và `total_qty`, nên truy vấn độ sâu và kiểm
   tra "mức giá này có rỗng không?" đều O(1).
 
 ## 3.10 Tự thực hành
 
-Hãy chạy các unit test của pool, bao gồm test xác nhận lỗi free hai lần được
+Hãy chạy các kiểm thử đơn vị của kho chứa lệnh, bao gồm kiểm thử xác nhận lỗi giải phóng hai lần được
 phát hiện:
 
 ```sh

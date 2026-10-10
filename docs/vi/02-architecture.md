@@ -5,30 +5,30 @@
 > **Gặp từ lạ?** Mọi thuật ngữ trong các chương đều được giải thích trong
 > [bảng thuật ngữ](glossary.md).
 
-Chương này là tấm bản đồ. Nó trình bày các mục tiêu thiết kế, cách các module
-khớp với nhau, thứ gì nằm trong bộ nhớ, và vì sao từng cấu trúc dữ liệu được
-chọn. Các chương sau sẽ lần lượt đi sâu vào từng phần.
+Chương này cung cấp cái nhìn tổng thể về các mục tiêu thiết kế, cách các mô-đun
+phối hợp với nhau, dữ liệu được lưu trong bộ nhớ và lý do chọn từng cấu trúc
+dữ liệu. Các chương sau sẽ lần lượt đi sâu vào từng phần.
 
 ## 2.1 Mục tiêu thiết kế
 
-| Mục tiêu             | Ý nghĩa                                                                       | Cách thực hiện trong code                                             |
+| Mục tiêu             | Ý nghĩa                                                                       | Cách triển khai                                             |
 |----------------------|-------------------------------------------------------------------------------|-----------------------------------------------------------------------|
 | **Độ trễ thấp** (low latency) | Mỗi lệnh cần thực hiện ít thao tác nhất có thể.                       | Thao tác O(1), mảng phẳng, ít nhánh rẽ.                               |
-| **Độ trễ ổn định** (predictable latency) | Các lệnh *chậm nhất* (phần "đuôi" của phân phối) phải có độ trễ gần mức trung bình. | Không cấp phát trên heap, không khóa, không đổi kích thước, không I/O bên trong engine. |
-| **Tính tất định** (determinism) | Cùng một chuỗi đầu vào thì luôn ra cùng một sổ lệnh và cùng các sự kiện. | Chạy một luồng, không đọc đồng hồ. Seed ngẫu nhiên của bảng băm id chỉ quyết định các mục nằm *ở đâu*, không bao giờ ảnh hưởng đến kết quả (chương 5). |
-| **Thân thiện với cache** | Giữ dữ liệu hay dùng nằm sát nhau để cache của CPU phát huy tác dụng. | Mảng arena, chỉ số `u32` thay cho con trỏ 64 bit, struct nhỏ.          |
-| **Dễ đọc**           | Đây là một dự án để học.                                                      | Ít module, mỗi module một việc và có test riêng.                      |
+| **Độ trễ ổn định** (predictable latency) | Các lệnh *chậm nhất* (phần "đuôi" của phân phối) phải có độ trễ gần mức trung bình. | Không cấp phát trên heap, không khóa, không đổi kích thước, không I/O bên trong bộ khớp lệnh. |
+| **Tính tất định** (determinism) | Cùng một chuỗi đầu vào thì luôn ra cùng một sổ lệnh và cùng các sự kiện. | Chạy một luồng, không đọc đồng hồ. Seed ngẫu nhiên của bảng băm ID chỉ quyết định các mục nằm *ở đâu*, không bao giờ ảnh hưởng đến kết quả (chương 5). |
+| **Tận dụng bộ nhớ đệm (cache)** | Giữ dữ liệu hay dùng nằm sát nhau để cache của CPU phát huy tác dụng. | Mảng arena, chỉ số `u32` thay cho con trỏ 64 bit, struct nhỏ.          |
+| **Dễ đọc**           | Dự án được xây dựng để phục vụ việc học.                                                      | Ít mô-đun, mỗi mô-đun một việc và có bộ kiểm thử riêng.                      |
 
 > [!NOTE]
-> **Vì sao cấp phát bộ nhớ làm hại độ trễ?** `malloc` / `Box::new` thường nhanh,
-> nhưng *thỉnh thoảng* lại chậm: chúng có thể phải tranh một khóa, xin hệ điều
+> **Vì sao cấp phát bộ nhớ có thể làm tăng độ trễ?** `malloc` / `Box::new` thường nhanh,
+> nhưng *thỉnh thoảng* lại chậm: chúng có thể phải chờ giành quyền giữ khóa, xin hệ điều
 > hành thêm bộ nhớ hoặc duyệt qua một free list (danh sách các ô
 > trống). Những lần gọi chậm hiếm hoi đó tạo ra các đỉnh độ trễ bất thường.
 > Trong giao dịch, những đỉnh độ trễ ấy (phần "đuôi") thường quan trọng hơn mức trung bình.
-> Vì vậy engine cấp phát mọi thứ **một lần duy nhất, lúc khởi động**, và không
+> Vì vậy bộ khớp lệnh cấp phát mọi thứ **một lần duy nhất, lúc khởi động**, và không
 > bao giờ cấp phát nữa trong lúc xử lý lệnh.
 
-## 2.2 Các module
+## 2.2 Các mô-đun
 
 ```mermaid
 flowchart LR
@@ -53,30 +53,30 @@ flowchart LR
     wal --> pool
 ```
 
-| Module | Tệp | Việc của module (một câu) | Chương |
+| Mô-đun | Tệp | Vai trò | Chương |
 |---|---|---|---|
 | `engine`     | [`src/engine.rs`](../../src/engine.rs)       | Nhận lệnh, khớp lệnh, hủy lệnh và trả lời các truy vấn độ sâu (depth). | [6](06-matching-algorithm.md) |
 | `pool`       | [`src/pool.rs`](../../src/pool.rs)           | Lưu các lệnh trong một mảng cố định và nối chúng thành các hàng đợi FIFO (vào trước, ra trước) theo từng mức giá. | [3](03-order-pool.md) |
 | `bitset`     | [`src/bitset.rs`](../../src/bitset.rs)       | Tìm bid/ask tốt nhất trong O(1). | [4](04-price-ladder-bitset.md) |
 | `hashmap`    | [`src/hashmap.rs`](../../src/hashmap.rs)     | Ánh xạ `order_id` sang ô arena của lệnh đó, phục vụ việc hủy lệnh. | [5](05-hash-map.md) |
-| `events`     | [`src/events.rs`](../../src/events.rs)       | Enum `Event`, trait `EventSink` mà engine dùng để báo kết quả, và `EventBatch`, một sink có giới hạn dung lượng. | [7](07-events.md) |
-| `ringbuffer` | [`src/ringbuffer.rs`](../../src/ringbuffer.rs) | Hàng đợi lock-free (không dùng khóa), tách thành hai handle `Producer` và `Consumer`, để nạp lệnh cho engine từ một luồng khác. | [8](08-ring-buffer.md) |
+| `events`     | [`src/events.rs`](../../src/events.rs)       | Enum `Event`, trait `EventSink` mà bộ khớp lệnh dùng để báo kết quả, và `EventBatch`, một sink có giới hạn dung lượng. | [7](07-events.md) |
+| `ringbuffer` | [`src/ringbuffer.rs`](../../src/ringbuffer.rs) | Hàng đợi lock-free (không dùng khóa), tách thành hai handle `Producer` và `Consumer`, để nạp lệnh cho bộ khớp lệnh từ một luồng khác. | [8](08-ring-buffer.md) |
 | `wal`        | [`src/wal.rs`](../../src/wal.rs)             | Nhật ký nhị phân chỉ ghi nối thêm (append-only) các yêu cầu, dùng để phát lại (replay) và khôi phục. | [9](09-write-ahead-log.md) |
-| `snapshot`   | [`src/snapshot.rs`](../../src/snapshot.rs)   | Toàn bộ trạng thái của engine, cùng các tệp checkpoint, để việc khôi phục không phải phát lại từ đầu. | [9](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
+| `snapshot`   | [`src/snapshot.rs`](../../src/snapshot.rs)   | Toàn bộ trạng thái của bộ khớp lệnh, cùng các tệp checkpoint, để việc khôi phục không phải phát lại từ đầu. | [9](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
 
-Các mũi tên cho thấy engine phụ thuộc vào `pool`, `bitset`, `hashmap` và
-`events` (cũng như `snapshot`, chỉ vì hàm này trả về kiểu `Snapshot`), nhưng
+Các mũi tên cho thấy bộ khớp lệnh phụ thuộc vào `pool`, `bitset`, `hashmap` và
+`events` (cũng như `snapshot`, vì phương thức chụp trạng thái trả về kiểu `Snapshot`), nhưng
 **không** phụ thuộc vào `ringbuffer` hay `wal`. Đây là những thành phần mà
-*bạn* ghép quanh engine (chương 8 và 9 hướng dẫn cách làm); `wal` biết đến engine để có thể phát lại
-một log vào engine.
+*bạn* ghép quanh bộ khớp lệnh (chương 8 và 9 hướng dẫn cách làm); `wal` biết đến bộ khớp lệnh để có thể phát lại
+nhật ký yêu cầu.
 
-Crate tái xuất mười sáu tên mà hầu hết trường hợp sử dụng cần đến trong
+Crate tái xuất mười sáu thành phần thường dùng qua
 [`src/lib.rs`](../../src/lib.rs): `Engine`, `NewOrder`, `OrderType`,
 `SelfTradePrevention`, `RiskLimits`, `RestingOrder`, `Event`, `EventSink`,
 `EventBatch`, `RejectReason`, `CancelRejectReason`, `Side`, `Snapshot`,
 `SnapshotError`, `Checkpoint`, và hằng số `DEFAULT_TICKS`.
 
-## 2.3 Struct `Engine`, từng trường một
+## 2.3 Các trường của struct `Engine`
 
 ```rust
 pub struct Engine {
@@ -96,20 +96,20 @@ Mỗi trường chỉ có đúng một trách nhiệm:
 
 | Trường | Câu hỏi mà nó trả lời | Chi phí |
 |---|---|---|
-| `pool`        | "Lệnh X nằm ở đâu, và ai đứng cạnh nó trong hàng đợi?"       | truy cập mảng theo chỉ số |
-| `id_map`      | "Ô arena nào đang giữ lệnh có id 12345?"                       | tra bảng băm, O(1) kỳ vọng |
+| `pool`        | "Lệnh X nằm ở đâu, và lệnh nào đứng trước, đứng sau nó trong hàng đợi?"       | truy cập mảng theo chỉ số |
+| `id_map`      | "Ô arena nào đang giữ lệnh có ID 12345?"                       | tra bảng băm, O(1) kỳ vọng |
 | `*_levels`    | "Những lệnh nào đang chờ ở tick giá T?"                        | `levels[T]`: một lần đọc mảng |
 | `*_bitset`    | "Mức giá không rỗng tốt nhất là mức nào?"                      | một lần quét bit cho mỗi tầng: hai lần với 4096 tick mặc định |
-| `sequence`    | "Engine đã nhận bao nhiêu lệnh?" (metadata phục vụ kiểm toán; thứ tự FIFO đến từ các liên kết trong hàng đợi chứ không phải từ con số này, xem [6.10](06-matching-algorithm.md#610-những-ghi-chú-thiết-kế-đáng-chú-ý)) | một phép cộng |
-| `trades`      | "Engine đã thực hiện bao nhiêu giao dịch?" Nó đánh số cho từng sự kiện `Trade` (`trade_id`), giống hệt nhau ở mọi lần phát lại. | một phép cộng cho mỗi giao dịch |
+| `sequence`    | "Bộ khớp lệnh đã nhận bao nhiêu lệnh?" (metadata phục vụ kiểm toán; thứ tự FIFO đến từ các liên kết trong hàng đợi chứ không phải từ con số này, xem [6.10](06-matching-algorithm.md#610-những-ghi-chú-thiết-kế-đáng-chú-ý)) | một phép cộng |
+| `trades`      | "Bộ khớp lệnh đã thực hiện bao nhiêu giao dịch?" Nó đánh số cho từng sự kiện `Trade` (`trade_id`), giống hệt nhau ở mọi lần phát lại. | một phép cộng cho mỗi giao dịch |
 | `limits`      | "Lệnh này có được phép giao dịch hay không?" Số lượng tối đa và biên độ giá (chương 6). | hai phép so sánh |
 
 Số tick giá không phải là một trường riêng: nó chính là độ dài của các mảng mức
 giá, được chọn trong `Engine::with_ticks` (4096 với `Engine::new`).
 
-### Các mảnh ghép trỏ vào nhau như thế nào
+### Các cấu trúc dữ liệu liên kết với nhau như thế nào
 
-Dưới đây là trạng thái thực tế bên trong engine sau năm lệnh đầu tiên của
+Dưới đây là trạng thái thực tế bên trong bộ khớp lệnh sau năm lệnh đầu tiên của
 [ví dụ minh họa](01-order-book-basics.md#110-một-ví-dụ-hoàn-chỉnh). Arena
 cấp các ô theo thứ tự `0, 1, 2, ...` đúng như thứ tự lệnh đến, nên `#1` nằm ở ô
 0, `#2` ở ô 1, và cứ thế.
@@ -139,16 +139,15 @@ cấp các ô theo thứ tự `0, 1, 2, ...` đúng như thứ tự lệnh đế
 Có thể đọc sơ đồ này như sau:
 
 - Để tìm **ask tốt nhất**: `ask_bitset.lowest()` cho ra tick `101`.
-- Để biết **ai khớp trước ở mức 101**: `ask_levels[101].head` là ô `1`, tức là
+- Để biết **lệnh nào khớp trước ở mức 101**: `ask_levels[101].head` là ô `1`, tức là
   lệnh `#2`, lệnh cũ nhất.
-- Để biết **ai là người kế tiếp trong hàng**: `pool.orders[1].next_idx` là ô
+- Để biết **lệnh nào đứng kế tiếp trong hàng đợi**: `pool.orders[1].next_idx` là ô
   `2`, lệnh `#3`.
-- Để **hủy `#3`**: bảng băm id (trong code là `id_map.remove(3)`) cho ra ô `2`,
-  rồi gỡ nó khỏi hàng đợi; không phải tìm kiếm gì cả.
+- Để **hủy `#3`**: bảng băm ID (trong mã là `id_map.remove(3)`) cho ra ô `2`,
+  rồi gỡ nó khỏi hàng đợi; không cần duyệt hàng đợi để tìm lệnh.
 
-Các "con trỏ" của hàng đợi chỉ là những số nguyên nhỏ (`u32`) dùng làm chỉ số
-trỏ vào cùng một
-mảng. Không có `Box`, không có `Rc`, không có con trỏ thô (raw pointer), và
+Các "con trỏ" của hàng đợi là các số nguyên nhỏ (`u32`) dùng làm chỉ số
+trong cùng một mảng. Không có `Box`, không có `Rc`, không có con trỏ thô (raw pointer), và
 không có cấp phát riêng cho từng nút.
 
 ## 2.4 Chuyện gì xảy ra khi một lệnh đến
@@ -197,23 +196,23 @@ sequenceDiagram
 (Sơ đồ này đã được đơn giản hóa: thứ tự chính xác và mọi nhánh lỗi nằm trong
 [chương 6](06-matching-algorithm.md). Nó minh họa một lệnh giới hạn. `submit_order`
 còn nhận thêm một `OrderType`: lệnh immediate-or-cancel hay lệnh thị trường bỏ qua
-khung "còn dư số lượng" và báo `OrderExpired` thay vào đó, còn lệnh post-only sẽ
-giao dịch thì bị từ chối ngay ở bước kiểm tra hợp lệ.)
+khung "còn dư số lượng" và báo `OrderExpired` thay vào đó, còn lệnh post-only có thể
+khớp ngay sẽ bị từ chối ở bước kiểm tra tính hợp lệ.)
 
-Engine không tự quyết định sự kiện sẽ đi đâu. Mỗi sự kiện được gửi ngay khi xảy
+Bộ khớp lệnh không tự quyết định sự kiện sẽ đi đâu. Mỗi sự kiện được gửi ngay khi xảy
 ra tới **sink** (bộ nhận sự kiện) do bên gọi cung cấp. Sink có thể là
 một `Vec<Event>`, một closure, hoặc một `EventBatch` có giới hạn dung lượng
 (chương 7). Lưu ý rằng mức giá vừa hết lệnh sẽ bị xóa khỏi bitset *trước khi*
-báo sự kiện khớp của maker: engine chỉ gọi sink khi mọi cấu trúc dữ liệu đã nhất
-quán với nhau. Sink không thể nhìn vào engine trong lúc chạy (engine đang bị
+báo sự kiện khớp của maker: bộ khớp lệnh chỉ gọi sink khi mọi cấu trúc dữ liệu đã nhất
+quán với nhau. Sink không thể nhìn vào bộ khớp lệnh trong lúc chạy (nó đang bị
 mượn độc quyền (`&mut`) trong suốt lời gọi, nên trình biên dịch không cho phép),
-nhưng sink *có thể* panic. Nếu panic được bắt lại, bên gọi nhận lại engine ngay
+nhưng sink *có thể* panic. Nếu panic được bắt lại, bên gọi nhận lại bộ khớp lệnh ngay
 tại điểm gọi sink. Quy tắc trên bảo đảm sổ lệnh vẫn nhất quán tại thời điểm đó,
 kể cả khi yêu cầu mới chỉ được xử lý một phần. Chương 6 giải thích điều này ở
 [ghi chú sau vòng lặp trong](06-matching-algorithm.md#sau-vòng-lặp-trong) và ở
 [bất biến 6](06-matching-algorithm.md#69-các-bất-biến-sau-mỗi-lần-gọi).
 
-Hủy lệnh là một hành trình ngắn hơn nhiều:
+Quy trình hủy lệnh ngắn hơn nhiều:
 
 ```mermaid
 sequenceDiagram
@@ -239,20 +238,20 @@ sequenceDiagram
 Mỗi bài toán con đều có một lời giải "trong sách giáo khoa", nhưng trong trường
 hợp này có những lý do để chọn cách khác.
 
-| Bài toán con | Lời giải trong sách giáo khoa | Vì sao chưa lý tưởng ở đây | Engine này làm gì |
+| Bài toán con | Lời giải trong sách giáo khoa | Vì sao chưa lý tưởng ở đây | Bộ khớp lệnh này làm gì |
 |---|---|---|---|
-| Giữ các giá được sắp xếp / tìm giá tốt nhất | `BTreeMap<Price, Level>` | O(log n), phải đi theo con trỏ qua các nút (pointer-chasing), cấp phát khi chèn | **Bitset hai tầng** (nhiều tầng): một lần quét bit cho mỗi tầng, O(1); hai tầng và 520 byte cho 4096 tick |
+| Giữ các giá được sắp xếp / tìm giá tốt nhất | `BTreeMap<Price, Level>` | O(nhật ký n), phải đi theo con trỏ qua các nút (pointer-chasing), cấp phát khi chèn | **Bitset nhiều tầng**: một lần quét bit cho mỗi tầng, O(1); hai tầng và 520 byte cho 4096 tick |
 | Tìm hàng đợi của một mức giá | `HashMap<Price, Level>` | tốn công băm, cấp phát, đổi kích thước | **Mảng đánh chỉ số theo tick**: `levels[tick]` |
 | Hàng đợi FIFO các lệnh tại một mức giá | `VecDeque<Order>` hoặc `LinkedList<Order>` | `VecDeque` xóa phần tử ở giữa mất O(n); `LinkedList` cấp phát một nút cho mỗi lệnh | **Danh sách liên kết đôi intrusive** nằm trong arena: mọi thao tác đều O(1) |
-| Tìm lệnh theo id | `HashMap<u64, _>` (SipHash) | cấp phát, có thể đổi kích thước, hàm băm chậm hơn | **Bảng phẳng địa chỉ mở** (open addressing) với hàm băm số nguyên nhanh, cộng thêm seed ngẫu nhiên để chống các id bị cố ý chọn để gây va chạm |
+| Tìm lệnh theo ID | `HashMap<u64, _>` (SipHash) | cấp phát, có thể đổi kích thước, hàm băm chậm hơn | **Bảng phẳng địa chỉ mở** (open addressing) với hàm băm số nguyên nhanh, cộng thêm seed ngẫu nhiên để chống các ID bị cố ý chọn để gây va chạm |
 | Lưu các lệnh | `Box<Order>` cho mỗi lệnh | mỗi lệnh một lần `malloc`, các lệnh nằm rải rác trong bộ nhớ | **Arena** (một mảng lớn), chỉ số `u32` |
 | Báo cáo chuyện đã xảy ra | trả về một `Vec<Event>` | cấp phát ở mỗi lần gọi | **Đẩy từng sự kiện vào một `EventSink` do bên gọi cung cấp**: bên gọi tự chọn nơi lưu |
 
-Cái giá của tốc độ này là những **giới hạn cố định** được quyết định từ trước:
+Để đạt tốc độ này, hệ thống cần đặt trước các **giới hạn cố định**:
 
 - tối đa `order_capacity` lệnh đang chờ (bạn chọn con số này khi gọi
   `Engine::new`),
-- số tick giá được chọn khi dựng engine (4096 với `Engine::new`, tối đa 2^24
+- số tick giá được chọn khi dựng bộ khớp lệnh (4096 với `Engine::new`, tối đa 2^24
   với `Engine::with_ticks`).
 
 Sự kiện thì không bị giới hạn: một lời gọi có thể báo hàng nghìn lần khớp, và
@@ -261,7 +260,7 @@ sink quyết định giữ lại, chuyển tiếp hay chỉ đếm chúng.
 ## 2.6 Dung lượng bộ nhớ
 
 Mọi thứ được cấp phát trong `Engine::with_ticks(order_capacity, ticks)`
-(`Engine::new` cũng y như vậy, với 4096 tick). Với sức chứa `N` và 4096 tick mặc
+(`Engine::new` cũng y như vậy, với 4096 tick). Với dung lượng `N` và 4096 tick mặc
 định:
 
 | Thành phần | Công thức | `N = 10,000` |
@@ -296,11 +295,10 @@ Tổng dung lượng này đủ nhỏ để nằm gọn trong cache L2/L3 của 
 
 Các phương thức làm thay đổi sổ (`submit_order`, `process_order`, `reduce_order`,
 `cancel_order`, `cancel_account` và `cancel_all`) nhận `&mut self`, nên Rust bảo
-đảm mỗi thời điểm chỉ có một bên gọi được truy cập sổ lệnh. Trong engine **không
+đảm mỗi thời điểm chỉ có một bên gọi được truy cập sổ lệnh. Trong bộ khớp lệnh **không
 có khóa nào cả**. Bộ đệm vòng áp dụng cùng ý
-tưởng cho hàng đợi: nó chỉ trao ra đúng một `Producer` và một `Consumer`, nên
-quy tắc "một bên ghi, một bên đọc" cũng được hệ thống kiểu (type system) ép
-buộc (chương 8). Cách làm này theo *nguyên tắc một bên ghi duy nhất*
+tưởng cho hàng đợi: nó chỉ tạo đúng một `Producer` và một `Consumer`, nên
+hệ thống kiểu (type system) cũng bảo đảm quy tắc "một bên ghi, một bên đọc" (chương 8). Cách làm này theo *nguyên tắc một bên ghi duy nhất*
 (single-writer principle) được LMAX Disruptor phổ biến: thay vì để nhiều luồng
 cạnh tranh quyền truy cập dữ liệu dùng chung, ta dồn mọi yêu cầu qua một hàng
 đợi vào một luồng duy nhất sở hữu dữ liệu.
@@ -309,38 +307,38 @@ Trong luồng xử lý này, thao tác ghi vào WAL cũng diễn ra trên luồn
 Thông thường, thao tác chỉ ghi vào bộ nhớ, nhưng đôi lúc WAL phải nới rộng và
 ánh xạ lại (re-map) tệp, làm độ trễ tăng vọt (chương 9).
 
-Để mở rộng ra nhiều luồng, hãy chạy **mỗi mã giao dịch (instrument) một engine**
-(hoặc mỗi nhóm mã một engine), mỗi engine trên một lõi riêng.
+Để mở rộng ra nhiều luồng, hãy chạy **mỗi mã giao dịch (instrument) một bộ khớp lệnh**
+(hoặc mỗi nhóm mã một bộ khớp lệnh), mỗi bộ khớp lệnh trên một lõi riêng.
 
-## 2.8 "Không cấp phát" nghĩa là gì và không có nghĩa là gì
+## 2.8 Phạm vi của cam kết "không cấp phát"
 
-Nó có nghĩa là **không có cấp phát trên heap bên trong bất kỳ phương thức nào
+Cam kết này có nghĩa là **không có cấp phát trên heap bên trong bất kỳ phương thức nào
 làm thay đổi sổ** (`submit_order`, `process_order`, `reduce_order`,
 `cancel_order`, `cancel_account`, `cancel_all`), và điều này được kiểm thử (xem
 [chương 10](10-testing-and-performance.md)).
 
-Các lời gọi sau *có* cấp phát; điều đó không sao vì chúng không nằm trên hot path
-(đoạn code chạy cho mọi lệnh):
+Các lời gọi sau *có* cấp phát; điều này phù hợp vì chúng không nằm trên hot path
+(đoạn mã chạy cho mọi lệnh):
 
 | Lời gọi | Vì sao nó cấp phát |
 |---|---|
-| `Engine::new` | dựng toàn bộ các mảng (đây chính là mục đích: chỉ làm một lần) |
+| `Engine::new` | cấp phát toàn bộ các mảng một lần khi khởi tạo |
 | `Engine::depth_snapshot` | trả về một `Vec` (để kiểm tra / báo cáo) |
-| `WalWriter::create`, `WalWriter::open_append`, `wal::read`, `wal::read_all`, `wal::replay`, `wal::replay_from` | khởi tạo tệp và `Vec` (và, với `replay`, một engine mới) |
-| `Engine::snapshot`, `Engine::restore`, `write_checkpoint`, `read_checkpoint` | danh sách lệnh của snapshot, một engine mới, nội dung tệp |
+| `WalWriter::create`, `WalWriter::open_append`, `wal::read`, `wal::read_all`, `wal::replay`, `wal::replay_from` | khởi tạo tệp và `Vec` (và, với `replay`, một bộ khớp lệnh mới) |
+| `Engine::snapshot`, `Engine::restore`, `write_checkpoint`, `read_checkpoint` | danh sách lệnh của snapshot, một bộ khớp lệnh mới, nội dung tệp |
 | `ringbuffer::spsc_channel` | dựng mảng các ô |
 
 > [!TIP]
-> "Không cấp phát" là tính chất của **engine**, không phải của mọi sink. Một sink
+> "Không cấp phát" là tính chất của **bộ khớp lệnh**, không phải của mọi sink. Một sink
 > kiểu `Vec<Event>` sẽ cấp phát khi tăng dung lượng (nếu dùng lại cùng một `Vec` thì
-> sau giai đoạn khởi động (warm-up) nó sẽ không phình thêm nữa), một closure thì
-> làm gì cũng được, còn `EventBatch` thì không bao giờ cấp phát. Bài test không
-> cấp phát cho engine chạy qua một `EventBatch` và một closure có đếm, nhờ vậy
-> chỉ đo riêng engine (chương 10).
+> sau giai đoạn khởi động (warm-up) nó sẽ không tăng dung lượng nữa), một closure thì
+> làm gì cũng được, còn `EventBatch` thì không bao giờ cấp phát. Kiểm thử không
+> cấp phát cho bộ khớp lệnh chạy qua một `EventBatch` và một closure có đếm, nhờ vậy
+> chỉ đo riêng bộ khớp lệnh (chương 10).
 
 ## 2.9 Tự thực hành
 
-Hãy mở tài liệu API được tạo từ các doc comment mà các chương này trích dẫn:
+Hãy mở tài liệu API được tạo từ các chú thích tài liệu (doc comment) mà các chương này trích dẫn:
 
 ```sh
 cargo doc --open
@@ -350,7 +348,7 @@ Sau đó mở [`src/engine.rs`](../../src/engine.rs), tìm các trường của 
 mục 2.3 và xem hàm `new` cấp phát chúng như thế nào. Mọi vùng nhớ cần cho việc
 xử lý lệnh đều được cấp phát trong hàm này; về sau chỉ các hàm hỗ trợ kiểm tra
 như `depth_snapshot` mới cấp phát thêm. [Chương 10](10-testing-and-performance.md)
-trình bày bài test chứng minh điều đó:
+trình bày kiểm thử chứng minh điều đó:
 
 ```sh
 cargo test --test zero_alloc

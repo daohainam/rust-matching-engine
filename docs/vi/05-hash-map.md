@@ -5,37 +5,37 @@
 > **Gặp từ lạ?** Mọi thuật ngữ trong các chương đều được giải thích trong
 > [bảng thuật ngữ](glossary.md).
 
-Nguồn: [`src/hashmap.rs`](../../src/hashmap.rs)
+Mã nguồn: [`src/hashmap.rs`](../../src/hashmap.rs)
 
 ## 5.1 Vì sao ta cần nó?
 
-Khi khớp lệnh, engine không cần bảng này để *tìm* lệnh: nó lấy lệnh trực tiếp từ
+Khi khớp lệnh, bộ khớp lệnh không cần bảng này để *tìm* lệnh: nó lấy lệnh trực tiếp từ
 đầu hàng đợi của mức giá (chỉ sau đó mới xóa từng maker đã khớp hết khỏi bảng).
-**Hủy lệnh thì cần đến bảng này.** Client có thể gửi yêu cầu *"hủy lệnh 12345"*,
-khi đó engine phải tìm lệnh 12345 trong arena mà không quét toàn bộ sổ lệnh.
+**Hủy lệnh thì cần đến bảng này.** Chương trình phía khách có thể gửi yêu cầu *"hủy lệnh 12345"*,
+khi đó bộ khớp lệnh phải tìm lệnh 12345 trong arena mà không quét toàn bộ sổ lệnh.
 
 ```text
    cancel_order(12345)  ->  id_map.remove(12345)  ->  ô arena 987  ->  gỡ nó khỏi danh sách
 ```
 
-Bảng này còn giúp **phát hiện lệnh trùng id**: trước khi nhận một lệnh, engine
-kiểm tra `id_map.get(order_id).is_some()` và từ chối nếu id đó đang được dùng.
+Bảng này còn giúp **phát hiện lệnh trùng ID**: trước khi nhận một lệnh, bộ khớp lệnh
+kiểm tra `id_map.get(order_id).is_some()` và từ chối nếu ID đó đang được dùng.
 
 ## 5.2 Vì sao không dùng `std::collections::HashMap`?
 
-Đó là một bảng băm đa dụng rất tốt, nhưng với việc này thì có mấy điểm không hợp:
+Đây là một bảng băm đa dụng tốt, nhưng chưa phù hợp với yêu cầu của dự án vì:
 
 - Nó **cấp phát**, và **đổi kích thước** (cấp phát bảng mới rồi băm lại toàn bộ)
-  khi lớn lên. Cả hai đều gây ra các đợt tăng vọt độ trễ.
+  khi số phần tử tăng lên. Cả hai đều gây ra các đợt tăng vọt độ trễ.
 - Hàm băm mặc định của nó (SipHash) được thiết kế để chống kẻ tấn công cố tình
-  tạo ra các khóa va chạm nhau; việc đó tốn chu kỳ CPU mà ta không muốn bỏ ra cho
-  mỗi lệnh. (Module này có được gần hết lớp bảo vệ đó với giá rẻ hơn nhiều, nhờ
+  tạo ra các khóa va chạm nhau; cơ chế này làm tăng chi phí CPU cho
+  mỗi lệnh. (Mô-đun này đạt được phần lớn hiệu quả bảo vệ với chi phí thấp hơn nhiều, nhờ
   một seed bí mật: xem 5.7.)
-- Ta biết trước số phần tử tối đa (sức chứa của pool), nên có thể định cỡ bảng
+- Ta biết trước số phần tử tối đa (dung lượng của kho chứa lệnh), nên có thể định cỡ bảng
   **một lần** và không bao giờ phải đổi kích thước.
 
-Vì vậy module này triển khai một bảng băm gọn nhất có thể, vừa đủ đáp ứng nhu cầu
-của ta.
+Vì vậy mô-đun này triển khai một bảng băm gọn nhất có thể, vừa đủ đáp ứng nhu cầu
+của bộ khớp lệnh.
 
 ## 5.3 Địa chỉ mở với dò tuyến tính
 
@@ -56,7 +56,7 @@ pub struct FlatHashMap {
 ```
 
 Một ô trống có `key == u64::MAX` (gọi là `EMPTY` / `RESERVED_KEY`).
-Nghĩa là `u64::MAX` không bao giờ được làm id của một lệnh thật (xem thêm ở 5.8).
+Nghĩa là `u64::MAX` không bao giờ được làm ID của một lệnh thật (xem thêm ở 5.8).
 
 ### Chèn và tra cứu qua ví dụ
 
@@ -85,7 +85,7 @@ qua các ô kế tiếp cho đến khi tìm thấy khóa (**hit**) hoặc gặp 
  get(E) với ô lý tưởng 2:  A, B, C, D, rồi ô 6 là EMPTY  -> KHÔNG THẤY
 ```
 
-Code chỉ là một vòng lặp gọn:
+Đoạn mã chỉ gồm một vòng lặp ngắn:
 
 ```rust
 pub fn get(&self, key: u64) -> Option<u32> {
@@ -102,14 +102,14 @@ pub fn get(&self, key: u64) -> Option<u32> {
 > [!WARNING]
 > Vòng lặp này chỉ dừng được nếu bảng luôn có **ít nhất một ô `EMPTY`**. Một
 > bảng đầy hoàn toàn sẽ khiến việc tra một khóa không tồn tại quay vòng mãi mãi.
-> Cách định cỡ của engine chừa nhiều ô trống (5.5), và `insert` bắt buộc mức
-> tối thiểu đó cho *bất kỳ ai* dùng bảng: nó panic thay vì lấp ô trống cuối
+> Cách định cỡ của bộ khớp lệnh chừa nhiều ô trống (5.5), và `insert` duy trì điều kiện
+> đó ngay cả khi bảng được dùng độc lập: nó panic thay vì lấp ô trống cuối
 > cùng. Panic rõ ràng dễ gỡ lỗi hơn nhiều so với một vòng lặp treo mà không báo
 > lỗi.
 
-## 5.4 Hai mẹo: kích thước lũy thừa của hai và hàm băm tốt
+## 5.4 Hai cách tối ưu: kích thước lũy thừa của hai và hàm băm tốt
 
-### Mẹo mask
+### Dùng mặt nạ bit (mask)
 
 Để đổi một giá trị băm thành số thứ tự ô, bình thường bạn sẽ viết `hash % len`.
 Phép chia thì chậm. Nếu `len` là **lũy thừa của hai** thì
@@ -118,14 +118,14 @@ Phép chia thì chậm. Nếu `len` là **lũy thừa của hai** thì
    hash % len  ==  hash & (len - 1)            ví dụ len = 32:  hash & 0b11111
 ```
 
-chỉ còn là một phép AND rẻ tiền. Đó là lý do có `mask = capacity - 1`.
+chỉ còn là một phép AND ít tốn chi phí. Đó là lý do có `mask = capacity - 1`.
 `FlatHashMap::with_capacity` làm tròn kích thước lên bằng `next_power_of_two()`.
 
 ### Hàm băm
 
-Id lệnh thường theo những khuôn mẫu: bước nhảy đều (bội số của 1024), id mang số
+ID lệnh thường có quy luật: bước nhảy đều (bội số của 1024), ID mang số
 hiệu gateway ở các bit cao... Nếu dùng thẳng `id & mask`, những khóa như vậy sẽ
-bị dồn vào cùng vài ô. (Id tuần tự thuần túy `1, 2, 3, ...` tình cờ lại là
+bị dồn vào cùng vài ô. (ID tuần tự `1, 2, 3, ...` tình cờ lại là
 trường hợp tốt nhất của `id & mask`, nhưng bạn không thể trông cậy vào điều đó.)
 Hàm dưới đây trộn các bit sao cho **mọi bit đầu vào đều ảnh hưởng tới mọi bit
 đầu ra** (một *hiệu ứng tuyết lở*, avalanche):
@@ -139,13 +139,13 @@ fn hash(&self, key: u64) -> usize {
 }
 ```
 
-Ngoài phép XOR đầu tiên với `self.seed`, đây chính là finalizer của
-**SplitMix64**. Cả hàm gồm mười phép toán đơn giản (bốn xor, một add, ba shift,
-hai multiply), không có nhánh rẽ, và phân bố rất tốt. Các bit thấp, tức phần mà
+Ngoài phép XOR đầu tiên với `self.seed`, đây chính là bước trộn cuối (finalizer) của
+**SplitMix64**. Cả hàm gồm mười phép toán đơn giản (bốn phép XOR, một phép cộng, ba phép dịch bit,
+hai phép nhân), không có nhánh rẽ, và tạo ra phân bố tốt. Các bit thấp, tức phần mà
 mask giữ lại, cũng được trộn kỹ.
 
 > Nó *không* an toàn về mặt mật mã. Chính seed bí mật mới là thứ ngăn kẻ tấn công
-> đoán trước một id sẽ rơi vào ô nào; 5.7 sẽ cho thấy vì sao điều đó quan trọng.
+> đoán trước một ID sẽ rơi vào ô nào; 5.7 sẽ cho thấy vì sao điều đó quan trọng.
 
 ## 5.5 Định cỡ: vì sao bảng không bao giờ đầy
 
@@ -155,7 +155,7 @@ let capacity = (capacity_hint.max(16) * 2).next_power_of_two();
 
 Bảng có **số ô ít nhất gấp đôi số phần tử tối đa** (làm tròn lên thành lũy thừa
 của hai). Vì vậy hệ số tải (load factor), tức số phần tử chia cho số ô, không
-bao giờ vượt quá **50%**. Khi engine có sức chứa từ 16 lệnh trở lên, hệ số tải
+bao giờ vượt quá **50%**. Khi bộ khớp lệnh có dung lượng từ 16 lệnh trở lên, hệ số tải
 vẫn trên 25% ngay cả khi sổ đầy hoàn toàn (nếu sổ mới đầy một phần thì hệ số
 này còn thấp hơn):
 
@@ -165,7 +165,7 @@ này còn thấp hơn):
 | 16,384 | 32,768 | 50% |
 | 16,385 | 65,536 | 25% |
 
-Số phần tử không bao giờ vượt quá `order_capacity`, vì engine chỉ chèn vào
+Số phần tử không bao giờ vượt quá `order_capacity`, vì bộ khớp lệnh chỉ chèn vào
 `id_map` **sau khi** `pool.allocate` thành công, mà pool chứa tối đa
 `order_capacity` lệnh. Vì vậy bảng luôn có nhiều ô trống.
 
@@ -173,8 +173,8 @@ Có hai cơ chế bảo vệ bảng ngay cả khi nó được dùng riêng lẻ
 
 - Phép tính kích thước dùng số học có kiểm tra (`checked_mul(2)`, rồi
   `checked_next_power_of_two()`). Giá trị gợi ý (hint) không hợp lệ sẽ gây panic
-  với thông báo "hash map capacity overflows usize", thay vì tràn số rồi tạo ra
-  một bảng quá nhỏ trong bản build release, nơi kiểm tra tràn số bị tắt.
+  với thông báo "hash map dung lượng overflows usize", thay vì tràn số rồi tạo ra
+  một bảng quá nhỏ trong bản dựng release, nơi kiểm tra tràn số bị tắt.
 - `insert` panic với thông báo "FlatHashMap is full" thay vì lấp ô trống cuối
   cùng, nên các vòng dò ở 5.3 luôn dừng được.
 
@@ -196,7 +196,7 @@ thường chỉ cần một hoặc hai lần dò trong một hoặc hai cache li
 Chèn và tra cứu khá đơn giản. **Xóa** mới là thao tác khiến địa chỉ mở trở nên
 phức tạp.
 
-### Cách ngây thơ là sai
+### Vì sao không thể chỉ đánh dấu ô trống
 
 Xét bảng trong ví dụ trên. Nếu chỉ đánh dấu ô của `B` là trống:
 
@@ -222,8 +222,8 @@ mã nguồn nêu rõ đây là điều cần tránh.
 
 ### Cách 2: xóa bằng cách dịch lùi (dùng ở đây)
 
-Sau khi tạo lỗ trống, **ta tiếp tục dò về phía trước và dịch lùi mọi phần tử
-không thì sẽ không còn tìm thấy được**, nhờ đó không cần để lại tombstone.
+Sau khi tạo lỗ trống, **ta tiếp tục dò về phía trước và dịch lùi những phần tử
+sẽ không thể tìm thấy nếu giữ nguyên vị trí**, nhờ đó không cần để lại tombstone.
 
 Quy tắc cho một phần tử đang nằm ở `probe`, có ô lý tưởng là `ideal`:
 
@@ -274,8 +274,8 @@ tưởng của nó là ô 6.
  kết quả        _  _  A  C  D  .  F  _          mọi phần tử vẫn tới được
 ```
 
-Bảng là một vòng tròn, nên phép thử "tại hoặc trước" phải đúng cả khi một chuỗi
-dò quấn từ cuối mảng về đầu mảng. Đó là lý do mã nguồn có hai nhánh:
+Bảng là một vòng tròn, nên điều kiện "tại hoặc trước" phải đúng cả khi một chuỗi
+dò quấn từ cuối mảng về đầu mảng. Đó là lý do thuật toán có hai nhánh:
 
 ```rust
 let displaced = if probe >= hole {
@@ -309,7 +309,7 @@ lỗ trống"**.)
 - Đường đi của `R` (ở ô 0): {7, 0}. Ô lý tưởng 6 của `R` không nằm trên đó (6
   chính là lỗ trống), nên `R` **chuyển** vào ô 6.
 
-Nhìn theo từng bước trong code:
+Nhìn theo từng bước trong mã:
 
 - Probe 7: `Q`, ideal 7; `7 <= 6`? không, `7 > 7`? không → ở lại.
 - Probe 0 (đã quấn vòng, `probe < hole`): `R`, ideal 6; `6 <= 6 && 6 > 0` →
@@ -320,40 +320,40 @@ Nhìn theo từng bước trong code:
 
 | Thao tác | Kỳ vọng | Trường hợp xấu nhất |
 |---|---|---|
-| `get` | O(1), khoảng 1.5 lần dò | O(capacity) nếu mọi khóa đều va chạm |
-| `insert` | O(1) | O(capacity) |
-| `remove` | O(1) cộng một đợt dịch lùi ngắn | O(capacity) |
+| `get` | O(1), khoảng 1.5 lần dò | O(dung lượng) nếu mọi khóa đều va chạm |
+| `insert` | O(1) | O(dung lượng) |
+| `remove` | O(1) cộng một đợt dịch lùi ngắn | O(dung lượng) |
 
-Với tải công việc bình thường thì đây là "O(1)", và các doc comment đều cẩn thận
-ghi là "O(1) kỳ vọng" (expected O(1)).
+Với khối lượng công việc thông thường thì đây là "O(1)", và các chú thích tài liệu đều
+ghi rõ là "O(1) kỳ vọng" (expected O(1)).
 
-### Id được dựng sẵn, và seed bí mật
+### ID cố ý gây va chạm và seed bí mật
 
-Bất kỳ ai **chọn được id lệnh** và đoán trước hàm băm đều có thể gây ra trường
-hợp xấu nhất. Khi không có seed, finalizer của SplitMix64 hoàn toàn
+Bất kỳ ai **chọn được ID lệnh** và đoán trước hàm băm đều có thể gây ra trường
+hợp xấu nhất. Khi không có seed, bước trộn cuối (finalizer) của SplitMix64 hoàn toàn
 **khả nghịch** (invertible): phép cộng một hằng số, `z ^ (z >> k)` và phép nhân
 với một hằng số lẻ đều có thể được đảo ngược. Vì thế kẻ tấn công có thể tính ra
-hàng nghìn id đều băm về ô 0, và khi đó mọi lần tra cứu phải đi qua một chuỗi dò
-rất dài: một kiểu tấn công từ chối dịch vụ (denial of service) rẻ tiền nhắm vào
+hàng nghìn ID đều băm về ô 0, và khi đó mọi lần tra cứu phải đi qua một chuỗi dò
+rất dài: một kiểu tấn công từ chối dịch vụ (denial of service) ít tốn chi phí nhắm vào
 độ trễ.
 
-Cách phòng thủ chỉ tốn một chỉ thị: XOR một **seed ngẫu nhiên, bí mật** vào khóa
+Cách phòng thủ chỉ tốn một chỉ thị máy: XOR một **seed ngẫu nhiên, bí mật** vào khóa
 trước khi trộn. `FlatHashMap::with_capacity` lấy seed từ `RandomState` của thư
 viện chuẩn; đây cũng là nguồn ngẫu nhiên mà `std` dùng làm khóa cho SipHash. Nếu
-không biết seed, kẻ tấn công không thể đảo ngược hàm băm để nhắm id vào một ô.
+không biết seed, kẻ tấn công không thể đảo ngược hàm băm để nhắm ID vào một ô.
 
-Test `keys_crafted_for_one_seed_spread_out_under_another` minh họa cả hai trường
-hợp. Hàm `craft_key` đảo ngược finalizer để tạo 1,000 id cùng nhắm vào ô 0 với
-seed `0`, rồi xác nhận điều đó. Với seed khác, các id ấy phân bố như những khóa
-bình thường; test yêu cầu bucket đông nhất chứa ít hơn 32 id.
+Kiểm thử `keys_crafted_for_one_seed_spread_out_under_another` minh họa cả hai trường
+hợp. Hàm `craft_key` đảo ngược finalizer để tạo 1,000 ID cùng nhắm vào ô 0 với
+seed `0`, rồi xác nhận điều đó. Với seed khác, các ID ấy phân bố như những khóa
+bình thường; kiểm thử yêu cầu bucket đông nhất chứa ít hơn 32 ID.
 
 > [!NOTE]
 > **Ngẫu nhiên mà không mất tính tất định.** Seed chỉ thay đổi *vị trí* lưu các
 > phần tử, không làm thay đổi giá trị mà `get`, `insert` hay `remove` trả về.
-> Vì vậy engine vẫn **tất định** (deterministic): cùng một chuỗi yêu cầu luôn
+> Vì vậy bộ khớp lệnh vẫn **tất định** (deterministic): cùng một chuỗi yêu cầu luôn
 > tạo ra cùng các sự kiện và cùng trạng thái sổ lệnh, bất kể seed là gì.
-> `tests/wal_replay.rs` dựa đúng vào điều này: nó phát lại một log vào engine thứ
-> hai, engine này bốc một seed khác, và yêu cầu kết quả giống hệt. Những test cần
+> `tests/wal_replay.rs` dựa đúng vào điều này: nó phát lại nhật ký yêu cầu bằng bộ khớp lệnh thứ
+> hai, bộ khớp lệnh này lấy một seed ngẫu nhiên khác, và yêu cầu kết quả giống hệt. Những kiểm thử cần
 > một *cách bố trí* tái lập được thì dùng `FlatHashMap::with_capacity_and_seed`.
 
 ## 5.8 Khóa dành riêng
@@ -363,38 +363,38 @@ không thể đồng thời là một khóa. Có hai lớp bảo vệ điều n�
 
 1. **`Engine::process_order`** từ chối `order_id == RESERVED_KEY` ngay từ đầu,
    phát ra `OrderRejected` với lý do `ReservedOrderId`. (Nếu không có kiểm tra
-   này, một client gửi id `u64::MAX` sẽ chạm tới lớp 2 bên dưới và làm cả tiến
+   này, chương trình phía khách gửi ID `u64::MAX` sẽ chạm tới lớp 2 bên dưới và làm cả tiến
    trình bị dừng đột ngột (abort): một kiểu từ chối dịch vụ. Còn nếu thiếu *cả
-   hai* lớp, phần tử sẽ nằm đó mà âm thầm không ai tìm tới được.)
-2. **`FlatHashMap::insert`** có một `assert!` cứng (không phải `debug_assert!`),
-   nên ngay cả khi ai đó dùng sai trực tiếp thì nó cũng thất bại ồn ào trong bản
+   hai* lớp, phần tử vẫn được lưu nhưng không thể tra cứu được.)
+2. **`FlatHashMap::insert`** có một `assert!` luôn được thực thi (không phải `debug_assert!`),
+   nên ngay cả khi dùng trực tiếp bảng băm sai cách, chương trình vẫn dừng và báo lỗi rõ ràng trong bản
    release.
 
 `get` và `remove` với `u64::MAX` thì vô hại: chúng chỉ báo "không tìm thấy", như
-mọi lần miss khác (vòng dò chạy cho tới khi gặp một ô trống). Test
-`rejects_reserved_order_id_sentinel` bao phủ đường đi qua engine, còn
-`insert_rejects_reserved_sentinel_key_in_all_build_profiles` bao phủ bảng.
+mọi lần miss khác (vòng dò chạy cho tới khi gặp một ô trống). Kiểm thử
+`rejects_reserved_order_id_sentinel` kiểm tra trường hợp gọi qua bộ khớp lệnh, còn
+`insert_rejects_reserved_sentinel_key_in_all_build_profiles` kiểm tra trực tiếp bảng băm.
 
 ## 5.9 Tóm tắt
 
 - Một mảng phẳng các ô `(key, value)`, kích thước là lũy thừa của hai, đầy tối đa
   50%, và không bao giờ đầy hẳn (`insert` từ chối lấp ô trống cuối cùng).
-- Băm bằng finalizer của SplitMix64 sau khi XOR với một seed bí mật riêng của
+- Băm bằng bước trộn cuối (finalizer) của SplitMix64 sau khi XOR với một seed bí mật riêng của
   từng bảng, rồi chọn ô bằng `& mask`.
 - Va chạm được giải quyết bằng cách bước sang ô kế tiếp (dò tuyến tính).
-- Xóa bằng **dịch lùi** thay vì tombstone, nên sau này không có gì phải dọn.
+- Xóa bằng **dịch lùi** thay vì tombstone, nên không cần dọn các dấu xóa về sau.
 - Định cỡ một lần, không bao giờ đổi kích thước, không bao giờ cấp phát sau
   `with_capacity`.
 
 ## 5.10 Tự thực hành
 
-Chạy các unit test của bảng băm:
+Chạy các kiểm thử đơn vị của bảng băm:
 
 ```sh
 cargo test hashmap::
 ```
 
-Có hai test đáng đọc kỹ. `survives_many_collisions_and_deletions` kiểm tra cơ
+Có hai kiểm thử đáng đọc kỹ. `survives_many_collisions_and_deletions` kiểm tra cơ
 chế xóa dịch lùi ở 5.6, còn `keys_crafted_for_one_seed_spread_out_under_another`
 mô phỏng cuộc tấn công ở 5.7 và cho thấy seed ngăn chặn được nó:
 

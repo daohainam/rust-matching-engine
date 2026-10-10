@@ -8,23 +8,23 @@
 Mã nguồn: [`src/wal.rs`](../../src/wal.rs), [`src/snapshot.rs`](../../src/snapshot.rs),
 [`examples/pipeline.rs`](../../examples/pipeline.rs), [`examples/checkpoint.rs`](../../examples/checkpoint.rs)
 
-[Chương 8](08-ring-buffer.md) đã xây hàng đợi cấp lệnh cho engine. Chương này bổ
-sung khối xây dựng thứ hai, **nhật ký ghi trước** (write-ahead log, WAL), để
-dựng lại sổ lệnh của engine sau khi crash (mục 9.1 đến 9.6). Mục 9.7 ghép bộ đệm
-vòng, log và engine thành một chương trình hoàn chỉnh; mục 9.8 bổ sung
-checkpoint, giúp phục hồi mà không phải phát lại log từ yêu cầu đầu tiên.
+[Chương 8](08-ring-buffer.md) đã xây dựng hàng đợi đưa lệnh cho bộ khớp lệnh. Chương này bổ
+sung thành phần thứ hai, **nhật ký ghi trước** (write-ahead log, WAL), để
+dựng lại sổ lệnh của bộ khớp lệnh sau khi tiến trình dừng đột ngột (mục 9.1 đến 9.6). Mục 9.7 ghép bộ đệm
+vòng, nhật ký và bộ khớp lệnh thành một chương trình hoàn chỉnh; mục 9.8 bổ sung
+mốc lưu trạng thái (checkpoint), giúp khôi phục mà không phải phát lại nhật ký từ yêu cầu đầu tiên.
 
-## 9.1 Vì sao phải ghi log?
+## 9.1 Vì sao phải ghi nhật ký?
 
-Nếu process bị crash, sổ lệnh nằm trong bộ nhớ sẽ mất sạch. Làm sao lấy lại nó?
+Nếu tiến trình dừng đột ngột (crash), sổ lệnh trong bộ nhớ sẽ mất. Làm sao khôi phục sổ lệnh?
 
-Có một điểm thuận lợi: engine là **tất định** (deterministic). Nó không dùng
+Có một điểm thuận lợi: bộ khớp lệnh là **tất định** (deterministic). Nó không dùng
 đồng hồ; nguồn ngẫu nhiên duy nhất của nó (seed của hàm băm, chương 5) không ảnh
-hưởng đến kết quả. Trạng thái của engine chỉ phụ thuộc vào các yêu cầu (request)
-đã nhận, sức chứa (capacity) và số tick lúc khởi tạo. Vì vậy, **cùng một chuỗi
-yêu cầu, nạp vào các engine được tạo theo cùng cách, luôn tạo ra cùng một sổ
+hưởng đến kết quả. Trạng thái của bộ khớp lệnh chỉ phụ thuộc vào các yêu cầu (request)
+đã nhận, dung lượng (capacity) và số tick lúc khởi tạo. Vì vậy, **cùng một chuỗi
+yêu cầu, nạp vào các bộ khớp lệnh được tạo theo cùng cách, luôn tạo ra cùng một sổ
 lệnh**. Ta không cần lưu sổ lệnh; chỉ cần lưu các **yêu cầu** theo đúng thứ tự
-rồi phát lại (replay) chúng vào engine mới. Cách này gọi là
+rồi phát lại (replay) chúng vào bộ khớp lệnh mới. Cách này gọi là
 *event sourcing* (ở đây chính xác hơn là *input* sourcing).
 
 ```text
@@ -34,41 +34,41 @@ rồi phát lại (replay) chúng vào engine mới. Cách này gọi là
    khởi động:  Engine::new(capacity)  <-------  đọc log, nạp lại từng yêu cầu
 ```
 
-Capacity và số tick cũng quan trọng như các yêu cầu, nên log ghi chúng vào header
-(9.2) và hàm `replay` của thư viện dựng engine với đúng các giá trị đó. Giới hạn
-rủi ro cũng là đầu vào nhưng có thể thay đổi trong ngày, nên được ghi log thành
+Dung lượng và số tick cũng quan trọng như các yêu cầu, nên nhật ký ghi chúng vào phần đầu tệp
+(mục 9.2) và hàm `replay` của thư viện khởi tạo bộ khớp lệnh với đúng các giá trị đó. Giới hạn
+rủi ro cũng là đầu vào nhưng có thể thay đổi trong ngày, nên được ghi nhật ký thành
 các yêu cầu riêng.
 
-"Write-ahead" (ghi trước) nghĩa là **ghi yêu cầu vào log rồi mới áp dụng**. Nếu
-crash ngay sau khi ghi log, lần phát lại sẽ áp dụng yêu cầu đó; ngược lại, nếu
-áp dụng trước rồi crash trước khi ghi log, yêu cầu sẽ bị mất.
+"Write-ahead" (ghi trước) nghĩa là **ghi yêu cầu vào nhật ký rồi mới áp dụng**. Nếu
+tiến trình dừng ngay sau khi ghi nhật ký, lần phát lại sẽ áp dụng yêu cầu đó; ngược lại, nếu
+áp dụng trước rồi tiến trình dừng trước khi ghi nhật ký, yêu cầu sẽ bị mất.
 
 ## 9.2 Định dạng bản ghi
 
-Một tệp log gồm một **header** 32 byte, theo sau là các **bản ghi** (record) kích
+Tệp nhật ký gồm **phần đầu tệp** (header) 32 byte, theo sau là các **bản ghi** (record) kích
 thước cố định 40 byte. Mọi số nguyên đều được ghi tường minh theo thứ tự byte
-little-endian (byte thấp đứng trước), nên một tệp log mang sang máy nào cũng đọc
+little-endian (byte thấp đứng trước), nên một tệp nhật ký mang sang máy nào cũng đọc
 được và không chứa padding.
 
-Header cho biết đây là tệp gì và theo định dạng nào:
+Phần đầu tệp cho biết đây là tệp gì và theo định dạng nào:
 
 | Offset | Kích thước | Trường |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
 | 8 | 4 | phiên bản định dạng (`6`; các phiên bản `1` đến `5` vẫn được đọc) |
 | 12 | 4 | kích thước bản ghi tính bằng byte (`40`) |
-| 16 | 4 | capacity của engine dùng để ghi log |
-| 20 | 4 | số tick của engine |
-| 24 | 8 | checksum của các byte header `0..24` |
+| 16 | 4 | dung lượng của bộ khớp lệnh dùng để ghi nhật ký |
+| 20 | 4 | số tick của bộ khớp lệnh |
+| 24 | 8 | checksum của các byte phần đầu tệp `0..24` |
 
-Capacity và số tick vốn đã vừa trong `u32`, nên thu nhỏ hai trường này tạo chỗ
-cho checksum mà không tăng kích thước header. Một bit bị lật trong hai trường
-này phải được phát hiện: phát lại với capacity hoặc số tick khác có thể tạo ra
-sổ lệnh khác ngay cả khi mọi bản ghi vẫn nguyên vẹn. Header không hợp lệ trả về
-`InvalidData` trước khi phát lại phát sự kiện hoặc `open_append` sửa log.
+Dung lượng và số tick vốn đã biểu diễn được trong `u32`, nên giảm kích thước hai trường này dành chỗ
+cho checksum mà không tăng kích thước phần đầu tệp. Cần phát hiện lỗi lật bit trong hai trường
+này: phát lại với dung lượng hoặc số tick khác có thể tạo ra
+sổ lệnh khác ngay cả khi toàn bộ bản ghi vẫn nguyên vẹn. Nếu phần đầu tệp không hợp lệ, hàm trả về
+`InvalidData` trước khi quá trình phát lại phát ra sự kiện hoặc `open_append` sửa nhật ký.
 
-Các phiên bản 1 đến 5 dùng trường 8 byte tại offset 16 (capacity) và 24 (số tick),
-không có checksum cho header. Các header cũ vẫn được đọc: capacity `0` nghĩa là
+Các phiên bản 1 đến 5 dùng trường 8 byte tại offset 16 (dung lượng) và 24 (số tick),
+không có checksum cho phần đầu tệp. Các phần đầu tệp cũ vẫn được đọc: dung lượng `0` nghĩa là
 "không rõ", còn số tick `0` nghĩa là mặc định 4096.
 
 Mỗi bản ghi mô tả một yêu cầu:
@@ -80,42 +80,42 @@ Mỗi bản ghi mô tả một yêu cầu:
 | 2 | 1 | loại lệnh: `0` = limit, `1` = immediate-or-cancel, `2` = market, `3` = post-only |
 | 3 | 1 | chống tự giao dịch: `0` = cho phép, `1` = hủy lệnh đang chờ, `2` = hủy lệnh đến, `3` = hủy cả hai |
 | 4 | 4 | tick giá |
-| 8 | 8 | id của lệnh |
+| 8 | 8 | ID của lệnh |
 | 16 | 8 | số lượng; với bản ghi giảm số lượng, là lượng cần bớt đi |
 | 24 | 8 | số thứ tự do bên gọi cung cấp |
 | 32 | 4 | checksum của các byte `0..32`, và của tài khoản khi nó khác 0 |
 | 36 | 4 | tài khoản (của một lệnh mới, hoặc tài khoản mà một bản ghi kind `4` hủy lệnh) |
 
 Trường nào không được kind đó sử dụng đều bằng 0: bản ghi hủy lệnh không có side,
-giá hay tài khoản; bản ghi hủy hàng loạt không có id lệnh.
+giá hay tài khoản; bản ghi hủy hàng loạt không có ID lệnh.
 
 Bản ghi giới hạn rủi ro (kind `6`) tái sử dụng các trường của lệnh: số lượng là
 số lượng tối đa cho một lệnh, tick giá là biên độ giá (price band), còn byte
 side cho biết có áp dụng biên độ giá (`1`) hay không (`0`).
 
 **Sáu phiên bản.** Định dạng này đã thay đổi năm lần. Phiên bản 1 không có loại
-lệnh và không có bản ghi giảm số lượng; phiên bản 2 thêm hai thứ đó, nhưng không
+lệnh và không có bản ghi giảm số lượng; phiên bản 2 bổ sung hai tính năng này, nhưng không
 có chống tự giao dịch, không có tài khoản và không có hủy hàng loạt; phiên bản 3
-thêm những thứ đó, nhưng không ghi lại capacity của engine; phiên bản 4 ghi lại
-capacity, nhưng không ghi số tick, và không có giới hạn rủi ro. Phiên bản 5 thêm
-hai thứ đó; phiên bản 6 thêm checksum cho header. Trong các phiên bản
+bổ sung các tính năng này, nhưng không ghi lại dung lượng của bộ khớp lệnh; phiên bản 4 ghi lại
+dung lượng, nhưng không ghi số tick, và không có giới hạn rủi ro. Phiên bản 5 thêm
+hai thứ đó; phiên bản 6 thêm checksum cho phần đầu tệp. Trong các phiên bản
 cũ, những byte của các trường còn thiếu là phần dự phòng, luôn bằng 0, và 0 có
-nghĩa là "limit", "cho phép", "tài khoản 0", "capacity không rõ" và "4096 tick". Vì
-vậy **mọi bản ghi cũ cũng là một bản ghi phiên bản 6 hợp lệ**, và cả sáu phiên bản
+nghĩa là "limit", "cho phép", "tài khoản 0", "dung lượng không rõ" và "4096 tick". Vì
+vậy **toàn bộ bản ghi cũ cũng là một bản ghi phiên bản 6 hợp lệ**, và cả sáu phiên bản
 đều được đọc.
 
 Điều ngược lại thì không đúng: một bộ đọc cũ sẽ bỏ qua các byte mới và phát lại,
 chẳng hạn, một lệnh immediate-or-cancel như một lệnh limit, hoặc coi mọi lệnh là
-của tài khoản 0, để lại một sổ lệnh khác. Đó là lý do có số phiên bản:
-`open_append` ghi lại header cũ thành phiên bản 6 (và flush nó) trước khi ghi thêm
-bất cứ thứ gì, và khi đó một bộ đọc cũ sẽ từ chối tệp thay vì đọc sai. Cũng lần
-ghi lại đó lưu capacity và số tick của engine mà `open_append` được truyền vào, nên
-từ đó về sau log biết và bảo vệ các giá trị này bằng checksum của header.
+của tài khoản 0, tạo ra một sổ lệnh khác. Đó là lý do có số phiên bản:
+`open_append` ghi lại phần đầu tệp cũ thành phiên bản 6 (và flush nó) trước khi ghi thêm
+bất cứ thứ gì, và khi đó một bộ đọc cũ sẽ từ chối tệp thay vì đọc sai. Lần
+ghi lại này cũng lưu dung lượng và số tick của bộ khớp lệnh mà `open_append` được truyền vào, nên
+từ đó về sau nhật ký lưu và bảo vệ các giá trị này bằng checksum của phần đầu tệp.
 Offset và cách mã hóa các bản ghi không thay đổi trong lần nâng cấp này.
 
 Đây là 40 byte mà `encode` tạo ra cho
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, tức lệnh `#6` trong ví dụ minh
-họa, được ghi log như yêu cầu thứ sáu (sequence 5). Mỗi hàng gồm 8 byte, viết
+họa, được ghi nhật ký như yêu cầu thứ sáu (sequence 5). Mỗi hàng gồm 8 byte, viết
 dưới dạng hệ thập lục phân (hexadecimal):
 
 ```text
@@ -132,7 +132,7 @@ dưới dạng hệ thập lục phân (hexadecimal):
 **Little-endian** nghĩa là byte có trọng số *thấp nhất* đứng đầu. Vì vậy, giá 102
 (`0x00000066`) được lưu thành `66 00 00 00`, và checksum `16 08 01 21` phải đọc
 ngược lại thành `0x21010816`. Ghi từng trường theo cách này, thay vì chép nguyên
-vùng nhớ của struct, là điều khiến các byte giống hệt nhau trên mọi máy.
+vùng nhớ của struct, giúp dữ liệu byte giống hệt nhau trên mọi máy.
 
 Trong bộ nhớ, bản ghi là một struct Rust thông thường với các trường có kiểu rõ
 ràng; chỉ `encode` và `decode` mới xử lý cách bố trí byte:
@@ -173,37 +173,37 @@ pub fn encode(&self) -> [u8; WAL_RECORD_SIZE] {
 Tại sao phải viết từng byte thay vì chép nguyên struct từ bộ nhớ? Phiên bản đầu
 tiên chép thẳng struct `#[repr(C)]`; cách làm đó có những nhược điểm đáng lưu ý:
 
-- **Không mang sang máy khác được.** Các byte phụ thuộc thứ tự byte
-  (endianness) và quy tắc căn lề (alignment) của máy, nên một log ghi trên kiến
+- **Không bảo đảm tương thích giữa các máy.** Các byte phụ thuộc thứ tự byte
+  (endianness) và quy tắc căn chỉnh (alignment) của máy, nên một nhật ký ghi trên kiến
   trúc này có thể không phát lại được trên kiến trúc khác.
-- **Padding chưa được khởi tạo.** Trình biên dịch chèn 4 byte đệm vô hình vào
-  struct. Chép chúng ra nghĩa là đọc vùng nhớ chưa khởi tạo (nói chặt chẽ thì đó
+- **Padding chưa được khởi tạo.** Trình biên dịch chèn 4 byte đệm vào
+  struct. Chép chúng ra nghĩa là đọc vùng nhớ chưa khởi tạo (xét theo quy tắc của Rust thì đó
   là hành vi không xác định, undefined behavior), và hai yêu cầu giống hệt nhau
   có thể cho ra các byte khác nhau.
-- **Không thể có checksum.** Checksum tính trên những byte lẫn padding ngẫu nhiên
+- **Không thể tính checksum đáng tin cậy.** Checksum tính trên những byte lẫn padding ngẫu nhiên
   thì vô nghĩa.
 
 `decode` làm ngược lại `encode` và **kiểm tra** ngay trong lúc giải mã, trả về
-`WalDecodeError` nếu gặp kind lạ (`0` đánh dấu vùng chưa từng được ghi), side,
-loại lệnh hoặc chế độ chống tự giao dịch lạ, hoặc **checksum không khớp**.
-Checksum lấy bốn từ 8 byte của bản ghi (các byte `0..32`), trộn chúng qua hàm trộn
+`WalDecodeError` nếu gặp kind không hợp lệ (`0` đánh dấu vùng chưa từng được ghi), side,
+loại lệnh hoặc chế độ chống tự giao dịch không hợp lệ, hoặc **checksum không khớp**.
+Để tính checksum, thuật toán lấy bốn word 8 byte của bản ghi (các byte `0..32`), trộn chúng qua hàm trộn
 (mixer) SplitMix64 ở chương 5, rồi ép kết quả 64 bit xuống 32 bit.
 
 Tài khoản, nằm ở các byte `36..40`, được đưa vào checksum như **word thứ năm,
-nhưng chỉ khi khác 0**. Quy tắc này có vẻ lạ cho đến khi thấy lợi ích của nó: ở
+nhưng chỉ khi khác 0**. Quy tắc này giúp duy trì tính tương thích: ở
 phiên bản 1 và 2, các byte này là phần dự phòng và luôn bằng 0. Vì vậy, bản ghi
 của tài khoản 0 vẫn có cùng checksum như trước, và các bản ghi cũ vẫn hợp lệ mà
-không cần ghi lại. Unit test
-`a_record_for_account_zero_keeps_its_version_2_bytes` cố định các byte này.
+không cần ghi lại. Kiểm thử đơn vị
+`a_record_for_account_zero_keeps_its_version_2_bytes` kiểm tra dữ liệu byte này luôn giữ nguyên.
 Thông tin tài khoản bị hỏng vẫn được phát hiện: nếu một bit bị lật khiến giá trị
 khác 0 thì word thứ năm xuất hiện; nếu bit bị lật khiến giá trị trở về 0 thì word
 đó biến mất. Trong cả hai trường hợp, checksum đều không còn khớp.
 
 Một vài giới hạn cần lưu ý:
 
-- **Rất có khả năng phát hiện hư hỏng, nhưng không chắc chắn.** Hai bản ghi khác
+- **Phát hiện hư hỏng với xác suất cao, nhưng không tuyệt đối.** Hai bản ghi khác
   nhau có thể trùng checksum 32 bit (xác suất khoảng 1 trên 4 tỷ với hư hỏng
-  ngẫu nhiên). Unit test `decode_rejects_zeroed_and_corrupted_records` lật từng
+  ngẫu nhiên). Kiểm thử đơn vị `decode_rejects_zeroed_and_corrupted_records` lật từng
   bit một của một bản ghi, cả 40 byte, với một tài khoản bằng 0 và một tài khoản
   khác 0, và kiểm tra rằng lần lật nào cũng bị phát hiện.
 - **Nó không phải MAC mật mã** (message authentication code: loại checksum cần
@@ -216,33 +216,33 @@ Thư viện chuẩn không cung cấp sẵn, còn crate này chỉ có một dep
 tính trực tiếp bằng phần cứng.
 
 Bản ghi kích thước cố định mang lại hai lợi ích lớn: **ghi thêm không cần bộ đệm
-tuần tự hóa** (mã hóa 40 byte rồi chép đi) và **bản ghi thứ *i* bắt đầu tại byte
-`32 + i × 40`**, nên bạn nhảy thẳng (seek) tới nó được.
+tuần tự hóa** (mã hóa 40 byte rồi sao chép vào vùng ánh xạ) và **bản ghi thứ *i* bắt đầu tại byte
+`32 + i × 40`**, nên có thể truy cập trực tiếp (seek) đến bản ghi.
 
 Các hàm khởi tạo (constructor) gồm: `WalRecord::new_order(id, side, tick, qty, sequence)`
 cho lệnh limit, `WalRecord::submit(order, sequence)` cho một `NewOrder` bất kỳ,
 `WalRecord::cancel(id, sequence)`, `WalRecord::reduce(id, reduce_by, sequence)`,
 `WalRecord::cancel_account(account, sequence)` và `WalRecord::cancel_all(sequence)`
 (các trường không dùng được gán bằng 0). `record.order()` biến một bản ghi lệnh mới
-trở lại thành `NewOrder` mà nó đã ghi log, sẵn sàng cho `submit_order`.
+trở lại thành `NewOrder` mà nó đã ghi nhật ký, sẵn sàng cho `submit_order`.
 
-**`sequence` dùng để làm gì?** Engine không đọc giá trị này; đó là con số
-*bạn* tự chọn, thường là 0, 1, 2, ... theo thứ tự ghi các yêu cầu vào log
+**`sequence` dùng để làm gì?** Bộ khớp lệnh không đọc giá trị này; đó là con số
+*bạn* tự chọn, thường là 0, 1, 2, ... theo thứ tự ghi các yêu cầu vào nhật ký
 (chương trình ở mục 9.7 làm như vậy). Đây không phải bộ đếm `sequence` riêng
-của engine ở chương 6. Vì giá trị tăng đúng một đơn vị sau mỗi bản ghi, bạn có
+của bộ khớp lệnh ở chương 6. Vì giá trị tăng đúng một đơn vị sau mỗi bản ghi, bạn có
 thể dùng nó để:
 
-- **phát hiện lỗ hổng**: nếu sau bản ghi 41 là bản ghi 43 thì có gì đó đã bị mất
+- **phát hiện bản ghi bị thiếu**: nếu sau bản ghi 41 là bản ghi 43 thì có gì đó đã bị mất
   hoặc bị hỏng (bài tập 20 ở [chương 11](11-limitations-and-exercises.md) xây
   tiếp từ ý này);
-- **định danh một yêu cầu** bên ngoài log, ví dụ để nhớ rằng "các sự kiện đã
+- **định danh một yêu cầu** bên ngoài nhật ký, ví dụ để nhớ rằng "các sự kiện đã
   được phát hành tới yêu cầu 41" (xem *Còn các sự kiện thì sao?* ở mục 9.5).
 
 ## 9.3 Tệp ánh xạ bộ nhớ trong một phút
 
 Thông thường, mỗi lần ghi một bản ghi vào tệp cần một lời gọi hệ thống (syscall)
 `write`. **Tệp ánh xạ bộ nhớ** (memory-mapped file) hoạt động khác: ta nhờ hệ
-điều hành ánh xạ các byte của tệp vào vùng nhớ thông thường bên trong process.
+điều hành ánh xạ các byte của tệp vào vùng nhớ thông thường của tiến trình.
 Khi đó, ghi vào vùng nhớ chỉ cần một phép `memcpy`; hệ điều hành sẽ ghi các dirty
 page (trang đã sửa nhưng chưa ghi xuống đĩa) xuống đĩa sau.
 
@@ -253,7 +253,7 @@ page (trang đã sửa nhưng chưa ghi xuống đĩa) xuống đĩa sau.
   +---------------------+ memcpy +---------------+  sau đó +-----------+
 ```
 
-Crate này dùng `memmap2` để làm việc đó. Nhờ vậy, append một bản ghi chỉ cần:
+Crate này dùng `memmap2` để làm việc đó. Nhờ vậy, ghi thêm một bản ghi chỉ cần:
 
 ```rust
 let start = self.next_offset;
@@ -261,12 +261,12 @@ self.mapping()[start..start + WAL_RECORD_SIZE].copy_from_slice(&record.encode())
 self.next_offset += WAL_RECORD_SIZE;
 ```
 
-Ánh xạ bộ nhớ chỉ được dùng **để ghi thêm**, nơi nó thực sự có lợi. Việc đọc log
-để phát lại (`read_all`) và quét log trong `open_append` dùng I/O tệp thông
-thường: cả hai đều chỉ đọc mỗi byte một lần, còn bản sao dữ liệu không thể chạy
-đua (race) với writer như một ánh xạ thứ hai của cùng tệp có thể gây ra (xem 9.5).
+Ánh xạ bộ nhớ chỉ được dùng **để ghi thêm**, nơi nó thực sự có lợi. Việc đọc nhật ký
+để phát lại (`read_all`) và quét nhật ký trong `open_append` dùng I/O tệp thông
+thường: cả hai đều chỉ đọc mỗi byte một lần, còn bản sao dữ liệu tránh được tranh chấp (race) với bộ ghi
+như khi tạo thêm một vùng ánh xạ cho cùng tệp (xem 9.5).
 
-## 9.4 Vòng đời của writer
+## 9.4 Vòng đời của bộ ghi
 
 ```mermaid
 flowchart TD
@@ -294,40 +294,39 @@ flowchart TD
 
 - **`create` từ chối ghi đè.** Nó mở tệp bằng `create_new`, nên nếu đường dẫn đã
   tồn tại thì sẽ báo lỗi `AlreadyExists`. Nhờ vậy, một lần khởi động lại không
-  bao giờ xóa mất log mà đáng lẽ nó phải phát lại; muốn viết tiếp một log thì
+  bao giờ xóa mất nhật ký mà đáng lẽ nó phải phát lại; muốn viết tiếp một nhật ký thì
   dùng `open_append`, hoặc xóa tệp một cách có chủ đích.
-- **Cả hai constructor đều nhận engine.** `create` ghi capacity và số tick của
-  engine vào header.
-  `open_append` kiểm tra chúng: nếu header ghi một capacity hoặc số tick khác, nó
-  báo lỗi `InvalidInput` trước khi chạm vào tệp, vì viết tiếp log cho một engine
-  khác sẽ khiến log không phát lại được nữa.
-- **Mỗi lúc chỉ một writer.** Cả hai constructor trước hết lấy khóa độc quyền
+- **Cả hai hàm khởi tạo đều nhận bộ khớp lệnh.** `create` ghi dung lượng và số tick của
+  bộ khớp lệnh vào phần đầu tệp.
+  `open_append` kiểm tra chúng: nếu phần đầu tệp ghi một dung lượng hoặc số tick khác, nó
+  báo lỗi `InvalidInput` trước khi sửa tệp, vì viết tiếp nhật ký cho một bộ khớp lệnh
+  khác sẽ khiến nhật ký không phát lại được nữa.
+- **Mỗi thời điểm chỉ có một bộ ghi.** Cả hai hàm khởi tạo trước hết lấy khóa độc quyền
   (`File::try_lock`) trên một tệp đi kèm nhỏ, `path.lock`, và giữ nó suốt vòng đời
-  của writer. Writer thứ hai sẽ nhận `WouldBlock`, thay vì cắt tệp log trong khi
-  writer thứ nhất vẫn đang ánh xạ nó. Hệ điều hành nhả khóa khi writer bị drop
-  hoặc process của nó kết thúc, nên crash không thể khiến log bị khóa vĩnh viễn.
+  của bộ ghi. Bộ ghi thứ hai sẽ nhận `WouldBlock`, thay vì cắt tệp nhật ký trong khi
+  bộ ghi thứ nhất vẫn đang ánh xạ nó. Hệ điều hành nhả khóa khi bộ ghi bị hủy (drop)
+  hoặc tiến trình của nó kết thúc, nên sự cố không thể khiến nhật ký bị khóa vĩnh viễn.
   Vì sao dùng tệp riêng? Trên Windows, khóa là *bắt buộc* (mandatory): khóa trực
-  tiếp tệp log sẽ ngăn `read_all` đọc log trong khi writer đang ghi, dù thao tác
+  tiếp tệp nhật ký sẽ ngăn `read_all` đọc nhật ký trong khi bộ ghi đang ghi, dù thao tác
   đó được bảo đảm an toàn ở mục kế tiếp. (Tệp khóa vẫn nằm lại trên đĩa; nó rỗng.)
 - **Định kích thước trước** giúp trường hợp thường gặp không cần lời gọi hệ
-  thống nào khi append (lần ghi đầu tiên vào mỗi page mới của vùng ánh xạ vẫn có
+  thống nào khi ghi thêm (lần ghi đầu tiên vào mỗi page mới của vùng ánh xạ vẫn có
   thể gây ra page fault).
-- **Mở rộng** là nhân đôi kích thước tệp rồi ánh xạ lại. Đây là đường chậm, cần
+- **Mở rộng** là nhân đôi kích thước tệp rồi ánh xạ lại. Thao tác này chậm hơn trường hợp thông thường, cần
   nhiều syscall và gây ra một đợt tăng độ trễ (latency spike), nên hãy chọn
   `capacity_records` đủ lớn cho lượng yêu cầu của bạn.
-- **`flush()` là thao tác đồng bộ hóa có tính chặn (blocking) để bảo đảm độ bền
-  vững (durability)**, không phải một lời gợi ý. `memmap2` gọi `msync(MS_SYNC)`
+- **`flush()` đồng bộ dữ liệu xuống đĩa và chặn cho đến khi hoàn tất (blocking), bảo đảm độ bền vững (durability)**. `memmap2` gọi `msync(MS_SYNC)`
   trên Unix, hoặc `FlushViewOfFile` rồi `FlushFileBuffers` trên Windows; hàm chỉ
   trả về khi hệ điều hành báo dữ liệu đã được ghi. Gọi sau mỗi bản ghi sẽ quá
   chậm; tần suất gọi (mỗi batch, mỗi giây...) là chính sách độ bền vững của bạn.
-- **`finalize(self)` tiêu thụ (consume) writer.** Hàm flush, **hủy ánh xạ tệp rồi
-  mới cắt (truncate) tệp** về đúng số byte đã ghi, sau đó sync tệp. Vì vậy tệp chỉ còn
-  đúng header cộng mọi bản ghi. Vì nhận `self` theo giá trị (by value), "append
+- **`finalize(self)` nhận quyền sở hữu (consume) bộ ghi.** Hàm gọi `flush`,  **hủy ánh xạ tệp rồi
+  mới cắt (truncate) tệp** về đúng số byte đã ghi, sau đó đồng bộ tệp xuống đĩa. Vì vậy tệp chỉ còn
+  đúng phần đầu tệp cộng toàn bộ bản ghi. Vì nhận `self` theo giá trị (by value), "append
   sau finalize" không phải lỗi lúc chạy mà là **lỗi biên dịch**: cùng ý tưởng với
-  các handle của bộ đệm vòng. Drop một writer cũng chạy các bước tương tự nhưng
+  các đầu đọc/ghi của bộ đệm vòng. Khi bị hủy (drop), bộ ghi cũng thực hiện các bước tương tự nhưng
   buộc phải bỏ qua lỗi; hãy gọi `finalize` khi bạn cần thấy lỗi.
 - Thứ tự "hủy ánh xạ rồi mới cắt" rất quan trọng: Windows không cho thu nhỏ một
-  tệp khi vẫn còn một view ánh xạ đang mở (xem ghi chú ở 9.6).
+  tệp khi vẫn còn một vùng ánh xạ đang hoạt động (xem ghi chú ở 9.6).
 
 ## 9.5 Đọc và phát lại
 
@@ -336,16 +335,16 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<WalContents>   // capacity + 
 pub fn read_all<P: AsRef<Path>>(path: P) -> io::Result<Vec<WalRecord>>  // just the records
 ```
 
-`read` đọc toàn bộ tệp, kiểm tra header (magic, phiên bản hoặc kích thước bản ghi
+`read` đọc toàn bộ tệp, kiểm tra phần đầu tệp (magic, phiên bản hoặc kích thước bản ghi
 sai sẽ gây lỗi `ErrorKind::InvalidData`), rồi giải mã bản ghi **cho đến bản ghi
-đầu tiên không hợp lệ**: phần đuôi toàn số 0 được cấp phát sẵn còn lại sau crash,
+đầu tiên không hợp lệ**: phần đuôi toàn số 0 được cấp phát sẵn còn lại sau sự cố,
 bản ghi cuối bị ghi dở (torn write), hoặc bản ghi chỉ được ghi một phần. Hàm trả
-về `WalContents` gồm capacity của engine lấy từ header (`None` với log có từ
-trước phiên bản 4), số tick (4096 với log có từ trước phiên bản 5), và một
+về `WalContents` gồm dung lượng của bộ khớp lệnh lấy từ phần đầu tệp (`None` với nhật ký có từ
+trước phiên bản 4), số tick (4096 với nhật ký có từ trước phiên bản 5), và một
 `Vec` chứa các bản ghi đã giải mã.
 
-Biến một bản ghi trở lại thành một lời gọi engine là việc của
-`WalRecord::apply_to`, một `match` thường, không còn gì phải kiểm tra thêm:
+Biến một bản ghi trở lại thành một lời gọi bộ khớp lệnh là việc của
+`WalRecord::apply_to`, một `match` thường, không cần kiểm tra thêm:
 
 ```rust
 pub fn apply_to<S: EventSink + ?Sized>(&self, engine: &mut Engine, sink: &mut S) {
@@ -359,8 +358,8 @@ pub fn apply_to<S: EventSink + ?Sized>(&self, engine: &mut Engine, sink: &mut S)
 }
 ```
 
-Vòng lặp chạy thật cũng nên áp dụng từng yêu cầu bằng `apply_to` ngay sau khi ghi
-log. Như vậy, lần chạy thật và lần phát lại thực hiện đúng cùng các lời gọi ngay
+Vòng lặp xử lý thực tế cũng nên áp dụng từng yêu cầu bằng `apply_to` ngay sau khi ghi
+nhật ký. Như vậy, lần xử lý thực tế và lần phát lại thực hiện đúng cùng các lời gọi ngay
 từ đầu. Còn `replay` thực hiện toàn bộ quá trình phục hồi trong một lời gọi:
 
 ```rust
@@ -369,28 +368,28 @@ let engine = replay(&path, &mut events)?;  // Engine::with_ticks(recorded capaci
                                            // apply_to for every record, in order
 ```
 
-Hàm này từ chối log không ghi lại capacity (với lỗi `InvalidData`) thay vì tự
-đoán. Với log cũ như vậy, hãy dùng `read` rồi phát lại vào engine do bạn tự dựng.
+Hàm này từ chối nhật ký không ghi lại dung lượng (với lỗi `InvalidData`) thay vì tự
+đoán. Với nhật ký cũ như vậy, hãy dùng `read` rồi phát lại vào bộ khớp lệnh do bạn tự dựng.
 
 `read_all` dùng I/O thông thường (`std::fs::read`), không dùng ánh xạ. Vì vậy,
-hàm vẫn an toàn khi writer đang ghi vào cùng tệp: nó đọc một bản sao, trường hợp
+hàm vẫn an toàn khi bộ ghi đang ghi vào cùng tệp: nó đọc một bản sao, trường hợp
 xấu nhất bản sao kết thúc bằng bản ghi ghi dở. Bản ghi đó không qua được checksum
-và đánh dấu điểm kết thúc của log.
+và đánh dấu điểm kết thúc của nhật ký.
 
-**Khởi động lại sau crash** gồm ba bước:
+**Khởi động lại sau sự cố** gồm ba bước:
 
-1. `replay` log. Nó dựng một `Engine` mới **với capacity và số tick mà log ghi
-   lại** và áp dụng mọi bản ghi hợp lệ.
-2. Mở log để ghi tiếp bằng `open_append(path, &engine, spare)`. Hàm dừng tại đúng
+1. Phát lại nhật ký bằng `replay`. Hàm khởi tạo một `Engine` mới **với dung lượng và số tick mà nhật ký ghi
+   lại** và áp dụng toàn bộ bản ghi hợp lệ.
+2. Mở nhật ký để ghi tiếp bằng `open_append(path, &engine, spare)`. Hàm dừng tại đúng
    bản ghi không hợp lệ đầu tiên mà `replay` gặp, bỏ mọi thứ phía sau rồi ghi tiếp
    từ đó.
 3. Chỉ sau đó mới bắt đầu nhận yêu cầu mới.
 
-Đây là hình dạng của tệp ở từng bước, với một writer bị crash đúng lúc đang ghi
+Đây là trạng thái của tệp ở từng bước, với một bộ ghi dừng đột ngột đúng lúc đang ghi
 bản ghi thứ tư:
 
 ```text
- sau khi crash:
+ sau khi tiến trình dừng đột ngột:
    [ header ][ rec 0 ][ rec 1 ][ rec 2 ][ rec 3: ghi dở ][ 00 00 00 ... cấp phát sẵn, chưa từng được ghi ]
                                          ^ checksum sai
 
@@ -403,39 +402,39 @@ bản ghi thứ tư:
                                          ^ lần append kế tiếp ghi vào đây
 ```
 
-Bản ghi ghi dở sẽ bị bỏ. Nếu crash xảy ra giữa lần append đó thì đây là kết quả
-đúng: log được ghi *trước* (ahead), nên yêu cầu chưa kịp được áp dụng vào engine.
+Bản ghi ghi dở sẽ bị bỏ. Nếu tiến trình dừng giữa thao tác ghi thêm đó thì đây là kết quả
+đúng: nhật ký được ghi *trước* (ahead), nên yêu cầu chưa kịp được áp dụng vào bộ khớp lệnh.
 Tuy nhiên, sau khi mất điện, phần đuôi bị mất cũng có thể chứa các yêu cầu *đã*
 được áp dụng nhưng chưa flush xuống đĩa; mục 9.6 giải thích điều này phụ thuộc
-vào `flush` như thế nào. Test `open_append_resumes_after_the_last_valid_record`
+vào `flush` như thế nào. Kiểm thử `open_append_resumes_after_the_last_valid_record`
 tạo đúng tình huống đó (một bản ghi dở theo sau là dữ liệu cũ còn sót lại) và
 kiểm tra rằng chỉ các bản ghi hợp lệ được giữ lại.
 
 ### Còn các sự kiện thì sao?
 
-Log lưu **yêu cầu**, không lưu sự kiện. Khi phát lại log, engine lại phát ra mọi
+Nhật ký lưu **yêu cầu**, không lưu sự kiện. Khi phát lại nhật ký, bộ khớp lệnh lại phát ra mọi
 sự kiện (mọi giao dịch và mọi lần khớp) kể từ yêu cầu đầu tiên. Điều này vừa hữu
 ích, vừa tiềm ẩn rủi ro:
 
 - **Trùng lặp.** Nếu các hệ thống phía sau (dữ liệu thị trường, xác nhận giao
-  dịch) đã nhận sự kiện trước khi crash, gửi lại sẽ khiến mỗi giao dịch được báo
+  dịch) đã nhận sự kiện trước khi xảy ra sự cố, gửi lại sẽ khiến mỗi giao dịch được báo
   hai lần. Vì vậy, khi phát lại, hoặc là *không* phát hành các sự kiện, hoặc phía
   hạ nguồn (downstream) phải nhận diện và bỏ qua sự kiện trùng lặp.
-- **Thiếu hụt.** Vòng lặp khớp lệnh ghi log một yêu cầu, áp dụng nó, *rồi mới*
-  phát hành các sự kiện của nó. Nếu crash xảy ra giữa các bước này, ta có một yêu
-  cầu đã nằm trong log nhưng sự kiện của nó chưa bao giờ ra khỏi process.
+- **Thiếu hụt.** Vòng lặp khớp lệnh ghi nhật ký một yêu cầu, áp dụng nó, *rồi mới*
+  phát hành các sự kiện của nó. Nếu xảy ra sự cố giữa các bước này, ta có một yêu
+  cầu đã nằm trong nhật ký nhưng sự kiện của nó chưa được gửi ra ngoài tiến trình.
 
-Cách xử lý phổ biến dùng `sequence` của WAL ở mục 9.2. Phía downstream ghi nhớ
-sequence của yêu cầu cuối cùng mà nó đã xử lý xong sự kiện; giả sử đó là 41. Khi
+Cách xử lý phổ biến dùng `sequence` của WAL ở mục 9.2. Hệ thống nhận sự kiện ghi nhớ
+số thứ tự của yêu cầu cuối cùng mà nó đã xử lý xong sự kiện; giả sử đó là 41. Khi
 khởi động lại, quá trình phát lại bỏ qua sự kiện của các yêu cầu từ 0 đến 41 rồi
-phát hành sự kiện từ yêu cầu 42 trở đi. Vì engine tất định, các sự kiện được tạo
-ra khớp chính xác với những gì process bị crash lẽ ra đã phát hành, kể cả
-`trade_id` của từng giao dịch ([7.2](07-events.md#72-quy-tắc-về-thứ-tự)). Một
-consumer chỉ quan tâm đến giao dịch có thể bỏ qua mọi `trade_id` đã thấy. Repo
+phát hành sự kiện từ yêu cầu 42 trở đi. Vì bộ khớp lệnh tất định, các sự kiện được tạo
+ra khớp chính xác với những gì tiến trình bị dừng lẽ ra đã phát hành, kể cả
+`trade_id` của từng giao dịch ([7.2](07-events.md#72-quy-tắc-về-thứ-tự)). Bên
+nhận sự kiện chỉ quan tâm đến giao dịch có thể bỏ qua mọi `trade_id` đã thấy. Kho mã nguồn
 này để bạn tự triển khai phần ghi nhớ đó; chương trình ở 9.7 không phát hành sự
 kiện.
 
-Ở lần khởi động đầu tiên thì chưa có log, nên một service thường làm như sau:
+Ở lần khởi động đầu tiên thì chưa có nhật ký, nên một dịch vụ thường làm như sau:
 
 ```rust
 let mut wal = match WalWriter::open_append(&path, &engine, 16_384) {
@@ -450,38 +449,38 @@ let mut wal = match WalWriter::open_append(&path, &engine, 16_384) {
 
 ## 9.6 Những điều cần lưu ý (đọc trước khi dựa vào WAL)
 
-Log này được cố ý giữ đơn giản, nên bạn cần tự xử lý các vấn đề sau:
+Nhật ký này được cố ý giữ đơn giản, nên bạn cần tự xử lý các vấn đề sau:
 
 | Lưu ý | Hệ quả |
 |---|---|
-| `flush()` có tính blocking và **bạn** phải lên lịch gọi nó | Không thao tác nào tự flush, ngoại trừ `finalize`/`Drop`. Crash *process* không làm mất dữ liệu đã chép vào vùng ánh xạ (hệ điều hành vẫn giữ các page đó); nhưng mất điện hoặc crash hệ điều hành có thể làm mất mọi thứ chưa được flush. Bạn quyết định khi nào một yêu cầu được xem là đã bền vững. |
+| `flush()` có tính blocking và **bạn** phải lên lịch gọi nó | Không thao tác nào tự flush, ngoại trừ `finalize`/`Drop`. *Tiến trình* dừng đột ngột không làm mất dữ liệu đã chép vào vùng ánh xạ (hệ điều hành vẫn giữ các page đó); nhưng mất điện hoặc hệ điều hành gặp sự cố có thể làm mất mọi thứ chưa được flush. Bạn quyết định khi nào một yêu cầu được xem là đã bền vững. |
 | Lỗi khi flush không thể khắc phục | Sau khi `flush` trả về lỗi, các bản ghi có thể đã mất ngay cả khi lần flush sau thành công: hệ điều hành có thể đã bỏ những page không ghi được ("fsyncgate" của PostgreSQL, 2018). Hãy ngừng nhận yêu cầu và phục hồi bằng cách phát lại. |
-| Tệp mới trên Unix | Mục thư mục (directory entry) của tệp mới chỉ bền vững sau khi thư mục cha được sync; `create` không làm việc này. Mất điện ngay sau khi tạo log có thể làm mất cả tệp. |
-| Đĩa đầy trên Linux | `set_len` nới tệp theo kiểu *thưa* (sparse). Nếu đĩa đầy khi một page được ghi lần đầu qua vùng ánh xạ, kernel sẽ dừng process bằng `SIGBUS` thay vì để `append` trả về lỗi. |
-| `create` không có tính nguyên tử (atomicity) | Crash trước khi header được ghi xuống đĩa sẽ để lại tệp có header toàn số 0. Khi đó `open_append` và `read_all` đều báo `InvalidData`; vì chưa có dữ liệu nào được ghi, có thể xóa tệp đó. |
-| `open_append` dừng ở bản ghi không hợp lệ đầu tiên | Mọi thứ phía sau được coi là phần đuôi chưa hoàn tất và bị bỏ. Sau crash, đây là cách xử lý đúng; tuy nhiên, nó cũng bỏ các bản ghi hợp lệ nằm sau bản ghi bị hỏng. |
-| Khóa writer chỉ mang tính hợp tác | Khóa trên `path.lock` ngăn một `WalWriter` thứ hai (trong cùng process hoặc process khác) ghi vào log. Khóa này không ngăn chương trình khác ghi trực tiếp vào tệp log. |
-| Log cũ hơn phiên bản 4 không ghi capacity | Cho đến khi `open_append` ghi tiếp và nâng cấp log đó, `replay` sẽ từ chối nó. Phát lại log bằng `read` cùng `Engine::new(capacity)` chỉ đúng nếu bạn chọn đúng capacity ban đầu. |
-| Không có gì ép buộc "ghi log trước, áp dụng sau" | Thứ tự này do bên gọi chịu trách nhiệm (mục 9.7 thực hiện đúng). |
-| Checksum không phải MAC | Nó bắt được bản ghi ghi dở và bản ghi toàn số 0, chứ không chống được việc cố ý can thiệp. |
+| Tệp mới trên Unix | Mục thư mục (directory entry) của tệp mới chỉ bền vững sau khi thư mục cha được sync; `create` không làm việc này. Mất điện ngay sau khi tạo nhật ký có thể làm mất cả tệp. |
+| Đĩa đầy trên Linux | `set_len` nới tệp theo kiểu *thưa* (sparse). Nếu đĩa đầy khi một page được ghi lần đầu qua vùng ánh xạ, kernel sẽ dừng tiến trình bằng `SIGBUS` thay vì để `append` trả về lỗi. |
+| `create` không có tính nguyên tử (atomicity) | Sự cố xảy ra trước khi phần đầu tệp được ghi xuống đĩa sẽ để lại tệp có phần đầu tệp toàn số 0. Khi đó `open_append` và `read_all` đều báo `InvalidData`; vì chưa có dữ liệu nào được ghi, có thể xóa tệp đó. |
+| `open_append` dừng ở bản ghi không hợp lệ đầu tiên | Mọi thứ phía sau được coi là phần đuôi chưa hoàn tất và bị bỏ. Sau sự cố, đây là cách xử lý đúng; tuy nhiên, nó cũng bỏ các bản ghi hợp lệ nằm sau bản ghi bị hỏng. |
+| Khóa bộ ghi chỉ mang tính hợp tác | Khóa trên `path.lock` ngăn một `WalWriter` thứ hai (trong cùng tiến trình hoặc tiến trình khác) ghi vào nhật ký. Khóa này không ngăn chương trình khác ghi trực tiếp vào tệp nhật ký. |
+| Nhật ký cũ hơn phiên bản 4 không ghi dung lượng | Cho đến khi `open_append` ghi tiếp và nâng cấp nhật ký đó, `replay` sẽ từ chối nó. Phát lại nhật ký bằng `read` cùng `Engine::new(capacity)` chỉ đúng nếu bạn chọn đúng dung lượng ban đầu. |
+| Không có cơ chế tự động bảo đảm "ghi nhật ký trước, áp dụng sau" | Thứ tự này do bên gọi chịu trách nhiệm (mục 9.7 thực hiện đúng). |
+| Checksum không phải MAC | Checksum phát hiện được bản ghi ghi dở và bản ghi toàn số 0, chứ không chống được việc cố ý can thiệp. |
 
 Nhiều lưu ý trong số này là bài tập hay (chương 11).
 
 > [!NOTE]
-> **Vì sao writer hủy ánh xạ trước khi cắt tệp.** Windows từ chối thu nhỏ một tệp
-> khi vẫn còn một view ánh xạ đang mở (lỗi OS 1224, "The requested operation
+> **Vì sao bộ ghi hủy ánh xạ trước khi cắt tệp.** Windows từ chối thu nhỏ một tệp
+> khi vẫn còn một vùng ánh xạ đang hoạt động (lỗi OS 1224, "The requested operation
 > cannot be performed on a file with a user-mapped section open"). Một phiên bản
-> đầu đã gọi `set_len` khi vùng ánh xạ còn sống; `Drop` bỏ qua lỗi sinh ra, nên
+> đầu đã gọi `set_len` khi vùng ánh xạ chưa được hủy; `Drop` bỏ qua lỗi sinh ra, nên
 > trên Windows tệp lặng lẽ giữ nguyên phần đệm toàn số 0, và bộ đọc cũ, vốn không
-> có bước kiểm tra, trả về thêm các bản ghi toàn số 0. Ngày nay writer giữ vùng
-> ánh xạ trong một `Option<MmapMut>`, lấy nó ra rồi drop, và chỉ sau đó mới gọi
-> `set_len`. Một lần crash (khi `finalize` không bao giờ chạy) vẫn để lại phần đệm
-> toàn số 0, và điều đó không sao: bộ đọc dừng ở bản ghi không hợp lệ đầu tiên.
+> có bước kiểm tra, trả về thêm các bản ghi toàn số 0. Triển khai hiện tại của bộ ghi giữ vùng
+> ánh xạ trong một `Option<MmapMut>`, lấy vùng ánh xạ ra rồi hủy, và chỉ sau đó mới gọi
+> `set_len`. Sự cố dừng đột ngột (khi `finalize` không bao giờ chạy) vẫn để lại phần đệm
+> toàn số 0, và điều này được xử lý an toàn: bộ đọc dừng ở bản ghi không hợp lệ đầu tiên.
 
 ## 9.7 Ghép tất cả lại
 
-Chương trình hoàn chỉnh này ghép ba thành phần chính—bộ đệm vòng, WAL và
-engine—với luồng (thread) gateway để tạo thành một pipeline; sau đó, log được
+Chương trình hoàn chỉnh này kết hợp ba thành phần chính gồm bộ đệm vòng, WAL và
+bộ khớp lệnh với luồng gateway để tạo thành một quy trình xử lý (pipeline); sau đó, nhật ký được
 phát lại để dựng lại sổ lệnh. Mã nguồn nằm trong
 [`examples/pipeline.rs`](../../examples/pipeline.rs); chạy nó bằng:
 
@@ -489,7 +488,7 @@ phát lại để dựng lại sổ lệnh. Mã nguồn nằm trong
 cargo run --example pipeline
 ```
 
-CI biên dịch và chạy ví dụ này sau mỗi lần push. Test `tests/docs_sync.rs` cũng
+CI biên dịch và chạy ví dụ này sau mỗi lần push. Kiểm thử `tests/docs_sync.rs` cũng
 thất bại nếu nội dung trong tài liệu không khớp với tệp nguồn. Nhờ vậy, ví dụ
 bạn đọc ở đây chính là mã đang chạy.
 
@@ -614,39 +613,38 @@ fn main() -> std::io::Result<()> {
 
 Chương trình này minh họa:
 
-- **Tách rời (decoupling):** gateway không bao giờ chạm vào engine; nó chỉ đẩy các
-  command vào hàng đợi.
-- **Dừng gọn gàng (clean shutdown):** khi luồng gateway kết thúc, `Producer` của
-  nó bị drop. Vòng lặp khớp lệnh dừng nhờ `is_disconnected()` sau khi hàng đợi đã
+- **Tách rời (decoupling):** gateway không trực tiếp truy cập bộ khớp lệnh; nó chỉ đẩy các
+  yêu cầu vào hàng đợi.
+- **Dừng có kiểm soát (clean shutdown):** khi luồng gateway kết thúc, `Producer` của
+  nó bị hủy (drop). Vòng lặp khớp lệnh dừng nhờ `is_disconnected()` sau khi hàng đợi đã
   được rút cạn. Nếu gateway panic thì điều tương tự xảy ra; `join` báo lại panic
   đó nên chương trình không bị treo.
-- **Thứ tự:** lần append vào WAL diễn ra *trước* lời gọi engine.
-- **Một đường code duy nhất:** cả lần chạy thật lẫn lần phát lại đều đi qua
+- **Thứ tự:** thao tác ghi vào WAL diễn ra *trước* lời gọi bộ khớp lệnh.
+- **Dùng chung logic xử lý:** cả lần xử lý thực tế lẫn lần phát lại đều đi qua
   `WalRecord::apply_to`, nên chúng không thể lệch nhau.
-- **Tính tất định (determinism):** engine mới được dựng theo đúng thông tin trong
-  log và nạp lại các yêu cầu đã ghi sẽ kết thúc ở cùng trạng thái. Đây là điều
+- **Tính tất định (determinism):** bộ khớp lệnh mới được dựng theo đúng thông tin trong
+  nhật ký và nạp lại các yêu cầu đã ghi sẽ kết thúc ở cùng trạng thái. Đây là điều
   khiến WAL hữu ích cho việc phục hồi, kiểm thử và kiểm toán (audit).
 
 Những gì chương trình cố ý bỏ qua:
 
-- **Nó không gọi `flush()`** trong lúc chạy; chỉ `finalize` ở cuối mới sync tệp.
-  Vì vậy log vẫn tồn tại sau crash của *process* (hệ điều hành vẫn giữ các page
+- **Nó không gọi `flush()`** trong lúc chạy; chỉ `finalize` ở cuối mới đồng bộ tệp xuống đĩa.
+  Vì vậy nhật ký vẫn tồn tại sau khi *tiến trình* dừng đột ngột (hệ điều hành vẫn giữ các page
   đã ghi và sẽ lưu chúng sau), nhưng không bảo toàn dữ liệu khi mất điện hoặc
-  crash hệ điều hành, những sự cố có thể làm mất mọi thứ kể từ lần sync cuối.
-  Một service thật phải quyết định khi nào gọi `flush`, chẳng hạn trước khi xác
-  nhận một yêu cầu với client (mục 9.6).
-- **Nó không bao giờ crash thật**, nên lần phát lại đọc một log đã finalize gọn
-  gàng. Bài tập ở 9.9 sẽ cho nó crash có chủ đích.
+  hệ điều hành gặp sự cố, các sự cố này có thể làm mất mọi thứ kể từ lần đồng bộ cuối.
+  Một dịch vụ thực tế phải quyết định khi nào gọi `flush`, chẳng hạn trước khi xác
+  nhận một yêu cầu với chương trình phía khách (mục 9.6).
+- **Chương trình không thực sự gặp sự cố**, nên lần phát lại đọc nhật ký đã được hoàn tất bằng `finalize`. Bài tập ở 9.9 sẽ cho chương trình dừng đột ngột có chủ đích.
 - **Nó phát lại từ yêu cầu đầu tiên.** Mục kế tiếp khắc phục điều đó.
 
 ## 9.8 Checkpoint: phát lại ít hơn
 
-Phát lại toàn bộ log vẫn khả thi, nhưng engine chạy càng lâu thì thời gian phục
-hồi càng tăng: một tuần yêu cầu đồng nghĩa với một tuần phát lại. Cách khắc phục
+Phát lại toàn bộ nhật ký vẫn khả thi, nhưng bộ khớp lệnh chạy càng lâu thì thời gian phục
+hồi càng tăng: chạy suốt một tuần thì cần phát lại toàn bộ yêu cầu của tuần đó. Cách khắc phục
 là định kỳ lưu **trạng thái** rồi chỉ phát lại các yêu cầu phát sinh sau đó.
 
-**Một snapshot** là toàn bộ trạng thái của engine: capacity và số tick, hai bộ đếm
-của nó (số lệnh đã chấp nhận và số giao dịch), giới hạn rủi ro của nó, và mọi lệnh
+**Ảnh chụp trạng thái** (snapshot) là toàn bộ trạng thái của bộ khớp lệnh: dung lượng và số tick, hai bộ đếm
+của nó (số lệnh đã chấp nhận và số giao dịch), giới hạn rủi ro của nó, và toàn bộ lệnh
 đang chờ theo thứ tự ưu tiên (các bid từ giá tốt nhất, rồi đến các ask, ở mỗi mức
 giá thì lệnh cũ nhất trước). Nó nằm
 trong [`src/snapshot.rs`](../../src/snapshot.rs):
@@ -658,14 +656,14 @@ let mut copy = Engine::restore(&snapshot)?;     // the same book, the same count
 
 `restore` đưa các lệnh vào sổ theo đúng thứ tự đã liệt kê, nhờ đó giữ nguyên ưu
 tiên thời gian. Hàm cũng khôi phục các bộ đếm để giao dịch kế tiếp nhận đúng
-`trade_id`. Test `tests/snapshot.rs` kiểm tra điều này: sau khi restore, thêm
-10,000 yêu cầu ngẫu nhiên tạo ra cùng các sự kiện ở cả hai engine. `restore` còn
+`trade_id`. Kiểm thử `tests/snapshot.rs` kiểm tra điều này: sau khi khôi phục, thêm
+10,000 yêu cầu ngẫu nhiên tạo ra cùng các sự kiện ở cả hai bộ khớp lệnh. `restore` còn
 từ chối (với `SnapshotError`) những snapshot mô tả trạng thái sổ lệnh không thể
-xảy ra, chẳng hạn sổ bị chéo giá (crossed book) hoặc có id lệnh trùng, thay vì
-dựng một engine không hợp lệ.
+xảy ra, chẳng hạn sổ bị chéo giá (crossed book) hoặc có ID lệnh trùng, thay vì
+dựng một bộ khớp lệnh không hợp lệ.
 
-**Một checkpoint** là một snapshot trên đĩa, cộng thêm một con số: `next_sequence`,
-số sequence của WAL thuộc yêu cầu đầu tiên mà snapshot *không* bao gồm. Khi đó
+**Mốc lưu trạng thái** (checkpoint) là một snapshot trên đĩa, cộng thêm một con số: `next_sequence`,
+số thứ tự trong WAL thuộc yêu cầu đầu tiên mà snapshot *không* bao gồm. Khi đó
 việc phục hồi chỉ còn ba dòng:
 
 ```rust
@@ -674,39 +672,39 @@ let mut engine = Engine::restore(&checkpoint.snapshot)?;
 replay_from(&log_path, &mut engine, checkpoint.next_sequence, &mut events)?;
 ```
 
-`replay_from` bỏ qua mọi bản ghi đứng trước `next_sequence` (snapshot đã chứa tác
-dụng của chúng), áp dụng phần còn lại bằng `apply_to` và từ chối engine có
-capacity hoặc số tick khác với log. Cách này dựa trên việc sequence tăng đúng
+`replay_from` bỏ qua toàn bộ bản ghi đứng trước `next_sequence` (snapshot đã ghi nhận kết quả
+của các yêu cầu này), áp dụng phần còn lại bằng `apply_to` và từ chối bộ khớp lệnh có
+dung lượng hoặc số tick khác với nhật ký. Cách này dựa trên việc sequence tăng đúng
 một đơn vị sau mỗi bản ghi, như trong các chương trình của chương này.
 
 Tệp checkpoint được ghi **nguyên tử** (atomic), vì checkpoint ghi dở còn tệ hơn
 không có checkpoint: `write_checkpoint` tạo tệp riêng `path.tmp.<pid>.<id>`,
-sync tệp, đổi tên đè lên
-`path`, rồi trên Unix sync cả thư mục để lần đổi tên vẫn tồn tại sau mất điện.
+đồng bộ tệp xuống đĩa, đổi tên để thay thế
+`path`, rồi đồng bộ cả thư mục trên Unix để lần đổi tên vẫn tồn tại sau mất điện.
 Các lần ghi đồng thời dùng tệp tạm khác nhau, nên không lần ghi nào có thể sửa
-checkpoint mà lần ghi khác đã công bố. Crash ở bất kỳ thời điểm nào cũng chỉ để
+checkpoint mà lần ghi khác đã công bố. Sự cố xảy ra ở bất kỳ thời điểm nào cũng chỉ để
 lại checkpoint cũ hoặc checkpoint mới; các lần ghi sau bỏ qua tệp tạm còn sót lại.
 Tệp kết thúc bằng checksum của mọi byte đứng trước; `read_checkpoint` báo
 `InvalidData` nếu tệp bị hỏng hoặc bị cắt cụt.
 
-[`examples/checkpoint.rs`](../../examples/checkpoint.rs) ghép các phần lại: lần
-chạy thật ghi checkpoint ở giữa 10,000 yêu cầu; lần phục hồi khôi phục checkpoint,
-chỉ phát lại nửa sau và phải tạo ra đúng sổ lệnh như lần chạy thật.
+[`examples/checkpoint.rs`](../../examples/checkpoint.rs) kết hợp các thành phần này: lần
+xử lý thực tế ghi checkpoint ở giữa 10,000 yêu cầu; lần phục hồi khôi phục checkpoint,
+chỉ phát lại nửa sau và phải tạo ra đúng sổ lệnh như lần xử lý thực tế.
 
 Hai điều cần ghi nhớ:
 
-- **Một snapshot làm dừng luồng khớp lệnh.** Tạo snapshot cần duyệt qua cả sổ
+- **Việc tạo snapshot tạm dừng luồng khớp lệnh.** Tạo snapshot cần duyệt qua cả sổ
   lệnh, nên hãy tạo checkpoint giữa các yêu cầu, vài phút một lần hoặc mỗi
   triệu yêu cầu một lần, chứ không đặt trên hot path.
-- **Log vẫn tiếp tục lớn dần.** Sau khi có checkpoint, các bản ghi đứng trước
+- **Nhật ký vẫn tiếp tục lớn dần.** Sau khi có checkpoint, các bản ghi đứng trước
   `next_sequence` không còn cần để phục hồi, nhưng không có gì tự xóa chúng đi;
-  phía downstream vẫn có thể cần *sự kiện* tương ứng (xem *Còn các sự kiện
+  hệ thống nhận sự kiện vẫn có thể cần *sự kiện* tương ứng (xem *Còn các sự kiện
   thì sao?* ở mục 9.5: phát lại từ checkpoint không thể tạo lại các sự kiện
-  trước đó). Bài tập 16 ở chương 11 bắt đầu log mới tại mỗi checkpoint.
+  trước đó). Bài tập 16 ở chương 11 bắt đầu nhật ký mới tại mỗi checkpoint.
 
 ## 9.9 Tự thực hành
 
-Hãy chạy các test của WAL, các test phát lại và snapshot, và các chương trình hoàn
+Hãy chạy các kiểm thử của WAL, các kiểm thử phát lại và snapshot, và các chương trình hoàn
 chỉnh ở 9.7 và 9.8:
 
 ```sh
@@ -717,11 +715,11 @@ cargo run --example pipeline
 cargo run --example checkpoint
 ```
 
-Sau đó hãy mô phỏng một lần crash. Trong
+Sau đó hãy mô phỏng sự cố dừng tiến trình. Trong
 [`examples/pipeline.rs`](../../examples/pipeline.rs), gọi `std::process::abort()`
-bên trong vòng lặp khớp lệnh sau, chẳng hạn, 5,000 yêu cầu, rồi chạy ví dụ. Viết
-vài dòng mở log bằng `read_all` và đếm xem còn lại bao nhiêu bản ghi. (Nhớ hoàn
-tác thay đổi sau đó: chương 9 phải hiển thị ví dụ y hệt như trong repo, và
+bên trong vòng lặp khớp lệnh sau khi xử lý khoảng 5,000 yêu cầu, rồi chạy ví dụ. Viết
+vài dòng mở nhật ký bằng `read_all` và đếm xem còn lại bao nhiêu bản ghi. (Nhớ hoàn
+tác thay đổi sau đó: chương 9 phải hiển thị ví dụ y hệt như trong kho mã nguồn, và
 `cargo test` kiểm tra điều này.)
 
 **Tiếp theo:** [10. Kiểm thử và hiệu năng](10-testing-and-performance.md)
