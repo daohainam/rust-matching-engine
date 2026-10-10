@@ -369,25 +369,29 @@ impl Engine {
     /// [`tick_count`](Self::tick_count) levels exist, so a larger `levels`
     /// (e.g. `usize::MAX`) returns every level.
     pub fn depth_snapshot(&self, side: Side, levels: usize) -> Vec<(u32, u64)> {
-        let mut out = Vec::with_capacity(levels.min(self.tick_count()));
+        let levels = levels.min(self.tick_count()).min(self.live_order_count());
+        let mut out = Vec::with_capacity(levels);
+        if levels == 0 {
+            return out;
+        }
         match side {
             Side::Buy => {
                 let mut tick = self.bid_bitset.highest();
                 while let Some(t) = tick {
-                    if out.len() >= levels {
+                    out.push((t as u32, self.bid_levels[t].total_qty));
+                    if out.len() == levels {
                         break;
                     }
-                    out.push((t as u32, self.bid_levels[t].total_qty));
                     tick = self.next_lower_active(&self.bid_bitset, t);
                 }
             }
             Side::Sell => {
                 let mut tick = self.ask_bitset.lowest();
                 while let Some(t) = tick {
-                    if out.len() >= levels {
+                    out.push((t as u32, self.ask_levels[t].total_qty));
+                    if out.len() == levels {
                         break;
                     }
-                    out.push((t as u32, self.ask_levels[t].total_qty));
                     tick = self.next_higher_active(&self.ask_bitset, t);
                 }
             }

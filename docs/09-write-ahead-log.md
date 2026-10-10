@@ -51,10 +51,21 @@ The header identifies the file and its format:
 | Offset | Size | Field |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
-| 8 | 4 | format version (`5`; versions `1` to `4` are still read) |
+| 8 | 4 | format version (`6`; versions `1` to `5` are still read) |
 | 12 | 4 | record size in bytes (`40`) |
-| 16 | 8 | engine capacity the log was written for (`0` = unknown) |
-| 24 | 8 | engine tick count (`0` = the default 4096, which every older log used) |
+| 16 | 4 | engine capacity the log was written for |
+| 20 | 4 | engine tick count |
+| 24 | 8 | checksum of header bytes `0..24` |
+
+Capacity and tick count already fit in `u32`, so narrowing these fields leaves
+room for a checksum without growing the header. A flipped bit in either field
+must be caught: replay with a different capacity or tick count could produce a
+different book even when every record is intact. An invalid header returns
+`InvalidData` before replay emits events or `open_append` modifies the log.
+
+Versions 1 to 5 used 8-byte fields at offsets 16 (capacity) and 24 (tick count),
+with no header checksum. Those older headers are still read: capacity `0` means
+"unknown", and tick count `0` means the default 4096.
 
 Each record describes one request:
 
@@ -78,22 +89,24 @@ A risk limits record (kind `6`) reuses the order fields: the quantity is the
 maximum order quantity, the price tick is the price band, and the side byte says
 whether there is a band at all (`1`) or not (`0`).
 
-**Five versions.** The format grew four times. Version 1 had no order type and
+**Six versions.** The format changed five times. Version 1 had no order type and
 no reduce records; version 2 added those, but had no self-trade prevention, no
 account and no mass cancels; version 3 added those, but did not record the engine
 capacity; version 4 recorded it, but not the tick count, and had no risk limits.
+Version 5 added those; version 6 checksums the header.
 In the older versions the bytes for the missing fields were reserved, and always
 zero, and zero means "limit", "allow", "account 0", "capacity unknown" and "4096
-ticks". So **every older record is also a valid version 5 record**, and all five
+ticks". So **every older record is also a valid version 6 record**, and all six
 versions are read.
 
 The reverse is not true: an old reader would ignore the new bytes and replay, say,
 an immediate-or-cancel order as a limit order, or every order for account 0,
 leaving a different book. That is why the version number exists: `open_append`
-rewrites an older header to version 5 (and flushes it) before it appends
+rewrites an older header to version 6 (and flushes it) before it appends
 anything, and an old reader then refuses the file instead of misreading it. The
 same rewrite records the capacity and tick count of the engine `open_append` was
-given, so from then on the log knows them.
+given, so from then on the log knows them and protects them with its header
+checksum. Records keep the same offsets and encoding during this upgrade.
 
 Here are the 40 real bytes that `encode` produces for
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, which is order `#6` from the
@@ -654,9 +667,12 @@ capacity or tick count differs from the log's. This relies on the sequence numbe
 one per record, as the programs in this chapter number them.
 
 The checkpoint file is written **atomically**, because a half-written checkpoint
-would be worse than none: `write_checkpoint` writes `path.tmp`, syncs it, renames
-it over `path`, and on Unix syncs the directory so the rename itself survives a
-power loss. A crash at any point leaves either the old checkpoint or the new one.
+would be worse than none: `write_checkpoint` creates a unique
+`path.tmp.<pid>.<id>` file, syncs it, renames it over `path`, and on Unix syncs the
+directory so the rename itself survives a power loss. Overlapping writes use
+different temporary files; none can modify a checkpoint another write has
+published. A crash at any point leaves either the old checkpoint or the new one;
+a leftover temporary file is skipped by future writes.
 The file ends with a checksum of everything before it, and `read_checkpoint`
 reports a damaged or truncated file as `InvalidData`.
 

@@ -55,10 +55,21 @@ Header cho biết đây là tệp gì và theo định dạng nào:
 | Offset | Kích thước | Trường |
 |-------:|-----:|---|
 | 0 | 8 | magic `b"MEWALOG\0"` |
-| 8 | 4 | phiên bản định dạng (`5`; các phiên bản `1` đến `4` vẫn được đọc) |
+| 8 | 4 | phiên bản định dạng (`6`; các phiên bản `1` đến `5` vẫn được đọc) |
 | 12 | 4 | kích thước bản ghi tính bằng byte (`40`) |
-| 16 | 8 | capacity của engine dùng để ghi log (`0` = không rõ) |
-| 24 | 8 | số tick của engine (`0` = mặc định 4096, giá trị mà mọi log cũ hơn đều dùng) |
+| 16 | 4 | capacity của engine dùng để ghi log |
+| 20 | 4 | số tick của engine |
+| 24 | 8 | checksum của các byte header `0..24` |
+
+Capacity và số tick vốn đã vừa trong `u32`, nên thu nhỏ hai trường này tạo chỗ
+cho checksum mà không tăng kích thước header. Một bit bị lật trong hai trường
+này phải được phát hiện: phát lại với capacity hoặc số tick khác có thể tạo ra
+sổ lệnh khác ngay cả khi mọi bản ghi vẫn nguyên vẹn. Header không hợp lệ trả về
+`InvalidData` trước khi phát lại phát sự kiện hoặc `open_append` sửa log.
+
+Các phiên bản 1 đến 5 dùng trường 8 byte tại offset 16 (capacity) và 24 (số tick),
+không có checksum cho header. Các header cũ vẫn được đọc: capacity `0` nghĩa là
+"không rõ", còn số tick `0` nghĩa là mặc định 4096.
 
 Mỗi bản ghi mô tả một yêu cầu:
 
@@ -82,23 +93,25 @@ Bản ghi giới hạn rủi ro (kind `6`) tái sử dụng các trường của
 số lượng tối đa cho một lệnh, tick giá là biên độ giá (price band), còn byte
 side cho biết có áp dụng biên độ giá (`1`) hay không (`0`).
 
-**Năm phiên bản.** Định dạng này đã được mở rộng bốn lần. Phiên bản 1 không có loại
+**Sáu phiên bản.** Định dạng này đã thay đổi năm lần. Phiên bản 1 không có loại
 lệnh và không có bản ghi giảm số lượng; phiên bản 2 thêm hai thứ đó, nhưng không
 có chống tự giao dịch, không có tài khoản và không có hủy hàng loạt; phiên bản 3
 thêm những thứ đó, nhưng không ghi lại capacity của engine; phiên bản 4 ghi lại
-capacity, nhưng không ghi số tick, và không có giới hạn rủi ro. Trong các phiên bản
+capacity, nhưng không ghi số tick, và không có giới hạn rủi ro. Phiên bản 5 thêm
+hai thứ đó; phiên bản 6 thêm checksum cho header. Trong các phiên bản
 cũ, những byte của các trường còn thiếu là phần dự phòng, luôn bằng 0, và 0 có
 nghĩa là "limit", "cho phép", "tài khoản 0", "capacity không rõ" và "4096 tick". Vì
-vậy **mọi bản ghi cũ cũng là một bản ghi phiên bản 5 hợp lệ**, và cả năm phiên bản
+vậy **mọi bản ghi cũ cũng là một bản ghi phiên bản 6 hợp lệ**, và cả sáu phiên bản
 đều được đọc.
 
 Điều ngược lại thì không đúng: một bộ đọc cũ sẽ bỏ qua các byte mới và phát lại,
 chẳng hạn, một lệnh immediate-or-cancel như một lệnh limit, hoặc coi mọi lệnh là
 của tài khoản 0, để lại một sổ lệnh khác. Đó là lý do có số phiên bản:
-`open_append` ghi lại header cũ thành phiên bản 5 (và flush nó) trước khi ghi thêm
+`open_append` ghi lại header cũ thành phiên bản 6 (và flush nó) trước khi ghi thêm
 bất cứ thứ gì, và khi đó một bộ đọc cũ sẽ từ chối tệp thay vì đọc sai. Cũng lần
 ghi lại đó lưu capacity và số tick của engine mà `open_append` được truyền vào, nên
-từ đó về sau log biết các giá trị này.
+từ đó về sau log biết và bảo vệ các giá trị này bằng checksum của header.
+Offset và cách mã hóa các bản ghi không thay đổi trong lần nâng cấp này.
 
 Đây là 40 byte mà `encode` tạo ra cho
 `WalRecord::new_order(6, Side::Buy, 102, 14, 5)`, tức lệnh `#6` trong ví dụ minh
@@ -667,9 +680,12 @@ capacity hoặc số tick khác với log. Cách này dựa trên việc sequenc
 một đơn vị sau mỗi bản ghi, như trong các chương trình của chương này.
 
 Tệp checkpoint được ghi **nguyên tử** (atomic), vì checkpoint ghi dở còn tệ hơn
-không có checkpoint: `write_checkpoint` ghi `path.tmp`, sync tệp, đổi tên đè lên
+không có checkpoint: `write_checkpoint` tạo tệp riêng `path.tmp.<pid>.<id>`,
+sync tệp, đổi tên đè lên
 `path`, rồi trên Unix sync cả thư mục để lần đổi tên vẫn tồn tại sau mất điện.
-Crash ở bất kỳ thời điểm nào cũng chỉ để lại checkpoint cũ hoặc checkpoint mới.
+Các lần ghi đồng thời dùng tệp tạm khác nhau, nên không lần ghi nào có thể sửa
+checkpoint mà lần ghi khác đã công bố. Crash ở bất kỳ thời điểm nào cũng chỉ để
+lại checkpoint cũ hoặc checkpoint mới; các lần ghi sau bỏ qua tệp tạm còn sót lại.
 Tệp kết thúc bằng checksum của mọi byte đứng trước; `read_checkpoint` báo
 `InvalidData` nếu tệp bị hỏng hoặc bị cắt cụt.
 

@@ -16,7 +16,7 @@
 //! | Offset | Size | Field                                 |
 //! |-------:|-----:|---------------------------------------|
 //! | 0      | 8    | magic `b"MESNAP\0\0"`                 |
-//! | 8      | 4    | format version (`1`)                  |
+//! | 8      | 4    | format version (`2`)                  |
 //! | 12     | 4    | order entry size in bytes (`32`)      |
 //! | 16     | 8    | engine capacity                       |
 //! | 24     | 8    | accepted orders                       |
@@ -48,18 +48,21 @@
 //!
 //! A checkpoint must never be half-written: recovery would then have
 //! neither the old checkpoint nor the new one. [`write_checkpoint`] writes
-//! the whole file to `<path>.tmp`, syncs it, renames it over `path` (a
-//! rename replaces the target in one step), and on Unix syncs the directory
+//! the whole file to a unique `<path>.tmp.<pid>.<id>` file, syncs it, and
+//! renames it over `path` (a rename replaces the target in one step).
+//! On Unix it then syncs the directory
 //! so the rename itself is durable. A crash at any point leaves either the
-//! old checkpoint or the new one; at worst a stale `.tmp` file, which the
-//! next write replaces.
+//! old checkpoint or the new one; at worst a stale temporary file, which
+//! future writes skip. Overlapping writes use separate files, so none can
+//! modify another write's published checkpoint.
 //!
 //! [`Engine::snapshot`]: crate::Engine::snapshot
 //! [`Engine::restore`]: crate::Engine::restore
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::engine::{RestingOrder, RiskLimits};
 use crate::events::RejectReason;
@@ -172,15 +175,15 @@ const CHECKSUM_SIZE: usize = 8;
 /// already there. See [Writing atomically](self#writing-atomically).
 pub fn write_checkpoint<P: AsRef<Path>>(path: P, checkpoint: &Checkpoint) -> io::Result<()> {
     let path = path.as_ref();
-    let temporary = temporary_path(path);
+    let (temporary, file) = TemporaryCheckpoint::create(path)?;
     {
-        let mut file = File::create(&temporary)?;
+        let mut file = file;
         file.write_all(&encode(checkpoint))?;
         // The contents must be durable before the rename makes them the
         // checkpoint.
         file.sync_all()?;
     }
-    std::fs::rename(&temporary, path)?;
+    std::fs::rename(&temporary.0, path)?;
     sync_parent_directory(path)
 }
 
@@ -194,10 +197,37 @@ pub fn read_checkpoint<P: AsRef<Path>>(path: P) -> io::Result<Checkpoint> {
     decode(&std::fs::read(path)?)
 }
 
-/// `<path>.tmp`: where a checkpoint is written before it replaces `path`.
-fn temporary_path(path: &Path) -> PathBuf {
+/// A separate file for each write, created exclusively so stale files and
+/// other processes cannot be overwritten. Drop also cleans up failed writes.
+struct TemporaryCheckpoint(PathBuf);
+
+impl TemporaryCheckpoint {
+    fn create(path: &Path) -> io::Result<(Self, File)> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let temporary = temporary_path(path, NEXT_ID.fetch_add(1, Ordering::Relaxed));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)
+            {
+                Ok(file) => return Ok((Self(temporary), file)),
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+impl Drop for TemporaryCheckpoint {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn temporary_path(path: &Path, id: u64) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
-    name.push(".tmp");
+    name.push(format!(".tmp.{}.{id}", std::process::id()));
     name.into()
 }
 
@@ -429,13 +459,14 @@ mod tests {
     #[cfg_attr(miri, ignore)] // Miri cannot rename files.
     fn writing_replaces_the_checkpoint_in_one_step() {
         let path = std::env::temp_dir().join(format!("checkpoint_{}.bin", std::process::id()));
-        // A `.tmp` file left by a crash in an earlier write is harmless.
-        std::fs::write(temporary_path(&path), b"half a checkpoint").unwrap();
+        // A temporary file left by a crash is skipped, never overwritten.
+        let stale = temporary_path(&path, 0);
+        std::fs::write(&stale, b"half a checkpoint").unwrap();
 
         let first = sample();
         write_checkpoint(&path, &first).unwrap();
         assert_eq!(read_checkpoint(&path).unwrap(), first);
-        assert!(!temporary_path(&path).exists());
+        assert_eq!(std::fs::read(&stale).unwrap(), b"half a checkpoint");
 
         let second = Checkpoint {
             next_sequence: 2_000,
@@ -444,5 +475,63 @@ mod tests {
         write_checkpoint(&path, &second).unwrap();
         assert_eq!(read_checkpoint(&path).unwrap(), second);
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(stale).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Miri cannot rename files.
+    fn overlapping_checkpoints_use_independent_temporary_files() {
+        let path =
+            std::env::temp_dir().join(format!("checkpoint_overlap_{}.bin", std::process::id()));
+        let first = sample();
+        // Pause the first write after it creates its file, before writing it.
+        let (temporary, mut file) = TemporaryCheckpoint::create(&path).unwrap();
+        let second = Checkpoint {
+            next_sequence: 2_000,
+            ..sample()
+        };
+        write_checkpoint(&path, &second).unwrap();
+        assert_eq!(read_checkpoint(&path).unwrap(), second);
+        assert!(
+            temporary.0.exists(),
+            "the second write renamed the first one's file"
+        );
+
+        // Resuming the first write must not touch the published checkpoint.
+        file.write_all(&encode(&first)).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert_eq!(read_checkpoint(&path).unwrap(), second);
+        std::fs::rename(&temporary.0, &path).unwrap();
+        assert_eq!(read_checkpoint(&path).unwrap(), first);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // Miri cannot rename files.
+    fn concurrent_checkpoint_writes_publish_complete_files() {
+        let path =
+            std::env::temp_dir().join(format!("checkpoint_threads_{}.bin", std::process::id()));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let path = &path;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for write in 0..8 {
+                        let checkpoint = Checkpoint {
+                            next_sequence: writer * 8 + write,
+                            ..sample()
+                        };
+                        write_checkpoint(path, &checkpoint).unwrap();
+                    }
+                });
+            }
+        });
+        let checkpoint = read_checkpoint(&path).unwrap();
+        assert!(checkpoint.next_sequence < 32);
+        assert_eq!(checkpoint.snapshot, sample().snapshot);
+        std::fs::remove_file(path).unwrap();
     }
 }

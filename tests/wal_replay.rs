@@ -6,7 +6,7 @@ mod common;
 
 use common::{Op, OpGenerator, TempFile};
 use matching_engine::wal::{read, replay, WalRecord, WalWriter};
-use matching_engine::{Engine, Side};
+use matching_engine::Engine;
 
 #[test]
 #[cfg_attr(miri, ignore)] // Miri cannot map files.
@@ -50,11 +50,5 @@ fn replaying_the_wal_reproduces_every_event() {
     let replica = replay(&path.0, &mut replayed_events).unwrap();
 
     assert_eq!(replayed_events, primary_events);
-    assert_eq!(replica.live_order_count(), primary.live_order_count());
-    for side in [Side::Buy, Side::Sell] {
-        assert_eq!(
-            replica.depth_snapshot(side, usize::MAX),
-            primary.depth_snapshot(side, usize::MAX)
-        );
-    }
+    assert_eq!(replica.snapshot(), primary.snapshot());
 }

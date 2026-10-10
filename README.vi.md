@@ -50,7 +50,7 @@ for event in &events {
 Kết quả:
 
 ```text
-OrderAccepted { order_id: 2, side: Buy, price_tick: 100, qty: 10 }
+OrderAccepted { order_id: 2, account: 0, side: Buy, order_type: Limit, price_tick: 100, qty: 10 }
 Trade { trade_id: 1, maker_order_id: 1, taker_order_id: 2, taker_side: Buy, price_tick: 100, qty: 10 }
 OrderFilled { order_id: 1 }
 OrderFilled { order_id: 2 }

@@ -6,7 +6,7 @@
 //! record directly into a memory-mapped file, so appending needs no
 //! serialization allocation and records can be located by arithmetic.
 //!
-//! # File format (version 5)
+//! # File format (version 6)
 //!
 //! All integers are little-endian and every field is encoded explicitly, so
 //! a log is portable across targets and never contains padding bytes.
@@ -16,19 +16,24 @@
 //! | Offset | Size | Field                       |
 //! |-------:|-----:|-----------------------------|
 //! | 0      | 8    | magic `b"MEWALOG\0"`        |
-//! | 8      | 4    | format version (`5`)        |
+//! | 8      | 4    | format version (`6`)        |
 //! | 12     | 4    | record size in bytes (`40`) |
-//! | 16     | 8    | engine capacity, see below  |
-//! | 24     | 8    | engine tick count, see below |
+//! | 16     | 4    | engine capacity, see below  |
+//! | 20     | 4    | engine tick count, see below |
+//! | 24     | 8    | checksum of bytes `0..24`   |
 //!
 //! The engine capacity and tick count describe the [`Engine`] the log was
 //! written for. The capacity decides which orders can rest, the tick count
 //! which prices are valid and how far a market order may sweep, so a replay
 //! is deterministic only into an engine like that one; recording them lets
 //! [`WalWriter::open_append`], [`replay`] and [`replay_from`] check them
-//! instead of trusting the caller. A capacity of `0` means "unknown": the
-//! log was written by an older version. A tick count of `0` means the
-//! default 4096, the only one older versions knew.
+//! instead of trusting the caller. Both fit in `u32`, leaving room for a
+//! header checksum without changing the header's size. A damaged header is
+//! rejected before replay or append can change anything.
+//!
+//! Versions 1 to 5 used an 8-byte capacity at offset 16 and an 8-byte tick
+//! count at offset 24, without a header checksum. In those older headers,
+//! capacity `0` means "unknown" and tick count `0` means the default 4096.
 //!
 //! followed by 40-byte records:
 //!
@@ -59,12 +64,13 @@
 //!
 //! Version 1 had no order type, version 2 no self-trade prevention,
 //! account or mass cancels, version 3 no engine capacity, and version 4 no
-//! tick count or risk limits. Their unused bytes were always zero, which
+//! tick count or risk limits, and version 5 no header checksum. Their unused
+//! bytes were always zero, which
 //! reads as "limit", "allow", account 0, "capacity unknown" and 4096 ticks,
 //! and a record for account 0 has the same checksum in every version. So
-//! every older record is also a valid version 5 record: readers accept all
-//! five versions, and [`WalWriter::open_append`] upgrades an older header to
-//! version 5, recording the engine's capacity and tick count, before
+//! every older record is also a valid version 6 record: readers accept all
+//! six versions, and [`WalWriter::open_append`] upgrades an older header to
+//! version 6, recording the engine's capacity and tick count, before
 //! appending, so that an older reader refuses the file instead of
 //! misreading a new record.
 //!
@@ -135,8 +141,8 @@ pub const WAL_HEADER_SIZE: usize = 32;
 /// Size in bytes of one encoded record.
 pub const WAL_RECORD_SIZE: usize = 40;
 /// On-disk format version written by this module. Older logs are
-/// still read; see the [module docs](self#file-format-version-5).
-pub const WAL_FORMAT_VERSION: u32 = 5;
+/// still read; see the [module docs](self#file-format-version-6).
+pub const WAL_FORMAT_VERSION: u32 = 6;
 
 const WAL_MAGIC: [u8; 8] = *b"MEWALOG\0";
 /// Bytes of an encoded record that its checksum always covers.
@@ -472,9 +478,27 @@ fn encode_header(engine_capacity: usize, tick_count: usize) -> [u8; WAL_HEADER_S
     out[..8].copy_from_slice(&WAL_MAGIC);
     out[8..12].copy_from_slice(&WAL_FORMAT_VERSION.to_le_bytes());
     out[12..16].copy_from_slice(&(WAL_RECORD_SIZE as u32).to_le_bytes());
-    out[16..24].copy_from_slice(&(engine_capacity as u64).to_le_bytes());
-    out[24..32].copy_from_slice(&(tick_count as u64).to_le_bytes());
+    out[16..20].copy_from_slice(
+        &u32::try_from(engine_capacity)
+            .expect("engine capacity fits in u32")
+            .to_le_bytes(),
+    );
+    out[20..24].copy_from_slice(
+        &u32::try_from(tick_count)
+            .expect("tick count fits in u32")
+            .to_le_bytes(),
+    );
+    let checksum = header_checksum(&out[..24]);
+    out[24..32].copy_from_slice(&checksum.to_le_bytes());
     out
+}
+
+/// Protects every header field, including the version and engine dimensions.
+fn header_checksum(bytes: &[u8]) -> u64 {
+    let (words, _) = bytes.as_chunks::<8>();
+    words
+        .iter()
+        .fold(0, |acc, word| mix64(acc ^ u64::from_le_bytes(*word)))
 }
 
 /// The header of a log written for `engine`.
@@ -536,14 +560,25 @@ fn validate_header(bytes: &[u8]) -> io::Result<Header> {
             "unexpected WAL record size {record_size}"
         )));
     }
-    let engine_capacity = match read_u64(bytes, 16) {
-        0 => None,
-        capacity => Some(usize::try_from(capacity).map_err(|_| {
-            invalid_data(format!("engine capacity {capacity} does not fit in usize"))
-        })?),
+    let (capacity, ticks) = if version == WAL_FORMAT_VERSION {
+        if read_u64(bytes, 24) != header_checksum(&bytes[..24]) {
+            return Err(invalid_data("WAL header checksum mismatch".into()));
+        }
+        (
+            u64::from(read_u32(bytes, 16)),
+            u64::from(read_u32(bytes, 20)),
+        )
+    } else {
+        (read_u64(bytes, 16), read_u64(bytes, 24))
     };
-    let tick_count = match read_u64(bytes, 24) {
-        0 => DEFAULT_TICKS,
+    let engine_capacity = match capacity {
+        0 if version < WAL_FORMAT_VERSION => None,
+        capacity if (1..u64::from(u32::MAX)).contains(&capacity) => Some(capacity as usize),
+        capacity => return Err(invalid_data(format!("invalid engine capacity {capacity}"))),
+    };
+    let tick_count = match ticks {
+        0 if version < WAL_FORMAT_VERSION => DEFAULT_TICKS,
+        0 => return Err(invalid_data("invalid tick count 0".into())),
         ticks if ticks <= MAX_LADDER_TICKS as u64 => ticks as usize,
         ticks => return Err(invalid_data(format!("invalid tick count {ticks}"))),
     };
@@ -659,7 +694,7 @@ impl WalWriter {
     /// follow a corrupted one. The whole file is read once, with plain I/O,
     /// to find that record. An older log is upgraded to the current
     /// version first, and `engine`'s capacity and tick count recorded in it
-    /// (see the [module docs](self#file-format-version-5)).
+    /// (see the [module docs](self#file-format-version-6)).
     /// While another writer is using the log, this fails with
     /// [`io::ErrorKind::WouldBlock`] before touching it (see
     /// [One writer per log](self#one-writer-per-log)).
@@ -1013,6 +1048,95 @@ mod tests {
         bytes
     }
 
+    /// The old layout used two u64 dimensions and had no header checksum.
+    fn legacy_header(version: u32, capacity: u64, ticks: u64) -> [u8; WAL_HEADER_SIZE] {
+        let mut bytes = [0; WAL_HEADER_SIZE];
+        bytes[..8].copy_from_slice(&WAL_MAGIC);
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
+        bytes[12..16].copy_from_slice(&(WAL_RECORD_SIZE as u32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&capacity.to_le_bytes());
+        bytes[24..32].copy_from_slice(&ticks.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn header_rejects_every_flipped_bit_and_truncation() {
+        let good = encode_header(3, DEFAULT_TICKS);
+        let header = validate_header(&good).unwrap();
+        assert_eq!(header.engine_capacity, Some(3));
+        assert_eq!(header.tick_count, DEFAULT_TICKS);
+        for byte in 0..good.len() {
+            for bit in 0..8 {
+                let mut bad = good;
+                bad[byte] ^= 1 << bit;
+                assert!(
+                    matches!(validate_header(&bad), Err(err) if err.kind() == io::ErrorKind::InvalidData),
+                    "byte {byte}, bit {bit}"
+                );
+            }
+        }
+        for len in 0..good.len() {
+            assert!(validate_header(&good[..len]).is_err(), "length {len}");
+        }
+    }
+
+    #[test]
+    fn header_rejects_impossible_engine_dimensions() {
+        for (capacity, ticks) in [
+            (0, DEFAULT_TICKS),
+            (u32::MAX as usize, DEFAULT_TICKS),
+            (3, 0),
+            (3, MAX_LADDER_TICKS + 1),
+        ] {
+            // Even a correctly checksummed header must describe a possible engine.
+            assert!(validate_header(&encode_header(capacity, ticks)).is_err());
+        }
+        assert!(validate_header(&legacy_header(5, u64::MAX, DEFAULT_TICKS as u64)).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn corrupted_header_is_refused_before_replay_or_append() {
+        let path = TempPath::new("corrupt_header");
+        let engine = Engine::new(3);
+        let records = [
+            WalRecord::new_order(1, Side::Buy, 100, 1, 0).encode(),
+            WalRecord::new_order(2, Side::Buy, 100, 1, 1).encode(),
+        ];
+        let mut good = encode_header(engine.capacity(), engine.tick_count()).to_vec();
+        for record in records {
+            good.extend_from_slice(&record);
+        }
+        for byte in [16, 20] {
+            let mut bad = good.clone();
+            bad[byte] ^= 2; // Capacity 3 -> 1, or a different valid tick count.
+            std::fs::write(&path.0, &bad).unwrap();
+            assert!(matches!(read(&path.0), Err(err) if err.kind() == io::ErrorKind::InvalidData));
+            let mut events = Vec::new();
+            assert!(
+                matches!(replay(&path.0, &mut events), Err(err) if err.kind() == io::ErrorKind::InvalidData)
+            );
+            let mut restored = Engine::new(3);
+            let before = restored.snapshot();
+            assert!(
+                matches!(replay_from(&path.0, &mut restored, 0, &mut events), Err(err) if err.kind() == io::ErrorKind::InvalidData)
+            );
+            assert!(
+                events.is_empty(),
+                "replay emitted events before rejecting the header"
+            );
+            assert_eq!(restored.snapshot(), before);
+            assert!(
+                matches!(WalWriter::open_append(&path.0, &engine, 4), Err(err) if err.kind() == io::ErrorKind::InvalidData)
+            );
+            assert_eq!(
+                std::fs::read(&path.0).unwrap(),
+                bad,
+                "append modified the log"
+            );
+        }
+    }
+
     fn file_len(path: &TempPath) -> usize {
         std::fs::metadata(&path.0).unwrap().len() as usize
     }
@@ -1216,7 +1340,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)]
     fn open_append_upgrades_older_logs() {
-        for old_version in [1u32, 2, 3, 4] {
+        for old_version in 1..WAL_FORMAT_VERSION {
             // Limit orders and cancels for account 0: the records an older
             // log can hold, with every newer byte zero.
             let path = TempPath::new(&format!("v{old_version}"));
@@ -1224,11 +1348,29 @@ mod tests {
                 WalRecord::new_order(1, Side::Buy, 100, 5, 0),
                 WalRecord::cancel(1, 1),
             ];
+            let capacity = if old_version >= 4 {
+                TEST_CAPACITY as u64
+            } else {
+                0
+            };
+            let ticks = if old_version >= 5 {
+                10_000
+            } else {
+                DEFAULT_TICKS
+            };
             let mut bytes = image(&old.iter().map(WalRecord::encode).collect::<Vec<_>>());
-            bytes[8..12].copy_from_slice(&old_version.to_le_bytes());
-            bytes[16..32].fill(0); // older versions could not record these
+            bytes[..WAL_HEADER_SIZE].copy_from_slice(&legacy_header(
+                old_version,
+                capacity,
+                if old_version >= 5 { ticks as u64 } else { 0 },
+            ));
             std::fs::write(&path.0, &bytes).unwrap();
-            assert_eq!(read(&path.0).unwrap().engine_capacity, None);
+            let contents = read(&path.0).unwrap();
+            assert_eq!(
+                contents.engine_capacity,
+                (capacity != 0).then_some(TEST_CAPACITY)
+            );
+            assert_eq!(contents.tick_count, ticks);
             assert_eq!(
                 read_all(&path.0).unwrap(),
                 old,
@@ -1236,7 +1378,9 @@ mod tests {
             );
 
             let new = WalRecord::submit(NewOrder::market(2, Side::Sell, 3).with_account(9), 2);
-            let mut writer = WalWriter::open_append(&path.0, &test_engine(), 4).unwrap();
+            let engine = Engine::with_ticks(TEST_CAPACITY, ticks);
+            let mut writer = WalWriter::open_append(&path.0, &engine, 4).unwrap();
+            assert_eq!(writer.len(), old.len());
             writer.append(new).unwrap();
             writer.finalize().unwrap();
 
@@ -1246,9 +1390,18 @@ mod tests {
                 read(&path.0).unwrap(),
                 WalContents {
                     engine_capacity: Some(TEST_CAPACITY),
-                    tick_count: DEFAULT_TICKS,
+                    tick_count: ticks,
                     records: vec![old[0], old[1], new],
                 }
+            );
+            assert_eq!(file_len(&path), WAL_HEADER_SIZE + 3 * WAL_RECORD_SIZE);
+            // The upgraded file must remain writable and retain its prefix.
+            let mut writer = WalWriter::open_append(&path.0, &engine, 1).unwrap();
+            writer.append(WalRecord::cancel(2, 3)).unwrap();
+            writer.finalize().unwrap();
+            assert_eq!(
+                read_all(&path.0).unwrap(),
+                [old[0], old[1], new, WalRecord::cancel(2, 3)]
             );
         }
     }
@@ -1282,7 +1435,7 @@ mod tests {
 
         // A log that does not know its capacity cannot be replayed blindly.
         let mut bytes = std::fs::read(&path.0).unwrap();
-        bytes[16..24].fill(0);
+        bytes[..WAL_HEADER_SIZE].copy_from_slice(&legacy_header(5, 0, 10_000));
         std::fs::write(&path.0, bytes).unwrap();
         let err = replay(&path.0, &mut |_: Event| {})
             .err()
@@ -1394,7 +1547,7 @@ mod tests {
         );
 
         let mut bytes = image(&[sample(0).encode()]);
-        bytes[8] = 6;
+        bytes[8..12].copy_from_slice(&(WAL_FORMAT_VERSION + 1).to_le_bytes());
         std::fs::write(&path.0, &bytes).unwrap();
         assert!(is_invalid_data(read_all(&path.0)), "future version");
     }
