@@ -260,7 +260,7 @@ let maker_qty       = pool.get(maker_idx).remaining_qty;
 let maker_order_id  = pool.get(maker_idx).order_id;
 let trade_qty       = (*remaining).min(maker_qty);     // the smaller of the two
 
-*trades += 1;                                          // number this trade
+*trades = trades.checked_add(1).expect("trade ids overflow u64"); // number it; never wrap
 sink.emit(Event::Trade { trade_id: *trades, maker_order_id, taker_order_id,
                          taker_side, price_tick: tick as u32, qty: trade_qty });
 *remaining -= trade_qty;

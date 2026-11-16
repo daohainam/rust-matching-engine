@@ -49,8 +49,13 @@ fn main() -> std::io::Result<()> {
                     qty: 1 + id % 3,
                 }
             };
-            // `push` hands the value back when the queue is full: retry.
+            // `push` hands the value back when the queue is full: retry,
+            // unless the matching thread is gone. Then nothing will ever
+            // make room, so stop instead of spinning forever.
             while let Err(back) = producer.push(cmd) {
+                if producer.is_disconnected() {
+                    return;
+                }
                 cmd = back;
                 std::hint::spin_loop();
             }

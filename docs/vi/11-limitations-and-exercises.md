@@ -258,7 +258,9 @@ tệp nhật ký mới ở mỗi checkpoint, để các tệp cũ có thể đư
 ý: đặt tên mỗi nhật ký theo số thứ tự đầu tiên mà nó chứa, ví dụ
 `wal-00000000000000005001.log`; khi một checkpoint được ghi với `next_sequence` là
 N, hãy hoàn tất nhật ký hiện tại bằng `finalize` và `create` `wal-N`. Quá trình phục hồi đọc checkpoint
-mới nhất rồi dùng `replay_from` để phát lại các nhật ký tiếp theo. Chỉ xóa nhật ký khi hệ
+mới nhất rồi dùng `replay_from` để phát lại các nhật ký tiếp theo: truyền
+`next_sequence` của checkpoint cho nhật ký đầu tiên, và cho mỗi nhật ký sau đó số
+thứ tự mà nó phải nối tiếp, vì `replay_from` từ chối một nhật ký không khớp (9.8). Chỉ xóa nhật ký khi hệ
 thống nhận sự kiện đã nhận đủ mọi sự kiện do nhật ký đó tạo ra (9.5).*
 
 **Hoàn thành khi:** một kiểm thử ghi ba checkpoint, mô phỏng sự cố bằng cách hủy (drop) mọi thành phần rồi phục hồi
@@ -449,6 +451,10 @@ git log --oneline --grep "detect double frees"   # then: git show <hash>
 | `wal.rs` | Trình đọc ánh xạ nhật ký lần thứ hai, và việc này có thể tranh chấp với một bộ ghi đang chạy. | `fix(wal): read logs with plain file I/O` | [9.3](09-write-ahead-log.md#93-tệp-ánh-xạ-bộ-nhớ-trong-một-phút) |
 | `ringbuffer.rs` | Consumer không phân biệt được một producer đã kết thúc với một producer chậm, nên quay vòng chờ mãi. | `feat(ringbuffer): detect a dropped producer or consumer` | [8.5](08-ring-buffer.md#phân-biệt-chưa-có-gì-với-sẽ-không-bao-giờ-có-gì-nữa) |
 | docs | README và các chương mô tả một API cũ, và không có gì phát hiện ra điều đó. | `docs(readme): fix the examples for the current API and compile them` (README doctest), `docs(ch08): move the complete program into examples/pipeline.rs` (`tests/docs_sync.rs`) | [10.7](10-testing-and-performance.md#107-tích-hợp-liên-tục-ci) |
+| `wal.rs` | `replay_from` tin tưởng hoàn toàn vào sequence. Một checkpoint được ghi trước khi nhật ký được flush có thể còn lại sau một lần mất điện, trong khi phần cuối nhật ký thì mất; khi đó `replay_from` không áp dụng gì, trả về `Ok(0)`, và nhật ký tiếp tục với một khoảng trống bên trong. Các sequence bị thiếu hoặc bị lặp cũng bị bỏ qua hay áp dụng mà không có cảnh báo. | `fix!: harden checkpoint recovery and release-build checks` (và `examples/checkpoint.rs` nay flush nhật ký trước) | [9.8](09-write-ahead-log.md#98-checkpoint-phát-lại-ít-hơn) |
+| `bitset.rs` | `set`, `clear` và `test` chỉ kiểm tra tick bằng `debug_assert!`. Ở bản release, một tick nằm ngoài thang giá rơi vào một word tóm tắt, nên sau đó `lowest`/`highest` trả về những tick không tồn tại. Bộ khớp lệnh luôn kiểm tra giá trước, nhưng `bitset` là một module công khai. | `fix!: harden checkpoint recovery and release-build checks` | [4.6](04-price-ladder-bitset.md#46-vì-sao-là-4096-tick-và-làm-sao-để-có-nhiều-hơn) |
+| `engine.rs` | Bộ đếm giao dịch được tăng mà không kiểm tra, nên một bộ đếm được khôi phục gần `u64::MAX` sẽ quay về 0 ở bản release và dùng lại ID giao dịch. | `fix!: harden checkpoint recovery and release-build checks` | [6.3](06-matching-algorithm.md#63-match_incoming-phần-cốt-lõi-của-bộ-khớp-lệnh) |
+| `examples/pipeline.rs` | Gateway thử lại mãi trên một hàng đợi đã đầy, kể cả sau khi luồng khớp lệnh đã dừng. | `fix!: harden checkpoint recovery and release-build checks` | [9.7](09-write-ahead-log.md#97-ghép-tất-cả-lại) |
 
 ## 11.4 Đọc thêm
 
