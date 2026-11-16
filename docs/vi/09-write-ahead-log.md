@@ -544,8 +544,13 @@ fn main() -> std::io::Result<()> {
                     qty: 1 + id % 3,
                 }
             };
-            // `push` hands the value back when the queue is full: retry.
+            // `push` hands the value back when the queue is full: retry,
+            // unless the matching thread is gone. Then nothing will ever
+            // make room, so stop instead of spinning forever.
             while let Err(back) = producer.push(cmd) {
+                if producer.is_disconnected() {
+                    return;
+                }
                 cmd = back;
                 std::hint::spin_loop();
             }
@@ -618,7 +623,10 @@ Chương trình này minh họa:
 - **Dừng có kiểm soát (clean shutdown):** khi luồng gateway kết thúc, `Producer` của
   nó bị hủy (drop). Vòng lặp khớp lệnh dừng nhờ `is_disconnected()` sau khi hàng đợi đã
   được rút cạn. Nếu gateway panic thì điều tương tự xảy ra; `join` báo lại panic
-  đó nên chương trình không bị treo.
+  đó nên chương trình không bị treo. Chiều ngược lại cũng vậy: nếu vòng lặp khớp
+  lệnh dừng sớm (một lỗi `append` khiến `main` trả về), `Consumer` của nó bị hủy,
+  và vòng lặp thử lại của gateway thấy `is_disconnected()` nên dừng lại thay vì
+  quay vòng mãi trên một hàng đợi đã đầy.
 - **Thứ tự:** thao tác ghi vào WAL diễn ra *trước* lời gọi bộ khớp lệnh.
 - **Dùng chung logic xử lý:** cả lần xử lý thực tế lẫn lần phát lại đều đi qua
   `WalRecord::apply_to`, nên chúng không thể lệch nhau.
@@ -675,7 +683,24 @@ replay_from(&log_path, &mut engine, checkpoint.next_sequence, &mut events)?;
 `replay_from` bỏ qua toàn bộ bản ghi đứng trước `next_sequence` (snapshot đã ghi nhận kết quả
 của các yêu cầu này), áp dụng phần còn lại bằng `apply_to` và từ chối bộ khớp lệnh có
 dung lượng hoặc số tick khác với nhật ký. Cách này dựa trên việc sequence tăng đúng
-một đơn vị sau mỗi bản ghi, như trong các chương trình của chương này.
+một đơn vị sau mỗi bản ghi, như trong các chương trình của chương này, nên
+`replay_from` kiểm tra điều đó trước khi áp dụng bất cứ bản ghi nào, và báo lỗi
+`InvalidData` nếu nhật ký không thể nối tiếp checkpoint một cách chính xác:
+
+- hai bản ghi liên tiếp có sequence không tăng đúng một đơn vị (bị thiếu, bị lặp,
+  hoặc một lần khởi động lại đánh số lại từ 0);
+- nhật ký bắt đầu *sau* `next_sequence`: các yêu cầu ở giữa đã bị mất;
+- nhật ký kết thúc *trước* `next_sequence - 1`: checkpoint đi trước nhật ký.
+
+Trường hợp cuối là khó nhận ra nhất. `write_checkpoint` đồng bộ checkpoint xuống
+đĩa, nhưng các bản ghi nhật ký mà nó bao gồm có thể vẫn chỉ nằm trong vùng ánh xạ
+bộ nhớ. Sau khi mất điện, checkpoint còn nhưng phần cuối nhật ký thì mất. Lần phục
+hồi đó vẫn dựng đúng sổ lệnh, nhưng mọi yêu cầu được ghi tiếp theo sẽ nằm sau một
+khoảng trống, và lần phục hồi sau sẽ bỏ qua chúng hoặc dựng ra một sổ lệnh khác.
+Vì vậy quy tắc là: **flush nhật ký trước khi ghi checkpoint**, để checkpoint không
+bao giờ bền vững hơn nhật ký mà nó nối tiếp. `examples/checkpoint.rs` làm đúng như
+vậy. Nhật ký rỗng vẫn được chấp nhận, vì đó chính là nội dung của một nhật ký vừa
+được tạo tại một checkpoint (bài tập 16).
 
 Tệp checkpoint được ghi **nguyên tử** (atomic), vì checkpoint ghi dở còn tệ hơn
 không có checkpoint: `write_checkpoint` tạo tệp riêng `path.tmp.<pid>.<id>`,

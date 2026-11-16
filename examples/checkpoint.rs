@@ -48,6 +48,11 @@ fn main() -> std::io::Result<()> {
         wal.append(record)?; // write-ahead: log first...
         record.apply_to(&mut engine, &mut ignore); // ...then apply
         if sequence == N / 2 {
+            // A checkpoint must never be more durable than the log it
+            // continues: flush the records it includes first. Otherwise a
+            // power loss could keep the checkpoint but lose the end of the
+            // log, and the log would go on with a hole in it.
+            wal.flush()?;
             // The snapshot includes every request up to this one, so
             // recovery must replay from the next.
             let checkpoint = Checkpoint {

@@ -534,8 +534,13 @@ fn main() -> std::io::Result<()> {
                     qty: 1 + id % 3,
                 }
             };
-            // `push` hands the value back when the queue is full: retry.
+            // `push` hands the value back when the queue is full: retry,
+            // unless the matching thread is gone. Then nothing will ever
+            // make room, so stop instead of spinning forever.
             while let Err(back) = producer.push(cmd) {
+                if producer.is_disconnected() {
+                    return;
+                }
                 cmd = back;
                 std::hint::spin_loop();
             }
@@ -607,7 +612,10 @@ What it demonstrates:
 - **Clean shutdown:** when the gateway thread ends, its `Producer` is dropped, and
   the matching loop stops on `is_disconnected()` once the queue is drained. If the
   gateway panicked, the same thing happens and `join` reports the panic, so
-  nothing hangs.
+  nothing hangs. It works the other way round too: if the matching loop stops
+  early (an `append` error returns from `main`), its `Consumer` is dropped, and
+  the gateway's retry loop sees `is_disconnected()` and stops instead of
+  spinning forever on a full queue.
 - **Ordering:** the WAL append happens *before* the engine call.
 - **One code path:** the live run and the replay both go through
   `WalRecord::apply_to`, so they cannot drift apart.
@@ -664,7 +672,25 @@ replay_from(&log_path, &mut engine, checkpoint.next_sequence, &mut events)?;
 `replay_from` skips every record before `next_sequence` (the snapshot holds their
 effect already), applies the rest with `apply_to`, and refuses an engine whose
 capacity or tick count differs from the log's. This relies on the sequence numbers growing by
-one per record, as the programs in this chapter number them.
+one per record, as the programs in this chapter number them, so `replay_from`
+checks that before it applies anything, and fails with `InvalidData` if the log
+cannot continue the checkpoint exactly:
+
+- two records whose sequence numbers do not count up by one (a gap, a repeat, or
+  a restart that numbered from 0 again);
+- a log that starts *after* `next_sequence`: the requests in between are missing;
+- a log that ends *before* `next_sequence - 1`: the checkpoint is ahead of the
+  log.
+
+The last one is the subtle one. `write_checkpoint` syncs the checkpoint to disk,
+but the log records it includes may still be only in the memory map. After a
+power loss the checkpoint survives and the end of the log does not. Recovery
+would then restore the right book, but every request logged next would follow a
+hole, and the next recovery would skip them or replay a different book. So the
+rule is: **flush the log before writing a checkpoint**, so that a checkpoint is
+never more durable than the log it continues. `examples/checkpoint.rs` does
+exactly that. An empty log is accepted, because that is what a log started right
+at a checkpoint holds (exercise 16).
 
 The checkpoint file is written **atomically**, because a half-written checkpoint
 would be worse than none: `write_checkpoint` creates a unique

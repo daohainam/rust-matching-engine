@@ -873,13 +873,64 @@ pub struct WalContents {
 /// cannot race a writer that is appending to the same file: at worst it ends
 /// in a half-written record, which fails its checksum and ends the log.
 pub fn read<P: AsRef<Path>>(path: P) -> io::Result<WalContents> {
-    let bytes = std::fs::read(path)?;
-    let header = validate_header(&bytes)?;
+    let (header, bytes) = load(path.as_ref())?;
     Ok(WalContents {
         engine_capacity: header.engine_capacity,
         tick_count: header.tick_count,
         records: valid_records(&bytes[WAL_HEADER_SIZE..]).collect(),
     })
+}
+
+/// Reads a whole log and checks its header. The records stay encoded, so
+/// a replay can decode them one at a time instead of holding the log in
+/// memory twice.
+fn load(path: &Path) -> io::Result<(Header, Vec<u8>)> {
+    let bytes = std::fs::read(path)?;
+    let header = validate_header(&bytes)?;
+    Ok((header, bytes))
+}
+
+/// Checks that `records` can bring a checkpoint taken just before
+/// `first_sequence` exactly to the end of the log: their sequence numbers
+/// count up by one, the first is not after `first_sequence`, and the last
+/// is not before `first_sequence - 1`. An empty log passes: it holds
+/// nothing to check, as a log started right at a checkpoint.
+fn check_continuity(
+    records: impl Iterator<Item = WalRecord>,
+    first_sequence: u64,
+) -> io::Result<()> {
+    let mut previous: Option<u64> = None;
+    for record in records {
+        let sequence = record.sequence;
+        match previous {
+            None if sequence > first_sequence => {
+                return Err(invalid_data(format!(
+                    "the log starts at sequence {sequence}, after the checkpoint's \
+                     next sequence {first_sequence}: the requests in between are missing"
+                )));
+            }
+            Some(previous) if previous.checked_add(1) != Some(sequence) => {
+                return Err(invalid_data(format!(
+                    "sequence {sequence} follows {previous} in the log: \
+                     sequence numbers must count up by one"
+                )));
+            }
+            _ => {}
+        }
+        previous = Some(sequence);
+    }
+    let ends_before_checkpoint = |last: u64| {
+        last.checked_add(1)
+            .is_some_and(|next| next < first_sequence)
+    };
+    match previous {
+        Some(last) if ends_before_checkpoint(last) => Err(invalid_data(format!(
+            "the log ends at sequence {last}, but the checkpoint's next sequence is \
+                 {first_sequence}: the log lost requests the checkpoint includes \
+                 (flush the log before writing a checkpoint)"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// Rebuilds an engine from a WAL file alone: creates an
@@ -895,13 +946,16 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<WalContents> {
 /// capacity (an older log that nothing has continued yet); [`read`] it and
 /// replay into an engine you build instead. Allocates (it reads the file
 /// into memory), so it belongs in recovery, not on the hot path.
+///
+/// The sequence numbers are not checked: a log replayed from its start
+/// needs none of them. [`replay_from`] does check them.
 pub fn replay<P, S>(path: P, sink: &mut S) -> io::Result<Engine>
 where
     P: AsRef<Path>,
     S: EventSink + ?Sized,
 {
-    let contents = read(path)?;
-    let capacity = contents.engine_capacity.ok_or_else(|| {
+    let (header, bytes) = load(path.as_ref())?;
+    let capacity = header.engine_capacity.ok_or_else(|| {
         invalid_data("the log does not record the engine capacity it was written for".into())
     })?;
     if capacity >= u32::MAX as usize {
@@ -909,8 +963,8 @@ where
             "engine capacity {capacity} is too large for an engine"
         )));
     }
-    let mut engine = Engine::with_ticks(capacity, contents.tick_count);
-    for record in &contents.records {
+    let mut engine = Engine::with_ticks(capacity, header.tick_count);
+    for record in valid_records(&bytes[WAL_HEADER_SIZE..]) {
         record.apply_to(&mut engine, sink);
     }
     Ok(engine)
@@ -923,10 +977,24 @@ where
 ///
 /// Pass the checkpoint's [`next_sequence`](crate::Checkpoint::next_sequence):
 /// the records before it are already in the snapshot. That relies on the
-/// sequence numbers growing with every record, as they do when requests
-/// are numbered 0, 1, 2, ... (chapter 9). Fails with
-/// [`io::ErrorKind::InvalidInput`], before applying anything, if the log
-/// records a capacity or tick count other than the engine's.
+/// sequence numbers counting up by one with every record, as they do when
+/// requests are numbered 0, 1, 2, ... (chapter 9), so this checks it.
+///
+/// Before applying anything, it fails:
+///
+/// - with [`io::ErrorKind::InvalidInput`] if the log records a capacity or
+///   tick count other than the engine's;
+/// - with [`io::ErrorKind::InvalidData`] if the log cannot continue the
+///   checkpoint exactly: two records whose sequence numbers do not count up
+///   by one (a gap, a repeat, a renumbered restart), a log that starts after
+///   `first_sequence` (requests are missing), or a log that ends before
+///   `first_sequence - 1`. The last one means the checkpoint is ahead of
+///   the log: the log lost requests the checkpoint already includes, as
+///   after a power loss when the log was not flushed before the checkpoint
+///   was written. Carrying on would continue the log with a hole in it.
+///
+/// An empty log is accepted, and applies nothing: it is what a log started
+/// right at a checkpoint holds.
 pub fn replay_from<P, S>(
     path: P,
     engine: &mut Engine,
@@ -937,19 +1005,12 @@ where
     P: AsRef<Path>,
     S: EventSink + ?Sized,
 {
-    let contents = read(path)?;
-    Header {
-        version: WAL_FORMAT_VERSION,
-        engine_capacity: contents.engine_capacity,
-        tick_count: contents.tick_count,
-    }
-    .check_engine(engine)?;
+    let (header, bytes) = load(path.as_ref())?;
+    header.check_engine(engine)?;
+    let records = || valid_records(&bytes[WAL_HEADER_SIZE..]);
+    check_continuity(records(), first_sequence)?;
     let mut applied = 0;
-    for record in contents
-        .records
-        .iter()
-        .filter(|record| record.sequence >= first_sequence)
-    {
+    for record in records().filter(|record| record.sequence >= first_sequence) {
         record.apply_to(engine, sink);
         applied += 1;
     }
@@ -1502,6 +1563,67 @@ mod tests {
             .expect_err("another capacity must be refused");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(wrong_size.live_order_count(), 0, "nothing was applied");
+    }
+
+    /// Writes a log of resting buy orders numbered by `sequences`, replays
+    /// it from `first_sequence` into an empty engine, and returns the
+    /// result, the events and how many orders rest afterwards.
+    fn replay_sequences(
+        name: &str,
+        sequences: &[u64],
+        first_sequence: u64,
+    ) -> (io::Result<usize>, Vec<Event>, usize) {
+        let path = TempPath::new(&format!("continuity_{name}"));
+        let slots: Vec<_> = sequences
+            .iter()
+            .enumerate()
+            .map(|(i, &sequence)| {
+                WalRecord::new_order(i as u64 + 1, Side::Buy, 100, 1, sequence).encode()
+            })
+            .collect();
+        std::fs::write(&path.0, image(&slots)).unwrap();
+        let mut engine = test_engine();
+        let mut events = Vec::new();
+        let result = replay_from(&path.0, &mut engine, first_sequence, &mut events);
+        (result, events, engine.live_order_count())
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn replay_from_refuses_a_log_that_cannot_continue_the_checkpoint() {
+        for (name, sequences, first_sequence) in [
+            // The checkpoint is ahead of the log: the log lost 3 and 4.
+            ("ahead", &[0, 1, 2][..], 5),
+            ("gap", &[0, 1, 3][..], 2),
+            ("repeat", &[0, 1, 1, 2][..], 2),
+            ("renumbered", &[0, 1, 2, 0, 1][..], 3),
+            // Requests 2 and 3 are missing.
+            ("late_start", &[4, 5, 6][..], 2),
+        ] {
+            let (result, events, resting) = replay_sequences(name, sequences, first_sequence);
+            let err = result.expect_err(name);
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{name}");
+            assert!(events.is_empty(), "{name}: events before the refusal");
+            assert_eq!(resting, 0, "{name}: the book changed before the refusal");
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn replay_from_accepts_a_log_that_continues_the_checkpoint_exactly() {
+        for (name, sequences, first_sequence, applied) in [
+            // A log started right at a checkpoint holds nothing yet.
+            ("empty", &[][..], 7, 0),
+            // Nothing was logged after the checkpoint.
+            ("caught_up", &[0, 1, 2][..], 3, 0),
+            ("from_start", &[0, 1, 2][..], 0, 3),
+            ("middle", &[0, 1, 2, 3][..], 2, 2),
+            ("starts_at_checkpoint", &[5, 6][..], 5, 2),
+        ] {
+            let (result, _, resting) = replay_sequences(name, sequences, first_sequence);
+            assert_eq!(result.unwrap(), applied, "{name}");
+            assert_eq!(resting, applied, "{name}");
+        }
     }
 
     #[test]

@@ -236,8 +236,10 @@ checkpoint, so old files can be archived or deleted. *Hint: name each log after
 the first sequence number it holds, for example `wal-00000000000000005001.log`;
 when a checkpoint is written with `next_sequence` N, finalize the current log and
 `create` `wal-N`. Recovery reads the newest checkpoint and replays the logs from
-there on with `replay_from`. Delete a log only once downstream has every event it
-produced (9.5).*
+there on with `replay_from`: pass the checkpoint's `next_sequence` to the first
+log, and to each later one the sequence it should continue from, since
+`replay_from` refuses a log that does not line up (9.8). Delete a log only once
+downstream has every event it produced (9.5).*
 
 **Done when:** a test that writes three checkpoints, crashes (drops everything)
 and recovers reaches the live book while reading only the newest checkpoint and
@@ -416,6 +418,10 @@ git log --oneline --grep "detect double frees"   # then: git show <hash>
 | `wal.rs` | Readers mapped the log a second time, which could race a live writer. | `fix(wal): read logs with plain file I/O` | [9.3](09-write-ahead-log.md#93-memory-mapped-files-in-one-minute) |
 | `ringbuffer.rs` | A consumer could not tell a finished producer from a slow one and spun forever. | `feat(ringbuffer): detect a dropped producer or consumer` | [8.5](08-ring-buffer.md#telling-nothing-yet-from-nothing-ever-again) |
 | docs | The README and chapters described an old API, and nothing noticed. | `docs(readme): fix the examples for the current API and compile them` (README doctest), `docs(ch08): move the complete program into examples/pipeline.rs` (`tests/docs_sync.rs`) | [10.7](10-testing-and-performance.md#107-continuous-integration) |
+| `wal.rs` | `replay_from` trusted the sequence numbers. A checkpoint written before the log was flushed could survive a power loss that the end of the log did not; `replay_from` then applied nothing, returned `Ok(0)`, and the log went on with a hole in it. Gaps and repeats were skipped or applied silently too. | `fix!: harden checkpoint recovery and release-build checks` (and `examples/checkpoint.rs` now flushes the log first) | [9.8](09-write-ahead-log.md#98-checkpoints-replaying-less) |
+| `bitset.rs` | `set`, `clear` and `test` checked the tick only with `debug_assert!`. In a release build a tick past the ladder landed in a summary word, so `lowest`/`highest` later returned ticks that do not exist. The engine always validated first, but `bitset` is a public module. | `fix!: harden checkpoint recovery and release-build checks` | [4.6](04-price-ladder-bitset.md#46-why-4096-ticks-and-how-to-get-more) |
+| `engine.rs` | The trade counter was incremented unchecked, so a counter restored near `u64::MAX` wrapped to 0 in release builds and reused trade ids. | `fix!: harden checkpoint recovery and release-build checks` | [6.3](06-matching-algorithm.md#63-match_incoming-the-heart-of-the-engine) |
+| `examples/pipeline.rs` | The gateway retried a full queue forever, even after the matching thread had stopped. | `fix!: harden checkpoint recovery and release-build checks` | [9.7](09-write-ahead-log.md#97-putting-it-all-together) |
 
 ## 11.4 Further reading
 

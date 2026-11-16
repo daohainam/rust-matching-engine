@@ -92,14 +92,19 @@ impl TickBitset {
         self.top() == 0
     }
 
-    /// Marks `tick` as active. `tick` must be less than [`ticks`](Self::ticks).
+    /// Marks `tick` as active.
     ///
     /// The level-0 bit records the tick itself. Each level above learns that
     /// the word below is no longer empty; the climb stops at the first word
     /// that was not empty already, because the levels above it know.
+    ///
+    /// # Panics
+    /// Panics if `tick` is not less than [`ticks`](Self::ticks). The check
+    /// stays in release builds: level 0 shares one array with the summary
+    /// levels, so an unchecked tick would silently corrupt a summary word.
     #[inline(always)]
     pub fn set(&mut self, tick: usize) {
-        debug_assert!(tick < self.ticks);
+        self.check(tick);
         let mut index = tick;
         for level in 0..self.levels {
             let slot = self.offsets[level] + (index >> 6);
@@ -112,14 +117,18 @@ impl TickBitset {
         }
     }
 
-    /// Marks `tick` as inactive. `tick` must be less than [`ticks`](Self::ticks).
+    /// Marks `tick` as inactive.
     ///
     /// A summary bit is cleared only when the word below it has just become
     /// zero; otherwise it must remain set, so a summary never claims a word
     /// is empty when it is not.
+    ///
+    /// # Panics
+    /// Panics if `tick` is not less than [`ticks`](Self::ticks), as
+    /// [`set`](Self::set) does.
     #[inline(always)]
     pub fn clear(&mut self, tick: usize) {
-        debug_assert!(tick < self.ticks);
+        self.check(tick);
         let mut index = tick;
         for level in 0..self.levels {
             let slot = self.offsets[level] + (index >> 6);
@@ -131,12 +140,27 @@ impl TickBitset {
         }
     }
 
-    /// Returns whether `tick` is active. `tick` must be less than
-    /// [`ticks`](Self::ticks).
+    /// Returns whether `tick` is active.
+    ///
+    /// # Panics
+    /// Panics if `tick` is not less than [`ticks`](Self::ticks): past the
+    /// end of level 0 it would read a summary word instead.
     #[inline(always)]
     pub fn test(&self, tick: usize) -> bool {
-        debug_assert!(tick < self.ticks);
+        self.check(tick);
         (self.words[tick >> 6] >> (tick & 63)) & 1 == 1
+    }
+
+    /// Panics unless `tick` is on the ladder. A real `assert!`, in every
+    /// build profile: one comparison, which never fails for the engine (it
+    /// validates every price first).
+    #[inline(always)]
+    fn check(&self, tick: usize) {
+        assert!(
+            tick < self.ticks,
+            "tick {tick} is outside a ladder of {} ticks",
+            self.ticks
+        );
     }
 
     /// Returns the lowest active tick (used for best-ask lookups), with one
@@ -245,6 +269,28 @@ mod tests {
     #[should_panic(expected = "a price ladder needs")]
     fn a_ladder_too_long_for_four_levels_is_rejected() {
         TickBitset::new(MAX_LADDER_TICKS + 1);
+    }
+
+    // With 100 ticks, level 0 is words 0 and 1 and the summary is word 2.
+    // Tick 130 would land in word 2: without the check, `set` would mark a
+    // level-0 word as non-empty that does not exist, in every build profile.
+
+    #[test]
+    #[should_panic(expected = "tick 130 is outside a ladder of 100 ticks")]
+    fn set_refuses_a_tick_past_the_ladder() {
+        TickBitset::new(100).set(130);
+    }
+
+    #[test]
+    #[should_panic(expected = "tick 100 is outside a ladder of 100 ticks")]
+    fn clear_refuses_a_tick_past_the_ladder() {
+        TickBitset::new(100).clear(100);
+    }
+
+    #[test]
+    #[should_panic(expected = "tick 130 is outside a ladder of 100 ticks")]
+    fn test_refuses_a_tick_past_the_ladder() {
+        TickBitset::new(100).test(130);
     }
 
     #[test]

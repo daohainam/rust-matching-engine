@@ -865,7 +865,10 @@ impl Engine {
                 // A trade can consume the maker, the taker, or both exactly.
                 let trade_qty = (*remaining).min(maker_qty);
 
-                *trades += 1;
+                // Trade ids must never repeat, so overflow stops the engine
+                // instead of wrapping to 0. Only a hand-made snapshot can
+                // come close: 2^64 trades would take centuries.
+                *trades = trades.checked_add(1).expect("trade ids overflow u64");
                 sink.emit(Event::Trade {
                     trade_id: *trades,
                     maker_order_id,
@@ -2319,6 +2322,29 @@ mod tests {
         assert_eq!(engine.best_ask(), None);
         assert!(engine.depth_snapshot(Side::Sell, usize::MAX).is_empty());
         assert_eq!(engine.live_order_count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "trade ids overflow u64")]
+    fn trade_ids_never_wrap_around() {
+        // `restore` takes any counter, so a hand-made snapshot can sit just
+        // below the end. The last id is still handed out; the next trade
+        // must stop the engine rather than reuse id 0.
+        let mut engine = Engine::restore(&Snapshot {
+            trades: u64::MAX - 1,
+            ..Engine::new(16).snapshot()
+        })
+        .unwrap();
+        place(&mut engine, 1, Side::Sell, 100, 2);
+        let events = place(&mut engine, 2, Side::Buy, 100, 1);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Trade {
+                trade_id: u64::MAX,
+                ..
+            }
+        )));
+        place(&mut engine, 3, Side::Buy, 100, 1);
     }
 
     #[test]
